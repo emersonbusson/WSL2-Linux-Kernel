@@ -373,6 +373,6 @@ config BLK_DEV_ZONED_LOOP
 	  See Documentation/admin-guide/blockdev/zoned_loop.rst for usage
 	  details.
 
-	  If unsure, say N.
+source "drivers/block/ramshared/Kconfig"
 
 endif # BLK_DEV
