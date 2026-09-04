@@ -375,4 +375,6 @@ config BLK_DEV_ZONED_LOOP
 
 	  If unsure, say N.
 
+source "drivers/block/ramshared/Kconfig"
+
 endif # BLK_DEV
