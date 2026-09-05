@@ -30,9 +30,11 @@ Key Architectural Highlights
    ``pci_clear_master()`` to safely contain PCIe bus events and link resets.
 
 4. **Checked Arithmetic & Security Guardrails**:
-   - Bounds-checks all sector offsets against physical BAR0 apertures.
-   - Utilizes ``check_shl_overflow()`` to guard against 64-bit integer overflow.
-   - Clamps module parameters within safe limits (``queue_depth`` in [1..4096]).
+   - Bounds-checks all sector offsets and bio lengths against physical BAR0 apertures.
+   - Utilizes ``check_shl_overflow()`` and ``check_mul_overflow()`` to guard against 64-bit integer overflow.
+   - Enforces sector alignment on all bio and request payloads.
+   - Validates PCIe BAR0 ``PAGE_SIZE`` alignment.
+   - Clamps module parameters within safe limits (``queue_depth`` in [16..1024]).
 
 Kernel Configuration
 ====================
@@ -46,7 +48,7 @@ To enable the RamShared driver in WSL2:
 Module Parameters
 =================
 
-- ``queue_depth``: Maximum request queue depth per hardware queue (default: 128, range: 1..4096).
+- ``queue_depth``: Maximum request queue depth per hardware queue (default: 128, range: 16..1024).
 - ``max_sectors``: Maximum number of sectors per I/O request (default: 256).
 
 Testing & Validation
