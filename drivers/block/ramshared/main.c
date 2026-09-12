@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include "ramshared.h"
 
 MODULE_AUTHOR("Emerson Busson");
@@ -44,7 +45,7 @@ static int ramshared_pci_probe(struct pci_dev *pdev,
 
 	if (queue_depth < 16 || queue_depth > 1024) {
 		dev_warn(&pdev->dev,
-			 "clamping queue_depth (%lu) to bounds [16, 1024]\n",
+			 "clamping queue_depth (%u) to bounds [16, 1024]\n",
 			 queue_depth);
 		if (queue_depth < 16)
 			queue_depth = 16;
@@ -99,10 +100,13 @@ static int ramshared_pci_probe(struct pci_dev *pdev,
 	if (ret)
 		goto err_dma_cleanup;
 
-	ret = add_disk(rs_dev->disk);
+	ret = device_add_disk(&pdev->dev, rs_dev->disk, ramshared_attr_groups);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to add block disk (err=%d)\n", ret);
-		goto err_queue_cleanup;
+		put_disk(rs_dev->disk);
+		rs_dev->disk = NULL;
+		blk_mq_free_tag_set(&rs_dev->tag_set);
+		goto err_dma_cleanup;
 	}
 
 	pci_set_drvdata(pdev, rs_dev);
@@ -110,15 +114,12 @@ static int ramshared_pci_probe(struct pci_dev *pdev,
 		 rs_dev->disk->disk_name);
 	return 0;
 
-err_queue_cleanup:
-	ramshared_queue_cleanup(rs_dev);
 err_dma_cleanup:
 	ramshared_dma_cleanup(rs_dev);
 err_release_regions:
 	pci_release_mem_regions(pdev);
 err_clear_master:
 	pci_clear_master(pdev);
-err_disable_pci:
 	pci_disable_device(pdev);
 	return ret;
 }

@@ -15,6 +15,19 @@
 #include "ramshared.h"
 #include "compat.h"
 
+static blk_status_t ramshared_errno_to_blk_status(int err)
+{
+	switch (err) {
+	case -ENOMEM:
+		return BLK_STS_RESOURCE;
+	case -EOPNOTSUPP:
+	case -ENOTSUPP:
+		return BLK_STS_NOTSUPP;
+	default:
+		return BLK_STS_IOERR;
+	}
+}
+
 static blk_status_t ramshared_process_bio(struct ramshared_device *rs_dev,
 					  struct bio *bio, loff_t pos)
 {
@@ -28,7 +41,7 @@ static blk_status_t ramshared_process_bio(struct ramshared_device *rs_dev,
 		dev_err_ratelimited(rs_dev->dev,
 				    "Unaligned bio: pos=%lld, len=%u\n",
 				    pos, bio->bi_iter.bi_size);
-		return BLK_STS_IOERR;
+		return ramshared_errno_to_blk_status(-EINVAL);
 	}
 
 	if (unlikely(pos > rs_dev->dma.size ||
@@ -38,7 +51,7 @@ static blk_status_t ramshared_process_bio(struct ramshared_device *rs_dev,
 				    "Bio bounds violation: pos=%lld, len=%u, cap=%llu\n",
 				    pos, bio->bi_iter.bi_size,
 				    rs_dev->capacity_bytes);
-		return BLK_STS_IOERR;
+		return ramshared_errno_to_blk_status(-ERANGE);
 	}
 
 	vram_ptr = rs_dev->dma.cpu_addr + pos;
@@ -76,17 +89,17 @@ static blk_status_t ramshared_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct bio *bio;
 
 	if (unlikely(!rs_dev || !rs_dev->dma.cpu_addr))
-		return BLK_STS_IOERR;
+		return ramshared_errno_to_blk_status(-EIO);
 
 	if (unlikely(check_shl_overflow((loff_t)blk_rq_pos(rq), RAMSHARED_SECTOR_SHIFT, &pos)))
-		return BLK_STS_IOERR;
+		return ramshared_errno_to_blk_status(-ERANGE);
 
 	if (unlikely(!IS_ALIGNED(pos, RAMSHARED_SECTOR_SIZE) ||
 		     !IS_ALIGNED(len, RAMSHARED_SECTOR_SIZE))) {
 		dev_err_ratelimited(rs_dev->dev,
 				    "Unaligned I/O request: pos=%lld, len=%zu\n",
 				    pos, len);
-		return BLK_STS_IOERR;
+		return ramshared_errno_to_blk_status(-EINVAL);
 	}
 
 	if (unlikely(pos > rs_dev->dma.size ||
@@ -96,7 +109,7 @@ static blk_status_t ramshared_queue_rq(struct blk_mq_hw_ctx *hctx,
 				    "I/O bounds violation: pos=%lld, len=%zu, cap=%llu, mapped=%zu\n",
 				    pos, len, rs_dev->capacity_bytes,
 				    rs_dev->dma.size);
-		return BLK_STS_IOERR;
+		return ramshared_errno_to_blk_status(-ERANGE);
 	}
 
 	blk_mq_start_request(rq);
@@ -134,7 +147,8 @@ static const struct blk_mq_ops ramshared_mq_ops = {
 	.queue_rq = ramshared_queue_rq,
 };
 
-/* Synchronous Zero-Allocation Swap Fast-Path */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+/* Synchronous Zero-Allocation Swap Fast-Path (Linux < 6.12) */
 static int ramshared_bdev_rw_page(struct block_device *bdev, sector_t sector,
 				  struct page *page, enum req_op op)
 {
@@ -175,10 +189,14 @@ static int ramshared_bdev_rw_page(struct block_device *bdev, sector_t sector,
 	page_endio(page, is_write, 0);
 	return 0;
 }
+#endif
 
 static const struct block_device_operations ramshared_fops = {
 	.owner		= THIS_MODULE,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.rw_page	= ramshared_bdev_rw_page,
+#endif
+	.ioctl		= ramshared_ioctl,
 };
 
 /* Sysfs Attributes Group (Race-free via disk_groups) */
@@ -191,6 +209,16 @@ static ssize_t capacity_bytes_show(struct device *dev,
 	return sysfs_emit(buf, "%llu\n", rs_dev->capacity_bytes);
 }
 static DEVICE_ATTR_RO(capacity_bytes);
+
+static ssize_t dma_transfers_total_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct gendisk *disk = dev_to_disk(dev);
+	struct ramshared_device *rs_dev = disk->private_data;
+
+	return sysfs_emit(buf, "%lld\n", atomic64_read(&rs_dev->dma_transfers_total));
+}
+static DEVICE_ATTR_RO(dma_transfers_total);
 
 static ssize_t read_bytes_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
@@ -225,7 +253,7 @@ static const struct attribute_group ramshared_attr_group = {
 	.attrs = ramshared_attrs,
 };
 
-static const struct attribute_group *ramshared_attr_groups[] = {
+const struct attribute_group *ramshared_attr_groups[] = {
 	&ramshared_attr_group,
 	NULL,
 };
@@ -246,7 +274,11 @@ int ramshared_queue_init(struct ramshared_device *rs_dev,
 	rs_dev->tag_set.nr_hw_queues = num_online_cpus();
 	rs_dev->tag_set.queue_depth = valid_depth;
 	rs_dev->tag_set.numa_node = NUMA_NO_NODE;
+#ifdef BLK_MQ_F_SHOULD_MERGE
 	rs_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+#else
+	rs_dev->tag_set.flags = 0;
+#endif
 
 	ret = blk_mq_alloc_tag_set(&rs_dev->tag_set);
 	if (ret)
@@ -266,12 +298,10 @@ int ramshared_queue_init(struct ramshared_device *rs_dev,
 	/* Setup gendisk descriptor */
 	rs_dev->disk->major = 0;
 	rs_dev->disk->first_minor = 0;
-	rs_dev->disk->minors = 1;
+	rs_dev->disk->minors = 0;
 	rs_dev->disk->fops = &ramshared_fops;
 	rs_dev->disk->private_data = rs_dev;
-	rs_dev->disk->disk_groups = ramshared_attr_groups;
 	rs_dev->disk->flags |= GENHD_FL_NO_PART;
-	rs_dev->disk->parent = parent_dev;
 	snprintf(rs_dev->disk->disk_name, DISK_NAME_LEN, "ramshared0");
 	set_capacity(rs_dev->disk, rs_dev->capacity_bytes >> RAMSHARED_SECTOR_SHIFT);
 
@@ -289,5 +319,8 @@ void ramshared_queue_cleanup(struct ramshared_device *rs_dev)
 		rs_dev->disk = NULL;
 	}
 
-	blk_mq_free_tag_set(&rs_dev->tag_set);
+	if (rs_dev->tag_set.tags) {
+		blk_mq_free_tag_set(&rs_dev->tag_set);
+		memset(&rs_dev->tag_set, 0, sizeof(rs_dev->tag_set));
+	}
 }

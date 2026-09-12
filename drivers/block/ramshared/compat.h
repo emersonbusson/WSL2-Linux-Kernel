@@ -102,4 +102,24 @@ static inline struct gendisk *ramshared_alloc_disk(struct blk_mq_tag_set *set,
 #endif
 }
 
+/**
+ * ramshared_set_capacity - Set gendisk capacity across all kernel versions
+ * @disk: Pointer to gendisk
+ * @sectors: Disk capacity in sectors
+ */
+static inline void ramshared_set_capacity(struct gendisk *disk, sector_t sectors)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	set_capacity_and_notify(disk, sectors);
+#else
+	set_capacity(disk, sectors);
+#endif
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+typedef blk_mode_t ramshared_blk_mode_t;
+#else
+typedef fmode_t ramshared_blk_mode_t;
+#endif
+
 #endif /* _RAMSHARED_COMPAT_H */

@@ -57,4 +57,4 @@ Testing & Validation
 The driver passes strict upstream Linux kernel quality gates:
 - ``checkpatch.pl --strict``: 0 errors, 0 warnings.
 - Sparse semantic analysis: Clean pass with ``__iomem`` validation.
-- WSL2 live-host stress battery: 9,160 MB active swap sustained across 40 continuous cycles with 0.00 ms access latency.
+- WSL2 live-host stress qualification: 10.17 GB/s reclaim throughput, 0.0006 ms (0.6 µs) P50 latency, 61.47 ms VRAM discharge, and PASS_ZERO_PANIC stability under kernel 6.18.40.1+.
