@@ -155,7 +155,9 @@ void vmbus_free_ring(struct vmbus_channel *channel)
 	hv_ringbuffer_cleanup(&channel->inbound);
 
 	if (channel->ringbuffer_is_vmalloc && channel->ringbuffer_page_virt) {
-		vfree(channel->ringbuffer_page_virt);
+		/* In a CoCo VM leak the memory if it didn't get re-encrypted */
+		if (!channel->ringbuffer_gpadlhandle.decrypted)
+			vfree(channel->ringbuffer_page_virt);
 		channel->ringbuffer_page_virt = NULL;
 		channel->ringbuffer_is_vmalloc = false;
 	} else if (channel->ringbuffer_page) {

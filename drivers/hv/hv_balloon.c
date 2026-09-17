@@ -1198,8 +1198,6 @@ static void free_balloon_pages(struct hv_dynmem_device *dm,
 	}
 }
 
-extern int min_free_kbytes;
-
 static unsigned int alloc_balloon_pages(struct hv_dynmem_device *dm,
 					unsigned int num_pages,
 					struct dm_balloon_response *bl_resp,
@@ -1211,8 +1209,10 @@ static unsigned int alloc_balloon_pages(struct hv_dynmem_device *dm,
 	/*
 	 * Defer balloon inflation if guest is in critical reclaim zone.
 	 * Competing with kswapd under pressure starves VMBus channels.
+	 * Evaluates against 3.125% of total system RAM to avoid forbidden
+	 * out-of-core extern mutations while maintaining memory headroom.
 	 */
-	if (si_mem_available() < (min_free_kbytes * 2)) {
+	if (si_mem_available() < (totalram_pages() / 32)) {
 		pr_warn_ratelimited("hv_balloon: balloon inflation deferred; guest memory constrained\n");
 		return 0;
 	}
