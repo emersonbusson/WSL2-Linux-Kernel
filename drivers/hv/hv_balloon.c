@@ -26,6 +26,7 @@
 #include <linux/percpu_counter.h>
 #include <linux/page_reporting.h>
 #include <linux/sizes.h>
+#include <linux/mm.h>
 
 #include <linux/hyperv.h>
 #include <hyperv/hvhdk.h>
@@ -1204,6 +1205,17 @@ static unsigned int alloc_balloon_pages(struct hv_dynmem_device *dm,
 {
 	unsigned int i, j;
 	struct page *pg;
+
+	/*
+	 * Defer balloon inflation if guest is in critical reclaim zone.
+	 * Competing with kswapd under pressure starves VMBus channels.
+	 * Evaluates against 3.125% of total system RAM to avoid forbidden
+	 * out-of-core extern mutations while maintaining memory headroom.
+	 */
+	if (si_mem_available() < (totalram_pages() / 32)) {
+		pr_warn_ratelimited("hv_balloon: balloon inflation deferred; guest memory constrained\n");
+		return 0;
+	}
 
 	for (i = 0; i < num_pages / alloc_unit; i++) {
 		if (bl_resp->hdr.size + sizeof(union dm_mem_page_range) >

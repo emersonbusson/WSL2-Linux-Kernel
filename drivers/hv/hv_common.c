@@ -28,6 +28,8 @@
 #include <linux/slab.h>
 #include <linux/dma-map-ops.h>
 #include <linux/set_memory.h>
+#include <linux/mm.h>
+#include <linux/init.h>
 #include <hyperv/hvhdk.h>
 #include <asm/mshyperv.h>
 
@@ -396,6 +398,36 @@ int __init hv_common_init(void)
 
 	return 0;
 }
+
+extern int min_free_kbytes;
+extern void setup_per_zone_wmarks(void);
+
+/*
+ * Ensure sufficient atomic page headroom for Hyper-V synthetic devices
+ * (vmbus, netvsc, balloon) to prevent host watchdog timeouts under pressure.
+ */
+static int __init ms_hyperv_init_memory_headroom(void)
+{
+	unsigned long total_ram_kb;
+	unsigned long min_headroom_kb;
+
+	if (!hv_is_hyperv_initialized())
+		return 0;
+
+	total_ram_kb = totalram_pages() * (PAGE_SIZE / 1024);
+	/* Scale headroom: 3.125% of RAM, clamped between 64MB and 512MB */
+	min_headroom_kb = clamp_t(unsigned long, total_ram_kb / 32, 64 * 1024, 512 * 1024);
+
+	if (min_free_kbytes < min_headroom_kb) {
+		pr_info("Hyper-V: Calibrating min_free_kbytes from %d kB to %lu kB for VMBus resilience\n",
+			min_free_kbytes, min_headroom_kb);
+		min_free_kbytes = min_headroom_kb;
+		setup_per_zone_wmarks();
+	}
+
+	return 0;
+}
+late_initcall(ms_hyperv_init_memory_headroom);
 
 void __init ms_hyperv_late_init(void)
 {
