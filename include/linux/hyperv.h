@@ -807,6 +807,8 @@ struct vmbus_channel {
 
 	/* Allocated memory for ring buffer */
 	struct page *ringbuffer_page;
+	void *ringbuffer_page_virt;
+	bool ringbuffer_is_vmalloc;
 	u32 ringbuffer_pagecount;
 	u32 ringbuffer_send_offset;
 	struct hv_ring_buffer_info outbound;	/* send to parent */

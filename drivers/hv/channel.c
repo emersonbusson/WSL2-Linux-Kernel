@@ -12,6 +12,7 @@
 #include <linux/sched.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
+#include <linux/vmalloc.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/hyperv.h>
@@ -153,13 +154,20 @@ void vmbus_free_ring(struct vmbus_channel *channel)
 	hv_ringbuffer_cleanup(&channel->outbound);
 	hv_ringbuffer_cleanup(&channel->inbound);
 
-	if (channel->ringbuffer_page) {
+	if (channel->ringbuffer_is_vmalloc && channel->ringbuffer_page_virt) {
+		/* In a CoCo VM leak the memory if it didn't get re-encrypted */
+		if (!channel->ringbuffer_gpadlhandle.decrypted)
+			vfree(channel->ringbuffer_page_virt);
+		channel->ringbuffer_page_virt = NULL;
+		channel->ringbuffer_is_vmalloc = false;
+	} else if (channel->ringbuffer_page) {
 		/* In a CoCo VM leak the memory if it didn't get re-encrypted */
 		if (!channel->ringbuffer_gpadlhandle.decrypted)
 			__free_pages(channel->ringbuffer_page,
 			     get_order(channel->ringbuffer_pagecount
 				       << PAGE_SHIFT));
 		channel->ringbuffer_page = NULL;
+		channel->ringbuffer_page_virt = NULL;
 	}
 }
 EXPORT_SYMBOL_GPL(vmbus_free_ring);
@@ -182,10 +190,26 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
 	if (!page)
 		page = alloc_pages(GFP_KERNEL|__GFP_ZERO, order);
 
-	if (!page)
-		return -ENOMEM;
+	if (!page) {
+		/* Fallback to virtual memory allocation under buddy fragmentation */
+		void *virt_addr = vzalloc_node(send_size + recv_size,
+					       cpu_to_node(newchannel->target_cpu));
 
-	newchannel->ringbuffer_page = page;
+		if (!virt_addr)
+			virt_addr = vzalloc(send_size + recv_size);
+
+		if (!virt_addr)
+			return -ENOMEM;
+
+		newchannel->ringbuffer_page = NULL;
+		newchannel->ringbuffer_page_virt = virt_addr;
+		newchannel->ringbuffer_is_vmalloc = true;
+	} else {
+		newchannel->ringbuffer_page = page;
+		newchannel->ringbuffer_page_virt = page_address(page);
+		newchannel->ringbuffer_is_vmalloc = false;
+	}
+
 	newchannel->ringbuffer_pagecount = (send_size + recv_size) >> PAGE_SHIFT;
 	newchannel->ringbuffer_send_offset = send_size >> PAGE_SHIFT;
 
@@ -639,6 +663,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 	struct vmbus_channel_open_channel *open_msg;
 	struct vmbus_channel_msginfo *open_info = NULL;
 	struct page *page = newchannel->ringbuffer_page;
+	void *inbound_virt = NULL;
 	u32 send_pages, recv_pages;
 	unsigned long flags;
 	int err;
@@ -669,6 +694,8 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 	newchannel->ringbuffer_gpadlhandle.gpadl_handle = 0;
 
 	err = __vmbus_establish_gpadl(newchannel, HV_GPADL_RING,
+				      newchannel->ringbuffer_page_virt ?
+				      newchannel->ringbuffer_page_virt :
 				      page_address(newchannel->ringbuffer_page),
 				      (send_pages + recv_pages) << PAGE_SHIFT,
 				      newchannel->ringbuffer_send_offset << PAGE_SHIFT,
@@ -677,11 +704,18 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 		goto error_clean_ring;
 
 	err = hv_ringbuffer_init(&newchannel->outbound,
-				 page, send_pages, 0);
+				 page, newchannel->ringbuffer_page_virt,
+				 send_pages, 0);
 	if (err)
 		goto error_free_gpadl;
 
-	err = hv_ringbuffer_init(&newchannel->inbound, &page[send_pages],
+	if (newchannel->ringbuffer_page_virt)
+		inbound_virt = newchannel->ringbuffer_page_virt +
+			       (send_pages << PAGE_SHIFT);
+
+	err = hv_ringbuffer_init(&newchannel->inbound,
+				 page ? &page[send_pages] : NULL,
+				 inbound_virt,
 				 recv_pages, newchannel->max_pkt_size);
 	if (err)
 		goto error_free_gpadl;
