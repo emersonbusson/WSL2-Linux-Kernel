@@ -663,6 +663,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 	struct vmbus_channel_open_channel *open_msg;
 	struct vmbus_channel_msginfo *open_info = NULL;
 	struct page *page = newchannel->ringbuffer_page;
+	void *inbound_virt = NULL;
 	u32 send_pages, recv_pages;
 	unsigned long flags;
 	int err;
@@ -708,9 +709,13 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 	if (err)
 		goto error_free_gpadl;
 
+	if (newchannel->ringbuffer_page_virt)
+		inbound_virt = newchannel->ringbuffer_page_virt +
+			       (send_pages << PAGE_SHIFT);
+
 	err = hv_ringbuffer_init(&newchannel->inbound,
 				 page ? &page[send_pages] : NULL,
-				 newchannel->ringbuffer_page_virt ? (newchannel->ringbuffer_page_virt + (send_pages << PAGE_SHIFT)) : NULL,
+				 inbound_virt,
 				 recv_pages, newchannel->max_pkt_size);
 	if (err)
 		goto error_free_gpadl;
