@@ -782,6 +782,16 @@ struct vmbus_gpadl {
 	u32 size;
 	void *buffer;
 	bool decrypted;
+	bool leak;
+};
+
+struct vmbus_buffer {
+	void *addr;
+	struct page **chunks;
+	struct page **pages;
+	u32 chunk_cnt;
+	struct vmbus_gpadl gpadl;
+	bool leak;
 };
 
 struct vmbus_channel {
@@ -803,12 +813,8 @@ struct vmbus_channel {
 	bool rescind_ref; /* got rescind msg, got channel reference */
 	struct completion rescind_event;
 
-	struct vmbus_gpadl ringbuffer_gpadlhandle;
-
 	/* Allocated memory for ring buffer */
-	struct page *ringbuffer_page;
-	void *ringbuffer_page_virt;
-	bool ringbuffer_is_vmalloc;
+	struct vmbus_buffer ringbuffer;
 	u32 ringbuffer_pagecount;
 	u32 ringbuffer_send_offset;
 	struct hv_ring_buffer_info outbound;	/* send to parent */
@@ -1207,8 +1213,23 @@ extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
 				      u32 size,
 				      struct vmbus_gpadl *gpadl);
 
+extern int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
+						  void *kbuffer,
+						  u32 size,
+						  bool *leak,
+						  struct vmbus_gpadl *gpadl);
+
 extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
 				     struct vmbus_gpadl *gpadl);
+
+extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+				u32 size,
+				bool confidential,
+				struct page ***chunks_out,
+				u32 *chunk_cnt_out);
+
+extern void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt);
+void vmbus_release_buffer(struct vmbus_buffer *buffer);
 
 void vmbus_reset_channel_cb(struct vmbus_channel *channel);
 

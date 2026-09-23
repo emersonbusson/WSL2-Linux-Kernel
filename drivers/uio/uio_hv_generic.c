@@ -156,13 +156,16 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
 static int
 hv_uio_ring_mmap(struct vmbus_channel *channel, struct vm_area_struct *vma)
 {
-	void *ring_buffer = page_address(channel->ringbuffer_page);
+	unsigned long pages = vma_pages(vma);
+	pgoff_t offset = vma->vm_pgoff;
 
 	if (channel->state != CHANNEL_OPENED_STATE)
 		return -ENODEV;
+	if (offset >= channel->ringbuffer_pagecount ||
+	    pages > channel->ringbuffer_pagecount - offset)
+		return -EINVAL;
 
-	return vm_iomap_memory(vma, virt_to_phys(ring_buffer),
-			       channel->ringbuffer_pagecount << PAGE_SHIFT);
+	return vm_map_pages(vma, channel->ringbuffer.pages + offset, pages);
 }
 
 /* Callback from VMBUS subsystem when new channel created. */
@@ -195,14 +198,16 @@ static void
 hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
 {
 	if (pdata->send_gpadl.gpadl_handle) {
-		vmbus_teardown_gpadl(dev->channel, &pdata->send_gpadl);
-		if (!pdata->send_gpadl.decrypted)
+		if (vmbus_teardown_gpadl(dev->channel, &pdata->send_gpadl))
+			pdata->send_gpadl.leak = true;
+		if (!pdata->send_gpadl.leak && !pdata->send_gpadl.decrypted)
 			vfree(pdata->send_buf);
 	}
 
 	if (pdata->recv_gpadl.gpadl_handle) {
-		vmbus_teardown_gpadl(dev->channel, &pdata->recv_gpadl);
-		if (!pdata->recv_gpadl.decrypted)
+		if (vmbus_teardown_gpadl(dev->channel, &pdata->recv_gpadl))
+			pdata->recv_gpadl.leak = true;
+		if (!pdata->recv_gpadl.leak && !pdata->recv_gpadl.decrypted)
 			vfree(pdata->recv_buf);
 	}
 }
@@ -282,12 +287,11 @@ hv_uio_probe(struct hv_device *dev,
 
 	/* mem resources */
 	pdata->info.mem[TXRX_RING_MAP].name = "txrx_rings";
-	ring_buffer = page_address(channel->ringbuffer_page);
-	pdata->info.mem[TXRX_RING_MAP].addr
-		= (uintptr_t)virt_to_phys(ring_buffer);
+	ring_buffer = channel->ringbuffer.addr;
+	pdata->info.mem[TXRX_RING_MAP].addr = (uintptr_t)ring_buffer;
 	pdata->info.mem[TXRX_RING_MAP].size
 		= channel->ringbuffer_pagecount << PAGE_SHIFT;
-	pdata->info.mem[TXRX_RING_MAP].memtype = UIO_MEM_IOVA;
+	pdata->info.mem[TXRX_RING_MAP].memtype = UIO_MEM_VIRTUAL;
 
 	pdata->info.mem[INT_PAGE_MAP].name = "int_page";
 	pdata->info.mem[INT_PAGE_MAP].addr
@@ -311,7 +315,8 @@ hv_uio_probe(struct hv_device *dev,
 		ret = vmbus_establish_gpadl(channel, pdata->recv_buf,
 					    RECV_BUFFER_SIZE, &pdata->recv_gpadl);
 		if (ret) {
-			if (!pdata->recv_gpadl.decrypted)
+			if (!pdata->recv_gpadl.leak &&
+			    !pdata->recv_gpadl.decrypted)
 				vfree(pdata->recv_buf);
 			goto fail_close;
 		}
@@ -333,7 +338,8 @@ hv_uio_probe(struct hv_device *dev,
 		ret = vmbus_establish_gpadl(channel, pdata->send_buf,
 					    SEND_BUFFER_SIZE, &pdata->send_gpadl);
 		if (ret) {
-			if (!pdata->send_gpadl.decrypted)
+			if (!pdata->send_gpadl.leak &&
+			    !pdata->send_gpadl.decrypted)
 				vfree(pdata->send_buf);
 			goto fail_close;
 		}
