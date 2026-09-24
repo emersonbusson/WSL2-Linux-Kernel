@@ -978,8 +978,8 @@ void dxgpagingqueue_stop(struct dxgpagingqueue *pqueue)
 
 	if (pqueue->mapped_address) {
 		ret = dxg_unmap_iospace(pqueue->mapped_address, PAGE_SIZE);
-		DXG_TRACE("fence is unmapped %d %p",
-			ret, pqueue->mapped_address);
+		if (ret)
+			DXG_ERR("fence unmap failed: %d", ret);
 		pqueue->mapped_address = NULL;
 	}
 }
@@ -1305,8 +1305,8 @@ void dxgsyncobject_stop(struct dxgsyncobject *syncobj)
 			if (syncobj->mapped_address) {
 				ret = dxg_unmap_iospace(syncobj->mapped_address,
 							PAGE_SIZE);
-				DXG_TRACE("unmap fence %d %p",
-					ret, syncobj->mapped_address);
+				if (ret)
+					DXG_ERR("fence unmap failed: %d", ret);
 				syncobj->mapped_address = NULL;
 			}
 		}
