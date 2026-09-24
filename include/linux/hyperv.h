@@ -67,6 +67,10 @@
  *         V    V    V          V               V    V               v
  * gpadl:  | 4k | 4k |   ...    |    ...        | 4k | 4k |  ...     |
  * index:  0    1    2   ...    16   ...       n-15 n-14 n-13  ...  2n-30
+ *
+ * HV_GPADL_RING differs from HV_GPADL_BUFFER only in that header-gap
+ * accounting (hv_gpadl_size()). Encryption state is not part of the type:
+ * vmbus_alloc_buffer() is the only code that decrypts.
  */
 enum hv_gpadl_type {
 	HV_GPADL_BUFFER,
@@ -777,20 +781,31 @@ struct vmbus_device {
 
 #define VMBUS_DEFAULT_MAX_PKT_SIZE 4096
 
-struct vmbus_gpadl {
-	u32 gpadl_handle;
-	u32 size;
-	void *buffer;
-	bool decrypted;
-	bool leak;
-};
-
+/**
+ * struct vmbus_buffer - virtually-contiguous VMBus buffer with optional GPADL
+ * @addr: kernel virtual address, set by vmbus_alloc_buffer()
+ * @chunks: physically-contiguous chunks (CoCo path), or NULL for vzalloc()
+ * @pages: page array for ring wraparound, or NULL
+ * @chunk_cnt: number of entries in @chunks
+ * @gpadl_handle: GPADL bound to @addr, or 0 if none is established
+ * @size: buffer size in bytes (always a page multiple)
+ * @leak: set when @addr must not be freed (GPADL or encryption state unknown)
+ *
+ * Lifecycle:
+ *   vmbus_alloc_buffer()  -> fills @addr/@chunks/@size (decrypts CoCo chunks)
+ *   vmbus_establish_gpadl() / vmbus_teardown_gpadl() -> @gpadl_handle
+ *   vmbus_free_buffer()   -> drops everything (unless @leak)
+ *
+ * Only buffers from vmbus_alloc_buffer() may be passed to vmbus_free_buffer().
+ * A @leak or live @gpadl_handle makes vmbus_free_buffer() keep @addr.
+ */
 struct vmbus_buffer {
 	void *addr;
 	struct page **chunks;
 	struct page **pages;
 	u32 chunk_cnt;
-	struct vmbus_gpadl gpadl;
+	u32 gpadl_handle;
+	u32 size;
 	bool leak;
 };
 
@@ -1209,27 +1224,17 @@ extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
 				     u64 requestid);
 
 extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
-				      void *kbuffer,
-				      u32 size,
-				      struct vmbus_gpadl *gpadl);
-
-extern int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
-						  void *kbuffer,
-						  u32 size,
-						  bool *leak,
-						  struct vmbus_gpadl *gpadl);
+				 struct vmbus_buffer *buffer);
 
 extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
-				     struct vmbus_gpadl *gpadl);
+				struct vmbus_buffer *buffer);
 
-extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
-				u32 size,
-				bool confidential,
-				struct page ***chunks_out,
-				u32 *chunk_cnt_out);
+int vmbus_alloc_buffer(struct vmbus_channel *channel,
+		       u32 size,
+		       bool encrypted,
+		       struct vmbus_buffer *buffer);
 
-extern void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt);
-void vmbus_release_buffer(struct vmbus_buffer *buffer);
+void vmbus_free_buffer(struct vmbus_buffer *buffer);
 
 void vmbus_reset_channel_cb(struct vmbus_channel *channel);
 

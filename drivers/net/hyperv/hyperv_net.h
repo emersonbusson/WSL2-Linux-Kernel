@@ -1156,17 +1156,15 @@ struct netvsc_device {
 	bool tx_disable; /* if true, do not wake up queue again */
 
 	/* Receive buffer allocated by us but manages by NetVSP */
-	void *recv_buf;
-	u32 recv_buf_size; /* allocated bytes */
-	struct vmbus_gpadl recv_buf_gpadl_handle;
+	struct vmbus_buffer recv_buf;
+	u32 recv_buf_size; /* == recv_buf.size; data-plane bound */
 	u32 recv_section_cnt;
 	u32 recv_section_size;
 	u32 recv_completion_cnt;
 
 	/* Send buffer allocated by us */
-	void *send_buf;
-	u32 send_buf_size;
-	struct vmbus_gpadl send_buf_gpadl_handle;
+	struct vmbus_buffer send_buf;
+	u32 send_buf_size; /* == send_buf.size; data-plane bound */
 	u32 send_section_cnt;
 	u32 send_section_size;
 	unsigned long *send_section_map;
