@@ -24,8 +24,19 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libelf-dev libssl-dev sparse
-          command -v sparse
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev
+          SPARSE_SHA=37156835e3d725b6d750f000be33ba3814bb2310
+          git init sparse-src
+          git -C sparse-src remote add origin https://git.kernel.org/pub/scm/devel/sparse/sparse.git
+          git -C sparse-src fetch --depth=1 origin "$SPARSE_SHA"
+          git -C sparse-src checkout --detach FETCH_HEAD
+          make -C sparse-src -j2
+          sudo install -m 0755 sparse-src/sparse /usr/local/bin/sparse
+          echo /usr/local/bin >> "$GITHUB_PATH"
+          export PATH="/usr/local/bin:$PATH"
+          sparse --version
+          mkdir -p vmbus-wsl-artifacts
+          printf '%s\n' "$SPARSE_SHA" > vmbus-wsl-artifacts/sparse-source-sha.txt
       - name: Build WSL backport with W=1 and sparse
         run: |
           set -euo pipefail
@@ -41,6 +52,8 @@ jobs:
             drivers/hv/vmbus_drv.o drivers/hv/ring_buffer.o \
             drivers/net/hyperv/ drivers/uio/ \
             2>&1 | tee vmbus-wsl-artifacts/build-sparse.log
+          grep -q 'CHECK .*vmbus_drv.c' vmbus-wsl-artifacts/build-sparse.log
+          grep -q 'CHECK .*uio_hv_generic.c' vmbus-wsl-artifacts/build-sparse.log
           make O="$GITHUB_WORKSPACE/wsl-out" -j2 W=1 C=0 \
             drivers/hv/dxgkrnl/ \
             2>&1 | tee vmbus-wsl-artifacts/build-dxgkrnl.log
@@ -69,8 +82,19 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libelf-dev libssl-dev sparse gcc-aarch64-linux-gnu qemu-system-x86
-          command -v sparse
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev gcc-aarch64-linux-gnu qemu-system-x86
+          SPARSE_SHA=37156835e3d725b6d750f000be33ba3814bb2310
+          git init sparse-src
+          git -C sparse-src remote add origin https://git.kernel.org/pub/scm/devel/sparse/sparse.git
+          git -C sparse-src fetch --depth=1 origin "$SPARSE_SHA"
+          git -C sparse-src checkout --detach FETCH_HEAD
+          make -C sparse-src -j2
+          sudo install -m 0755 sparse-src/sparse /usr/local/bin/sparse
+          echo /usr/local/bin >> "$GITHUB_PATH"
+          export PATH="/usr/local/bin:$PATH"
+          sparse --version
+          mkdir -p vmbus-artifacts
+          printf '%s\n' "$SPARSE_SHA" > vmbus-artifacts/sparse-source-sha.txt
           command -v aarch64-linux-gnu-gcc
       - name: Fetch fixed mainline base and apply candidate
         env:
@@ -94,6 +118,7 @@ jobs:
             -e HYPERV -e HYPERV_VMBUS -e HYPERV_NET -e UIO -e UIO_HV_GENERIC
           make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" O="$GITHUB_WORKSPACE/kernel-out" olddefconfig
           cp kernel-out/.config vmbus-artifacts/config-${ARCH}
+          (cd linux && test "$(scripts/checker-valid.sh sparse --arch="$ARCH" -m64)" = 1)
           grep -E '^CONFIG_(HYPERV|HYPERV_VMBUS|HYPERV_NET|UIO|UIO_HV_GENERIC)=' kernel-out/.config \
             | tee vmbus-artifacts/selected-config.txt
           for symbol in HYPERV HYPERV_VMBUS HYPERV_NET UIO UIO_HV_GENERIC; do
@@ -118,10 +143,12 @@ jobs:
               | tee "vmbus-artifacts/checkpatch-${stage}.log"
             grep -q 'total: 0 errors, 0 warnings, 0 checks' \
               "vmbus-artifacts/checkpatch-${stage}.log"
-            make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-              O="$GITHUB_WORKSPACE/kernel-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
-              drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
-              2>&1 | tee "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
+          make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+            O="$GITHUB_WORKSPACE/kernel-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
+            drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
+            2>&1 | tee "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
+          ! grep -q 'C=2 specified, but sparse is not available or not up to date' \
+            "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
           done
           test "$stage" -eq 4
       - name: Require and run VMBus KUnit cases

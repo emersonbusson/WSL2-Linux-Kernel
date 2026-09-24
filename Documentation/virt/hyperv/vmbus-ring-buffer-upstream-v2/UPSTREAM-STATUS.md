@@ -121,9 +121,9 @@ The September 24 issue comment records the relationship without claiming the
 bug was reproduced or fixed.
 
 The September 24 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
-contains four commits: ring ownership (`c21852ae7`), allocator and cleanup
-safety (`a26496f6c`), UIO ownership (`6bda68531`), and the corrected fallback
-test vector (`e6ac0fa2d`). The first commit avoids a universal CoCo
+contains four commits: ring ownership (`50aac3dc3`), allocator and cleanup
+safety (`ca42ecd6b`), UIO ownership (`cd8c10eab`), and the corrected fallback
+test vector (`5959b9109`). The first commit avoids a universal CoCo
 compatibility claim. It adds an arm64 CCA allocation guard, checked page
 rounding, UIO GPADL buffer
 ownership, and a guard against `vunmap(NULL)` during partial-allocation
@@ -132,14 +132,18 @@ release ownership, and partial cleanup. The hosted workflow now uses only
 runner-provided tools, generates its KUnit config, and builds after every
 patch. Run 36040552037 passed WSL Sparse/compile, all per-commit x86_64/arm64
 builds, and all five named VMBus KUnit cases (nine KUnit cases passed in
-total), using the prior patch mail. Runs 36038457091 and 36039517554 exposed
+total), using the prior patch mail. Run 36042727085 applied the refreshed
+source and passed WSL, but checkpatch found missing descriptions and
+`Signed-off-by` trailers on patch commits 2–4. Those commit messages are fixed
+in the current patches. Runs 36038457091 and 36039517554 exposed
 and led to fixes for an invalid WSL make target and trace-only DXG variables
 with DEBUG disabled. No cross-architecture or CoCo compatibility claim is
 qualified. GPADL
 header/body/response failure injection, UIO mmap, and live Hyper-V/CoCo tests
 remain open. The regenerated patch series has the same source diff and a
-corrected commit message; a new hosted run is required to validate the exact
-refreshed patch files. The
+corrected commit message; the workflow now builds a pinned Sparse revision
+and asserts it is active. A new hosted run is required to validate the exact
+refreshed patch files and enforce Sparse. The
 unversioned September 17 `[PATCH 2/2]` makes the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport remains
 separate. Its DXG destroy path now retains pinned user pages and its `vmap()`

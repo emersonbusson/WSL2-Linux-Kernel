@@ -785,10 +785,15 @@ index 9e109d91aa1430d83aaf37984f9d484641805873..567679c68da183f883ae32c3fd1a6d0d
 2.43.0
 
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: emersonbusson <emersonbusson@gmail.com>
+From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
 Subject: [PATCH 2/4] hv: vmbus: validate chunk buffer allocation and cleanup
 
+Validate rounded sizes before storing them and preserve allocated
+chunks when cleanup or GPADL teardown has an uncertain outcome. Add focused
+KUnit coverage for buffer sizing and ownership decisions.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2e94afcb0 100644
@@ -1037,11 +1042,15 @@ index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2
 2.43.0
 
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: emersonbusson <emersonbusson@gmail.com>
+From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
 Subject: [PATCH 3/4] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
+Route generic VMBus UIO send and receive buffers through the VMBus
+allocator and release path so page and GPADL ownership stay together.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
 index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe71109331859 100644
@@ -1169,10 +1178,14 @@ index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe711
 2.43.0
 
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: emersonbusson <emersonbusson@gmail.com>
+From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:34:41 -0300
 Subject: [PATCH 4/4] test(hv): correct VMBus fallback order vector
 
+Use the order that matches the remaining page count in the fallback
+helper test.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index 091288f8c00c8426480c08a1c91900c2e94afcb0..c47a923306f298291b169c5827c777082ba1b162 100644

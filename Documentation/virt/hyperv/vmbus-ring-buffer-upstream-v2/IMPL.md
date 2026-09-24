@@ -88,9 +88,10 @@ The reviewable, versioned diff and contribution dossier are maintained in the
 public kernel fork at
 [`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
 based on `93f51579e7df248780214094418f205253383cc5`. The local mainline
-checkout contains four commits: `c21852ae7` for ring ownership,
-`a26496f6c` for allocator/cleanup safety, `6bda68531` for UIO ownership,
-and `e6ac0fa2d` for the corrected fallback-order test vector.
+checkout contains four commits: `50aac3dc3` for ring ownership,
+`ca42ecd6b` for allocator/cleanup safety, `cd8c10eab` for UIO ownership,
+and `5959b9109` for the corrected fallback-order test vector. Each has a
+complete commit message and `Signed-off-by` trailer.
 The public dossier carries one patch file per commit under `series/`, plus a
 consolidated snapshot. The hosted workflow applies and builds after each patch.
 
@@ -117,11 +118,13 @@ objects; DXG is compile-checked separately because its signed-bitfield
 warning prevents a clean Sparse run. These checks do not include GPADL stage
 fault injection, UIO mmap, or a linked and booted Hyper-V guest.
 
-The first commit message still carried an unsupported universal CoCo claim.
-That wording has been removed and the mail patches regenerated without
-changing source diffs. Hosted run 36040552037 used the prior patch mail; the
-refreshed patch series must pass the workflow before it is treated as the
-current hosted artifact.
+The first commit message's unsupported universal CoCo claim has been removed.
+The mail patches now include descriptions and `Signed-off-by` trailers on all
+four commits. Run 36042727085 applied the refreshed code and passed the WSL
+job, but stopped at checkpatch because the patch mail lacked those trailers
+on commits 2–4. The workflow now installs a pinned Sparse revision that
+supports this kernel's checker probe and asserts Sparse is functional before
+building; a new hosted run must validate these final files and gates.
 
 The WSL 6.18 backport remains a separate tree. Its DXG destruction path now
 keeps user pages pinned while a GPADL is active or uncertain, and releases its

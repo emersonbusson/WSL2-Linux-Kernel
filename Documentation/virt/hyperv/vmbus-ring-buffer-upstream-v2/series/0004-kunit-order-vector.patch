@@ -1,8 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: emersonbusson <emersonbusson@gmail.com>
+From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:34:41 -0300
 Subject: [PATCH 4/4] test(hv): correct VMBus fallback order vector
 
+Use the order that matches the remaining page count in the fallback
+helper test.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index 091288f8c00c8426480c08a1c91900c2e94afcb0..c47a923306f298291b169c5827c777082ba1b162 100644

@@ -1,9 +1,13 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: emersonbusson <emersonbusson@gmail.com>
+From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
 Subject: [PATCH 3/4] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
+Route generic VMBus UIO send and receive buffers through the VMBus
+allocator and release path so page and GPADL ownership stay together.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
 index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe71109331859 100644
