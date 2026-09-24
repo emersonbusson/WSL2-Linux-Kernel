@@ -119,12 +119,19 @@ warning prevents a clean Sparse run. These checks do not include GPADL stage
 fault injection, UIO mmap, or a linked and booted Hyper-V guest.
 
 The first commit message's unsupported universal CoCo claim has been removed.
-The mail patches now include descriptions and `Signed-off-by` trailers on all
-four commits. Run 36042727085 applied the refreshed code and passed the WSL
-job, but stopped at checkpatch because the patch mail lacked those trailers
-on commits 2–4. The workflow now installs a pinned Sparse revision that
-supports this kernel's checker probe and asserts Sparse is functional before
-building; a new hosted run must validate these final files and gates.
+All four mail patches include descriptions and matching `Signed-off-by`
+trailers. Run 36042727085 passed WSL but exposed missing trailers on patches
+2–4. Run 36046920733 passed with the corrected patch files: per-commit
+x86_64/arm64 compile and Sparse, WSL VMBus/NetVSC/UIO Sparse, the separate DXG
+compile, and all five named VMBus KUnit cases (nine KUnit cases passed in
+total). It builds a pinned Sparse revision and fails if Sparse is not
+functional or is silently disabled. GPADL stage injection, UIO mmap, and live
+Hyper-V/CoCo evidence remain open.
+
+Sparse logs still contain diagnostics in unchanged baseline code, including
+the VMBus driver context-imbalance warning and the flexible-array warning in
+the GPADL header declaration. The workflow records these logs; the patch
+series itself passes strict checkpatch without warnings.
 
 The WSL 6.18 backport remains a separate tree. Its DXG destruction path now
 keeps user pages pinned while a GPADL is active or uncertain, and releases its

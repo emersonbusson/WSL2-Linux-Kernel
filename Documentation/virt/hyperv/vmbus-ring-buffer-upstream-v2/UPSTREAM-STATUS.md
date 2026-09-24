@@ -130,23 +130,28 @@ ownership, and a guard against `vunmap(NULL)` during partial-allocation
 cleanup. Five KUnit cases cover rounding, overflow, order descent, uncertain
 release ownership, and partial cleanup. The hosted workflow now uses only
 runner-provided tools, generates its KUnit config, and builds after every
-patch. Run 36040552037 passed WSL Sparse/compile, all per-commit x86_64/arm64
-builds, and all five named VMBus KUnit cases (nine KUnit cases passed in
-total), using the prior patch mail. Run 36042727085 applied the refreshed
-source and passed WSL, but checkpatch found missing descriptions and
-`Signed-off-by` trailers on patch commits 2–4. Those commit messages are fixed
-in the current patches. Runs 36038457091 and 36039517554 exposed
+patch. Run 36046920733 passed with the refreshed patch files: WSL
+VMBus/NetVSC/UIO Sparse, separate DXG compile, per-commit x86_64/arm64
+compile and Sparse, and all five named VMBus KUnit cases (nine KUnit cases
+passed in total). It uses pinned Sparse source and fails if the checker is not
+functional or gets silently disabled. Run 36040552037 passed the same code
+with the prior patch mail; 36042727085 passed WSL but checkpatch found missing
+descriptions and `Signed-off-by` trailers on commits 2–4, now fixed. Runs
+36038457091 and 36039517554 exposed
 and led to fixes for an invalid WSL make target and trace-only DXG variables
 with DEBUG disabled. No cross-architecture or CoCo compatibility claim is
 qualified. GPADL
 header/body/response failure injection, UIO mmap, and live Hyper-V/CoCo tests
 remain open. The regenerated patch series has the same source diff and a
-corrected commit message; the workflow now builds a pinned Sparse revision
-and asserts it is active. A new hosted run is required to validate the exact
-refreshed patch files and enforce Sparse. The
-unversioned September 17 `[PATCH 2/2]` makes the next send v2, subject to
+corrected commit message. The unversioned September 17 `[PATCH 2/2]` makes
+the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport remains
 separate. Its DXG destroy path now retains pinned user pages and its `vmap()`
 when GPADL teardown is uncertain; the hosted backport build enables
 `DXGKRNL`. DXG's externally pinned page encryption contract is still not
 qualified for CoCo guests.
+
+Sparse logs retain diagnostics in unchanged source, including a VMBus driver
+context-imbalance warning and a flexible-array warning in the GPADL header.
+The hosted artifacts preserve these logs; strict checkpatch reported no
+warnings for the four patches.
