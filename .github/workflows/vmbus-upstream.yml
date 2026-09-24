@@ -135,6 +135,7 @@ jobs:
           done
           cat > linux/drivers/hv/.kunitconfig <<'EOF'
           CONFIG_KUNIT=y
+          CONFIG_HYPERVISOR_GUEST=y
           CONFIG_HYPERV=y
           CONFIG_HYPERV_VMBUS=y
           EOF
