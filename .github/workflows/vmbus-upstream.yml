@@ -1,0 +1,146 @@
+name: VMBus upstream candidate
+
+on:
+  push:
+    branches:
+      - vmbus-ring-buffer-upstream-v2
+  pull_request:
+    paths:
+      - .github/workflows/vmbus-upstream.yml
+      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch
+      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wsl-backport:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install kernel tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev sparse
+          command -v sparse
+      - name: Build WSL backport with W=1 and sparse
+        run: |
+          set -euo pipefail
+          mkdir -p vmbus-wsl-artifacts
+          make O="$GITHUB_WORKSPACE/wsl-out" x86_64_defconfig
+          scripts/config --file wsl-out/.config \
+            -e HYPERV -e HYPERV_VMBUS -e HYPERV_NET -e UIO -e UIO_HV_GENERIC
+          make O="$GITHUB_WORKSPACE/wsl-out" olddefconfig
+          cp wsl-out/.config vmbus-wsl-artifacts/config-x86_64
+          make O="$GITHUB_WORKSPACE/wsl-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
+            drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
+            2>&1 | tee vmbus-wsl-artifacts/build.log
+      - name: Upload WSL build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vmbus-wsl-backport
+          path: vmbus-wsl-artifacts/
+          if-no-files-found: error
+
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            cross_compile: ""
+          - arch: arm64
+            cross_compile: aarch64-linux-gnu-
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install required kernel tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev sparse gcc-aarch64-linux-gnu qemu-system-x86
+          command -v sparse
+          command -v aarch64-linux-gnu-gcc
+      - name: Fetch fixed mainline base and apply candidate
+        env:
+          BASE: 93f51579e7df248780214094418f205253383cc5
+          PATCH: Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch
+        run: |
+          set -euo pipefail
+          mkdir -p vmbus-artifacts
+          git clone --filter=blob:none --no-checkout https://github.com/torvalds/linux.git linux
+          git -C linux fetch --depth=1 origin "$BASE"
+          git -C linux checkout --detach FETCH_HEAD
+          test "$(git -C linux rev-parse HEAD)" = "$BASE"
+          printf '%s\n' "$BASE" > vmbus-artifacts/base-sha.txt
+          sha256sum "$PATCH" > vmbus-artifacts/series-sha256.txt
+          git -C linux apply --check "$GITHUB_WORKSPACE/$PATCH"
+          git -C linux apply "$GITHUB_WORKSPACE/$PATCH"
+          git -C linux diff --check
+          git -C linux diff --binary > vmbus-artifacts/applied.patch
+      - name: Check patch style
+        run: |
+          set -euo pipefail
+          linux/scripts/checkpatch.pl --strict --no-tree vmbus-artifacts/applied.patch \
+            2>&1 | tee vmbus-artifacts/checkpatch.log
+          grep -q 'total: 0 errors, 0 warnings, 0 checks' vmbus-artifacts/checkpatch.log
+      - name: Configure kernel
+        env:
+          ARCH: ${{ matrix.arch }}
+          CROSS_COMPILE: ${{ matrix.cross_compile }}
+        run: |
+          set -euo pipefail
+          make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" O="$GITHUB_WORKSPACE/kernel-out" defconfig
+          linux/scripts/config --file kernel-out/.config \
+            -e HYPERV -e HYPERV_VMBUS -e HYPERV_NET -e UIO -e UIO_HV_GENERIC
+          make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" O="$GITHUB_WORKSPACE/kernel-out" olddefconfig
+          cp kernel-out/.config vmbus-artifacts/config-${ARCH}
+          grep -E '^CONFIG_(HYPERV|HYPERV_VMBUS|HYPERV_NET|UIO|UIO_HV_GENERIC)=' kernel-out/.config \
+            | tee vmbus-artifacts/selected-config.txt
+          for symbol in HYPERV HYPERV_VMBUS HYPERV_NET UIO UIO_HV_GENERIC; do
+            grep -Eq "^CONFIG_${symbol}=[ym]$" kernel-out/.config
+          done
+      - name: Build affected drivers with W=1 and sparse
+        env:
+          ARCH: ${{ matrix.arch }}
+          CROSS_COMPILE: ${{ matrix.cross_compile }}
+        run: |
+          set -euo pipefail
+          make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+            O="$GITHUB_WORKSPACE/kernel-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
+            drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
+            2>&1 | tee vmbus-artifacts/build-${ARCH}.log
+          test -s vmbus-artifacts/build-${ARCH}.log
+      - name: Require and run VMBus KUnit cases
+        if: matrix.arch == 'x86_64'
+        run: |
+          set -euo pipefail
+          for case_name in \
+            vmbus_ring_buffer_noncontiguous_pages \
+            vmbus_ring_buffer_coco_decrypt_once \
+            vmbus_buffer_failed_teardown_leaks \
+            vmbus_buffer_partial_allocation_cleanup \
+            vmbus_uio_ring_noncontiguous_mmap; do
+            rg -q "KUNIT_CASE\\($case_name\\)" linux/drivers/hv linux/drivers/uio || {
+              echo "Missing required KUnit case: $case_name" | tee -a vmbus-artifacts/kunit.log
+              exit 1
+            }
+          done
+          test -f linux/drivers/hv/.kunitconfig
+          (cd linux && python3 tools/testing/kunit/kunit.py run \
+            --build_dir="$GITHUB_WORKSPACE/kunit-out" \
+            --arch=x86_64 --kunitconfig=drivers/hv/.kunitconfig) \
+            2>&1 | tee -a vmbus-artifacts/kunit.log
+          grep -q 'Testing complete. 0 failures' vmbus-artifacts/kunit.log
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vmbus-${{ matrix.arch }}
+          path: vmbus-artifacts/
+          if-no-files-found: error
