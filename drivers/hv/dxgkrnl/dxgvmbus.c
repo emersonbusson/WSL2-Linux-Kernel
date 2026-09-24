@@ -400,6 +400,7 @@ void dxgvmbuschannel_receive(void *ctx)
 		packet_length = hv_pkt_datalen(desc);
 		DXG_TRACE("next packet (id, size, type): %llu %d %d",
 			desc->trans_id, packet_length, desc->type);
+		(void)packet_length;
 		if (desc->type == VM_PKT_COMP) {
 			process_completion_packet(channel, desc);
 		} else {
@@ -437,10 +438,12 @@ int dxgvmb_send_sync_msg(struct dxgvmbuschannel *channel,
 
 	if (channel->adapter == NULL) {
 		cmd1 = command;
+		(void)cmd1;
 		DXG_TRACE("send_sync_msg global: %d %p %d %d",
 			cmd1->command_type, command, cmd_size, result_size);
 	} else {
 		cmd2 = command;
+		(void)cmd2;
 		DXG_TRACE("send_sync_msg adapter: %d %p %d %d",
 			cmd2->command_type, command, cmd_size, result_size);
 	}
