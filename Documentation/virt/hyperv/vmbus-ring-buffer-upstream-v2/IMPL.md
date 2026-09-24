@@ -1,10 +1,12 @@
-# IMPL — Fragmentation-resilient VMBus rings across confidential guests
+# IMPL — Fragmentation-resilient VMBus ring allocation candidate
 
 > SSDV3 Step 3 · SPEC: `docs/specs/no-milestone/vmbus-ring-buffer-upstream-v2/SPEC.md`
 
 ## Status
 
-**PARTIAL — local design and source draft only. Not ready to send or install.**
+**PARTIAL — hosted compile and focused KUnit gates are available; hardware
+integration and several fault paths remain unqualified. Not ready to send or
+install.**
 
 The draft at `docs/upstream/patches/vmbus-ring-buffer-v2-draft.patch` is a
 working diff against Linux `v7.3-rc4` (`93f51579e7df248780214094418f205253383cc5`).
@@ -86,9 +88,9 @@ The reviewable, versioned diff and contribution dossier are maintained in the
 public kernel fork at
 [`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
 based on `93f51579e7df248780214094418f205253383cc5`. The local mainline
-checkout contains four commits: `504b66eb5` for ring ownership,
-`edd48a46d` for allocator/cleanup safety, `fc5abc6ec` for UIO ownership,
-and `52b4700eb` for the corrected fallback-order test vector.
+checkout contains four commits: `c21852ae7` for ring ownership,
+`a26496f6c` for allocator/cleanup safety, `6bda68531` for UIO ownership,
+and `e6ac0fa2d` for the corrected fallback-order test vector.
 The public dossier carries one patch file per commit under `series/`, plus a
 consolidated snapshot. The hosted workflow applies and builds after each patch.
 
@@ -104,14 +106,22 @@ CoCo page-state transitions, or test UIO mmap. These changes have not been
 built or tested on CCA, TDX, or SEV-SNP.
 
 Linux `checkpatch.pl --strict` passed on the current patch (0 errors, 0
-warnings, 0 checks). The hosted workflow pins the base, records each patch SHA
-and configuration, and requires x86_64/arm64 builds with sparse after each
-commit and the five KUnit cases above. It creates its KUnit configuration in
-the runner. Run 36034196665 passed the WSL build and all three mainline patch
-builds on x86_64 and arm64, then exposed an incorrect expected order in the
-new fallback test (4/5 tests passed). Commit `52b4700eb` fixes the vector; a
-new hosted run is pending. No linked kernel or live Hyper-V guest has been
-qualified for this candidate.
+warnings, 0 checks). Hosted run 36038457091 passed per-commit x86_64/arm64
+builds and all five named VMBus KUnit cases (9 KUnit cases passed in total);
+its WSL job used a nonexistent object target. Run 36039517554 passed arm64 and
+x86_64 build/KUnit, but its WSL DXG compile found trace-only variables that
+become unused with DEBUG disabled. Commit `e4f31922b` fixed those warnings;
+run 36040552037 passed the corrected WSL gate. The workflow records the
+base/series SHA, configs, and logs. Sparse runs on WSL VMBus, NetVSC, and UIO
+objects; DXG is compile-checked separately because its signed-bitfield
+warning prevents a clean Sparse run. These checks do not include GPADL stage
+fault injection, UIO mmap, or a linked and booted Hyper-V guest.
+
+The first commit message still carried an unsupported universal CoCo claim.
+That wording has been removed and the mail patches regenerated without
+changing source diffs. Hosted run 36040552037 used the prior patch mail; the
+refreshed patch series must pass the workflow before it is treated as the
+current hosted artifact.
 
 The WSL 6.18 backport remains a separate tree. Its DXG destruction path now
 keeps user pages pinned while a GPADL is active or uncertain, and releases its
@@ -126,9 +136,10 @@ submission is v2 if and when all gates pass. No new email was sent.
 
 Complete GPADL header/body/response failure injection, UIO mmap validation,
 and teardown/rescind interleaving tests. Then link and boot one isolated
-upstream kernel, run Hyper-V integration tests in a disposable guest, and
-qualify CCA plus no-paravisor TDX. Only after those results and maintainer
-review may the diff be formatted as a sendable v2.
+upstream kernel, run ordinary Hyper-V integration tests, and qualify the
+exact code on SEV-SNP, TDX, and Arm CCA hosts. Hosted CI does not emulate
+those host/guest memory-state transitions. Send v2 only after required
+evidence and maintainer review.
 
 ## Rollback trigger
 

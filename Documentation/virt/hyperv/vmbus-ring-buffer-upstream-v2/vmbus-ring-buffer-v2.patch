@@ -1,153 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Wed, 23 Sep 2026 09:57:36 -0300
+Subject: [PATCH 1/4] hv: vmbus: convert ring buffer allocation to
+ vmbus_alloc_buffer()
+
+When opening VMBus channels under memory pressure or heavy buddy
+allocator fragmentation, high-order allocations in vmbus_alloc_ring()
+can fail. While an initial fallback to vzalloc() was proposed, that
+breaks Confidential Computing (CoCo) guests (such as ARM64 CCA and
+Intel TDX without a paravisor), because set_memory_decrypted() only
+supports physically contiguous, direct-mapped memory ranges.
+
+With vmbus_alloc_buffer() available upstream, buffer allocations are
+handled as a series of physically contiguous chunks down to order 0,
+decrypted individually via set_memory_decrypted(), and mapped together
+into a virtually contiguous range via vmap().
+
+Convert vmbus_alloc_ring() and vmbus_free_ring() to use
+vmbus_alloc_buffer() and encapsulate the buffer address, page pointers,
+chunks and GPADL state in struct vmbus_buffer. This reduces high-order
+allocation failures and retains chunk-based CoCo handling. Platform support
+still requires hardware validation.
+
+Suggested-by: Michael Kelley <mhklinux@outlook.com>
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f55..c47a92330 100644
+index 7e4cc6f55237a8945d51696a6520b2ecc31b805e..87b806a4846d8c9b803c7d51ccc7427c5ae9d148 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -12,6 +12,9 @@
+@@ -12,6 +12,7 @@
  #include <linux/sched.h>
  #include <linux/wait.h>
  #include <linux/mm.h>
-+#include <linux/cc_platform.h>
-+#include <kunit/test.h>
 +#include <linux/overflow.h>
  #include <linux/slab.h>
  #include <linux/log2.h>
  #include <linux/module.h>
-@@ -26,6 +29,134 @@
- 
- #include "hyperv_vmbus.h"
- 
-+static int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
-+static unsigned int vmbus_buffer_order(unsigned long remaining,
-+				       unsigned int max_order);
-+static bool vmbus_buffer_lower_order(unsigned int *order);
-+static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
-+
-+#if IS_ENABLED(CONFIG_KUNIT)
-+static void vmbus_buffer_size_rounding_test(struct kunit *test)
-+{
-+	u32 rounded_size;
-+
-+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(1, &rounded_size), 0);
-+	KUNIT_EXPECT_EQ(test, rounded_size, (u32)PAGE_SIZE);
-+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(PAGE_SIZE, &rounded_size), 0);
-+	KUNIT_EXPECT_EQ(test, rounded_size, (u32)PAGE_SIZE);
-+}
-+
-+static void vmbus_buffer_size_overflow_test(struct kunit *test)
-+{
-+	u32 rounded_size = 0;
-+	int ret;
-+
-+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(0, &rounded_size), -EINVAL);
-+	ret = vmbus_buffer_round_size(U32_MAX, &rounded_size);
-+	KUNIT_EXPECT_EQ(test, ret, -EOVERFLOW);
-+	ret = vmbus_buffer_round_size(U32_MAX - PAGE_SIZE + 1, &rounded_size);
-+	KUNIT_EXPECT_EQ(test, ret, 0);
-+	KUNIT_EXPECT_EQ(test, rounded_size,
-+			(u32)(U32_MAX - PAGE_SIZE + 1));
-+}
-+
-+static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
-+{
-+	unsigned int order;
-+
-+	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
-+	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
-+	while (order)
-+		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
-+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_lower_order(&order));
-+	KUNIT_EXPECT_EQ(test, order, 0U);
-+	KUNIT_EXPECT_EQ(test, vmbus_buffer_order(3, MAX_PAGE_ORDER), 1U);
-+}
-+
-+static void vmbus_buffer_failed_teardown_leaks_test(struct kunit *test)
-+{
-+	struct vmbus_buffer buffer = {
-+		.addr = (void *)1,
-+		.gpadl.gpadl_handle = 1,
-+	};
-+
-+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
-+	buffer.gpadl.gpadl_handle = 0;
-+	buffer.gpadl.leak = true;
-+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
-+	buffer.gpadl.leak = false;
-+	buffer.leak = true;
-+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
-+	buffer.leak = false;
-+	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
-+}
-+
-+static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
-+{
-+	struct page **chunks;
-+	struct vmbus_buffer buffer = {};
-+
-+	chunks = kmalloc_obj(*chunks, GFP_KERNEL);
-+	KUNIT_ASSERT_NOT_NULL(test, chunks);
-+	vmbus_free_buffer(NULL, chunks, 0);
-+
-+	buffer.addr = vzalloc(PAGE_SIZE);
-+	KUNIT_ASSERT_NOT_NULL(test, buffer.addr);
-+	vmbus_release_buffer(&buffer);
-+	KUNIT_EXPECT_PTR_EQ(test, buffer.addr, NULL);
-+	vmbus_release_buffer(&buffer);
-+}
-+
-+static struct kunit_case vmbus_buffer_test_cases[] = {
-+	KUNIT_CASE(vmbus_buffer_size_rounding_test),
-+	KUNIT_CASE(vmbus_buffer_size_overflow_test),
-+	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
-+	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
-+	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
-+	{}
-+};
-+
-+static struct kunit_suite vmbus_buffer_test_suite = {
-+	.name = "hyperv-vmbus-buffer",
-+	.test_cases = vmbus_buffer_test_cases,
-+};
-+
-+kunit_test_suite(vmbus_buffer_test_suite);
-+#endif
-+
-+static int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
-+{
-+	if (!size)
-+		return -EINVAL;
-+
-+	if (size > U32_MAX - (u32)PAGE_SIZE + 1)
-+		return -EOVERFLOW;
-+
-+	*rounded_size = round_up(size, (u32)PAGE_SIZE);
-+	return 0;
-+}
-+
-+static unsigned int vmbus_buffer_order(unsigned long remaining,
-+				       unsigned int max_order)
-+{
-+	return min_t(unsigned int, max_order, ilog2(remaining));
-+}
-+
-+static bool vmbus_buffer_lower_order(unsigned int *order)
-+{
-+	if (!*order)
-+		return false;
-+
-+	(*order)--;
-+	return true;
-+}
-+
-+static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
-+{
-+	return !buffer->leak && !buffer->gpadl.leak &&
-+	       !buffer->gpadl.gpadl_handle;
-+}
-+
- /*
-  * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
-  *
-@@ -42,7 +173,6 @@ static inline u32 hv_gpadl_size(enum hv_gpadl_type type, u32 size)
+@@ -42,7 +43,6 @@ static inline u32 hv_gpadl_size(enum hv_gpadl_type type, u32 size)
  {
  	switch (type) {
  	case HV_GPADL_BUFFER:
@@ -155,7 +45,7 @@ index 7e4cc6f55..c47a92330 100644
  		return size;
  	case HV_GPADL_RING:
  		/* The size of a ringbuffer must be page-aligned */
-@@ -103,7 +233,6 @@ static inline u64 hv_gpadl_hvpfn(enum hv_gpadl_type type, void *kbuffer,
+@@ -103,7 +103,6 @@ static inline u64 hv_gpadl_hvpfn(enum hv_gpadl_type type, void *kbuffer,
  
  	switch (type) {
  	case HV_GPADL_BUFFER:
@@ -163,7 +53,7 @@ index 7e4cc6f55..c47a92330 100644
  		break;
  	case HV_GPADL_RING:
  		if (i == 0)
-@@ -154,17 +283,15 @@ EXPORT_SYMBOL_GPL(vmbus_setevent);
+@@ -154,17 +153,15 @@ EXPORT_SYMBOL_GPL(vmbus_setevent);
  /* vmbus_free_ring - drop mapping of ring buffer */
  void vmbus_free_ring(struct vmbus_channel *channel)
  {
@@ -187,7 +77,7 @@ index 7e4cc6f55..c47a92330 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_free_ring);
  
-@@ -172,26 +299,32 @@ EXPORT_SYMBOL_GPL(vmbus_free_ring);
+@@ -172,26 +169,32 @@ EXPORT_SYMBOL_GPL(vmbus_free_ring);
  int vmbus_alloc_ring(struct vmbus_channel *newchannel,
  		     u32 send_size, u32 recv_size)
  {
@@ -234,7 +124,7 @@ index 7e4cc6f55..c47a92330 100644
  
  	return 0;
  }
-@@ -442,7 +575,8 @@ static void vmbus_free_channel_msginfo(struct vmbus_channel_msginfo *msginfo)
+@@ -442,7 +445,8 @@ static void vmbus_free_channel_msginfo(struct vmbus_channel_msginfo *msginfo)
   */
  static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  				   enum hv_gpadl_type type, void *kbuffer,
@@ -244,7 +134,7 @@ index 7e4cc6f55..c47a92330 100644
  				   struct vmbus_gpadl *gpadl)
  {
  	struct vmbus_channel_gpadl_header *gpadlmsg;
-@@ -452,8 +586,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -452,8 +456,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	struct list_head *curr;
  	u32 next_gpadl_handle;
  	unsigned long flags;
@@ -258,7 +148,7 @@ index 7e4cc6f55..c47a92330 100644
  	next_gpadl_handle =
  		(atomic_inc_return(&vmbus_connection.next_gpadl_handle) - 1);
  
-@@ -463,9 +602,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -463,9 +472,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  		return ret;
  	}
  
@@ -271,7 +161,7 @@ index 7e4cc6f55..c47a92330 100644
  	if (gpadl->decrypted) {
  		/*
  		 * The "decrypted" flag being true assumes that set_memory_decrypted() succeeds.
-@@ -504,6 +643,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -504,6 +513,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  		goto cleanup;
  	}
  
@@ -280,7 +170,7 @@ index 7e4cc6f55..c47a92330 100644
  	ret = vmbus_post_msg(gpadlmsg, msginfo->msgsize -
  			     sizeof(*msginfo), true);
  
-@@ -534,6 +675,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -534,6 +545,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	wait_for_completion(&msginfo->waitevent);
  
  	if (msginfo->response.gpadl_created.creation_status != 0) {
@@ -288,7 +178,7 @@ index 7e4cc6f55..c47a92330 100644
  		pr_err("Failed to establish GPADL: err = 0x%x\n",
  		       msginfo->response.gpadl_created.creation_status);
  
-@@ -542,6 +684,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -542,6 +554,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	}
  
  	if (channel->rescind) {
@@ -296,7 +186,7 @@ index 7e4cc6f55..c47a92330 100644
  		ret = -ENODEV;
  		goto cleanup;
  	}
-@@ -550,6 +693,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -550,6 +563,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	gpadl->gpadl_handle = gpadlmsg->gpadl;
  	gpadl->buffer = kbuffer;
  	gpadl->size = size;
@@ -304,7 +194,7 @@ index 7e4cc6f55..c47a92330 100644
  
  
  cleanup:
-@@ -559,7 +703,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -559,7 +573,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	vmbus_free_channel_msginfo(msginfo);
  
@@ -319,7 +209,7 @@ index 7e4cc6f55..c47a92330 100644
  		/*
  		 * If set_memory_encrypted() fails, the decrypted flag is
  		 * left as true so the memory is leaked instead of being
-@@ -586,7 +736,7 @@ int vmbus_establish_gpadl(struct vmbus_channel *channel, void *kbuffer,
+@@ -586,7 +606,7 @@ int vmbus_establish_gpadl(struct vmbus_channel *channel, void *kbuffer,
  			  u32 size, struct vmbus_gpadl *gpadl)
  {
  	return __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, kbuffer, size,
@@ -328,7 +218,7 @@ index 7e4cc6f55..c47a92330 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
  
-@@ -597,16 +747,19 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
+@@ -597,16 +617,19 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
   * @channel: a channel
   * @kbuffer: from kmalloc or vmalloc; must already be decrypted by the caller
   * @size: page-size multiple
@@ -350,17 +240,7 @@ index 7e4cc6f55..c47a92330 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_establish_gpadl_caller_decrypted);
  
-@@ -632,7 +785,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
- 		return;
- 	}
- 
--	vunmap(addr);
-+	if (addr)
-+		vunmap(addr);
- 
- 	for (i = 0; i < chunk_cnt; i++) {
- 		unsigned long vaddr =
-@@ -648,11 +802,25 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+@@ -648,11 +671,26 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
  }
  EXPORT_SYMBOL_GPL(vmbus_free_buffer);
  
@@ -370,7 +250,8 @@ index 7e4cc6f55..c47a92330 100644
 +		return;
 +
 +	kvfree(buffer->pages);
-+	if (vmbus_buffer_should_free(buffer))
++	if (!buffer->leak && !buffer->gpadl.leak &&
++	    !buffer->gpadl.gpadl_handle)
 +		vmbus_free_buffer(buffer->addr, buffer->chunks,
 +				  buffer->chunk_cnt);
 +	memset(buffer, 0, sizeof(*buffer));
@@ -386,7 +267,7 @@ index 7e4cc6f55..c47a92330 100644
   * @chunks_out: on success, set to the array of underlying chunks, or NULL when
   *              the buffer was allocated with vzalloc()
   * @chunk_cnt_out: on success, set to the number of chunks
-@@ -669,15 +837,17 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
+@@ -669,6 +707,7 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
   */
  void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  			 u32 size,
@@ -394,66 +275,16 @@ index 7e4cc6f55..c47a92330 100644
  			 struct page ***chunks_out,
  			 u32 *chunk_cnt_out)
  {
--	unsigned long nr_pages = PFN_UP(size);
--	unsigned long remaining = nr_pages;
-+	u32 rounded_size;
-+	unsigned long nr_pages;
-+	unsigned long remaining;
- 	unsigned long page_idx = 0;
- 	struct page **chunks = NULL;
- 	struct page **pages = NULL;
--	int order = MAX_PAGE_ORDER;
-+	unsigned int order = MAX_PAGE_ORDER;
- 	u32 chunk_cnt = 0;
- 	void *addr;
- 	u32 i;
-@@ -686,12 +856,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 	*chunks_out = NULL;
- 	*chunk_cnt_out = 0;
- 
--	if (!nr_pages)
-+	if (vmbus_buffer_round_size(size, &rounded_size))
+@@ -690,7 +729,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  		return NULL;
-+	nr_pages = rounded_size >> PAGE_SHIFT;
-+	remaining = nr_pages;
  
  	/* If the buffer does not need to be decrypted, just use vzalloc() */
 -	if (!hv_is_isolation_supported() || channel->co_external_memory)
--		return vzalloc(nr_pages << PAGE_SHIFT);
-+	if ((!hv_is_isolation_supported() &&
-+	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
-+		return vzalloc(rounded_size);
++	if (!hv_is_isolation_supported() || confidential)
+ 		return vzalloc(nr_pages << PAGE_SHIFT);
  
  	/* Worst case: every chunk is a single page. */
- 	chunks = kvmalloc_objs(*chunks, nr_pages, GFP_KERNEL | __GFP_ZERO);
-@@ -706,7 +879,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 		struct page *page;
- 		gfp_t gfp;
- 
--		order = min(order, ilog2(remaining));
-+		order = vmbus_buffer_order(remaining, order);
- 
- 		/*
- 		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
-@@ -721,7 +894,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
- 					gfp, order);
- 		if (!page) {
--			if (!order--)
-+			if (!vmbus_buffer_lower_order(&order))
- 				goto err;
- 			continue;
- 		}
-@@ -748,7 +921,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 	if (!addr)
- 		goto err;
- 
--	memset(addr, 0, nr_pages << PAGE_SHIFT);
-+	memset(addr, 0, rounded_size);
- 
- 	kvfree(pages);
- 	*chunks_out = chunks;
-@@ -832,7 +1005,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -832,7 +871,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  {
  	struct vmbus_channel_open_channel *open_msg;
  	struct vmbus_channel_msginfo *open_info = NULL;
@@ -462,7 +293,7 @@ index 7e4cc6f55..c47a92330 100644
  	u32 send_pages, recv_pages;
  	unsigned long flags;
  	int err;
-@@ -860,22 +1033,24 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -860,22 +899,24 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  		newchannel->max_pkt_size = VMBUS_DEFAULT_MAX_PKT_SIZE;
  
  	/* Establish the gpadl for the ring buffer */
@@ -492,7 +323,7 @@ index 7e4cc6f55..c47a92330 100644
  				 recv_pages, newchannel->max_pkt_size,
  				 newchannel->co_ring_buffer);
  	if (err)
-@@ -897,8 +1072,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -897,8 +938,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  	open_msg->header.msgtype = CHANNELMSG_OPENCHANNEL;
  	open_msg->openid = newchannel->offermsg.child_relid;
  	open_msg->child_relid = newchannel->offermsg.child_relid;
@@ -502,7 +333,7 @@ index 7e4cc6f55..c47a92330 100644
  	/*
  	 * The unit of ->downstream_ringbuffer_pageoffset is HV_HYP_PAGE and
  	 * the unit of ->ringbuffer_send_offset (i.e. send_pages) is PAGE, so
-@@ -956,7 +1130,8 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -956,7 +996,8 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  error_free_info:
  	kfree(open_info);
  error_free_gpadl:
@@ -512,19 +343,7 @@ index 7e4cc6f55..c47a92330 100644
  error_clean_ring:
  	hv_ringbuffer_cleanup(&newchannel->outbound);
  	hv_ringbuffer_cleanup(&newchannel->inbound);
-@@ -1011,8 +1186,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
- 
- 	info = kzalloc(sizeof(*info) +
- 		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
--	if (!info)
-+	if (!info) {
-+		gpadl->leak = true;
- 		return -ENOMEM;
-+	}
- 
- 	init_completion(&info->waitevent);
- 	info->waiting_channel = channel;
-@@ -1058,15 +1235,20 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1058,15 +1099,20 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  
  	kfree(info);
  
@@ -553,7 +372,7 @@ index 7e4cc6f55..c47a92330 100644
  
  	return ret;
  }
-@@ -1142,9 +1324,10 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
+@@ -1142,9 +1188,10 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
  	}
  
  	/* Tear down the gpadl for the channel's ring buffer */
@@ -567,7 +386,7 @@ index 7e4cc6f55..c47a92330 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 33923621a..20d023c97 100644
+index 33923621a5a3f2646f13b9eb281fa69b56d2502d..20d023c9735e9e3e4d32196619ff50131befd5e2 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -204,8 +204,8 @@ extern int hv_synic_cleanup(unsigned int cpu);
@@ -582,7 +401,7 @@ index 33923621a..20d023c97 100644
  void hv_ringbuffer_cleanup(struct hv_ring_buffer_info *ring_info);
  
 diff --git a/drivers/hv/ring_buffer.c b/drivers/hv/ring_buffer.c
-index 592a9601f..16b1c2910 100644
+index 592a9601faaafa082198fee593581f8702f97503..16b1c291078908c41b82b5a482fa84a8a1f379a3 100644
 --- a/drivers/hv/ring_buffer.c
 +++ b/drivers/hv/ring_buffer.c
 @@ -184,8 +184,8 @@ void hv_ringbuffer_pre_init(struct vmbus_channel *channel)
@@ -611,7 +430,7 @@ index 592a9601f..16b1c2910 100644
  	ring_info->ring_buffer = (struct hv_ring_buffer *)
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-index 4841367fd..a15cb2460 100644
+index 4841367fdab2fccc8dd974cce754bc71f25a9ea3..a15cb2460344f4b96c4d21d60922002488020438 100644
 --- a/drivers/net/hyperv/hyperv_net.h
 +++ b/drivers/net/hyperv/hyperv_net.h
 @@ -1158,21 +1158,15 @@ struct netvsc_device {
@@ -639,7 +458,7 @@ index 4841367fd..a15cb2460 100644
  	u32 send_section_size;
  	unsigned long *send_section_map;
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 5cd084e56..29ccd77fb 100644
+index 5cd084e5696cd1683694ba1c8b5d0362b0428887..29ccd77fb177e455ead4f1b1eda2165ba5fdb678 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -134,10 +134,8 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
@@ -810,25 +629,10 @@ index 5cd084e56..29ccd77fb 100644
  	int i;
  	int count = 0;
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 7b4cc456c..0d7a9802e 100644
+index 7b4cc456c453419b64e331f58163b0ee5b5ca98c..b3f41ffc74f81854a7f478dd1c54d6fb235f5987 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
-@@ -56,12 +56,10 @@ struct hv_uio_private_data {
- 	struct hv_device *device;
- 	atomic_t refcnt;
- 
--	void	*recv_buf;
--	struct vmbus_gpadl recv_gpadl;
-+	struct vmbus_buffer recv_buffer;
- 	char	recv_name[32];	/* "recv_4294967295" */
- 
--	void	*send_buf;
--	struct vmbus_gpadl send_gpadl;
-+	struct vmbus_buffer send_buffer;
- 	char	send_name[32];
- };
- 
-@@ -150,19 +148,21 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
+@@ -150,19 +150,21 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
  	vmbus_device_unregister(channel->device_obj);
  }
  
@@ -856,31 +660,28 @@ index 7b4cc456c..0d7a9802e 100644
  	return 0;
  }
  
-@@ -195,17 +195,13 @@ hv_uio_new_channel(struct vmbus_channel *new_sc)
- static void
+@@ -196,14 +198,16 @@ static void
  hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
  {
--	if (pdata->send_gpadl.gpadl_handle) {
+ 	if (pdata->send_gpadl.gpadl_handle) {
 -		vmbus_teardown_gpadl(dev->channel, &pdata->send_gpadl);
 -		if (!pdata->send_gpadl.decrypted)
--			vfree(pdata->send_buf);
--	}
-+	if (pdata->send_buffer.gpadl.gpadl_handle)
-+		vmbus_teardown_gpadl(dev->channel, &pdata->send_buffer.gpadl);
-+	vmbus_release_buffer(&pdata->send_buffer);
++		if (vmbus_teardown_gpadl(dev->channel, &pdata->send_gpadl))
++			pdata->send_gpadl.leak = true;
++		if (!pdata->send_gpadl.leak && !pdata->send_gpadl.decrypted)
+ 			vfree(pdata->send_buf);
+ 	}
  
--	if (pdata->recv_gpadl.gpadl_handle) {
+ 	if (pdata->recv_gpadl.gpadl_handle) {
 -		vmbus_teardown_gpadl(dev->channel, &pdata->recv_gpadl);
 -		if (!pdata->recv_gpadl.decrypted)
--			vfree(pdata->recv_buf);
--	}
-+	if (pdata->recv_buffer.gpadl.gpadl_handle)
-+		vmbus_teardown_gpadl(dev->channel, &pdata->recv_buffer.gpadl);
-+	vmbus_release_buffer(&pdata->recv_buffer);
++		if (vmbus_teardown_gpadl(dev->channel, &pdata->recv_gpadl))
++			pdata->recv_gpadl.leak = true;
++		if (!pdata->recv_gpadl.leak && !pdata->recv_gpadl.decrypted)
+ 			vfree(pdata->recv_buf);
+ 	}
  }
- 
- /* VMBus primary channel is opened on first use */
-@@ -283,12 +279,11 @@ hv_uio_probe(struct hv_device *dev,
+@@ -283,12 +287,11 @@ hv_uio_probe(struct hv_device *dev,
  
  	/* mem resources */
  	pdata->info.mem[TXRX_RING_MAP].name = "txrx_rings";
@@ -896,83 +697,28 @@ index 7b4cc456c..0d7a9802e 100644
  
  	pdata->info.mem[INT_PAGE_MAP].name = "int_page";
  	pdata->info.mem[INT_PAGE_MAP].addr
-@@ -303,46 +298,54 @@ hv_uio_probe(struct hv_device *dev,
- 	pdata->info.mem[MON_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
- 
- 	if (channel->device_id == HV_NIC) {
--		pdata->recv_buf = vzalloc(RECV_BUFFER_SIZE);
--		if (!pdata->recv_buf) {
-+		pdata->recv_buffer.addr =
-+			vmbus_alloc_buffer(channel, RECV_BUFFER_SIZE, false,
-+					   &pdata->recv_buffer.chunks,
-+					   &pdata->recv_buffer.chunk_cnt);
-+		if (!pdata->recv_buffer.addr) {
- 			ret = -ENOMEM;
- 			goto fail_free_ring;
- 		}
- 
--		ret = vmbus_establish_gpadl(channel, pdata->recv_buf,
--					    RECV_BUFFER_SIZE, &pdata->recv_gpadl);
--		if (ret) {
+@@ -312,7 +315,8 @@ hv_uio_probe(struct hv_device *dev,
+ 		ret = vmbus_establish_gpadl(channel, pdata->recv_buf,
+ 					    RECV_BUFFER_SIZE, &pdata->recv_gpadl);
+ 		if (ret) {
 -			if (!pdata->recv_gpadl.decrypted)
--				vfree(pdata->recv_buf);
-+		ret = vmbus_establish_gpadl_caller_decrypted(channel,
-+							     pdata->recv_buffer.addr,
-+							     RECV_BUFFER_SIZE,
-+							     &pdata->recv_buffer.leak,
-+							     &pdata->recv_buffer.gpadl);
-+		if (ret)
- 			goto fail_close;
--		}
- 
- 		/* put Global Physical Address Label in name */
- 		snprintf(pdata->recv_name, sizeof(pdata->recv_name),
--			 "recv:%u", pdata->recv_gpadl.gpadl_handle);
-+			 "recv:%u", pdata->recv_buffer.gpadl.gpadl_handle);
- 		pdata->info.mem[RECV_BUF_MAP].name = pdata->recv_name;
--		pdata->info.mem[RECV_BUF_MAP].addr = (uintptr_t)pdata->recv_buf;
-+		pdata->info.mem[RECV_BUF_MAP].addr =
-+			(uintptr_t)pdata->recv_buffer.addr;
- 		pdata->info.mem[RECV_BUF_MAP].size = RECV_BUFFER_SIZE;
- 		pdata->info.mem[RECV_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
- 
--		pdata->send_buf = vzalloc(SEND_BUFFER_SIZE);
--		if (!pdata->send_buf) {
-+		pdata->send_buffer.addr =
-+			vmbus_alloc_buffer(channel, SEND_BUFFER_SIZE, false,
-+					   &pdata->send_buffer.chunks,
-+					   &pdata->send_buffer.chunk_cnt);
-+		if (!pdata->send_buffer.addr) {
- 			ret = -ENOMEM;
++			if (!pdata->recv_gpadl.leak &&
++			    !pdata->recv_gpadl.decrypted)
+ 				vfree(pdata->recv_buf);
  			goto fail_close;
  		}
- 
--		ret = vmbus_establish_gpadl(channel, pdata->send_buf,
--					    SEND_BUFFER_SIZE, &pdata->send_gpadl);
--		if (ret) {
+@@ -334,7 +338,8 @@ hv_uio_probe(struct hv_device *dev,
+ 		ret = vmbus_establish_gpadl(channel, pdata->send_buf,
+ 					    SEND_BUFFER_SIZE, &pdata->send_gpadl);
+ 		if (ret) {
 -			if (!pdata->send_gpadl.decrypted)
--				vfree(pdata->send_buf);
-+		ret = vmbus_establish_gpadl_caller_decrypted(channel,
-+							     pdata->send_buffer.addr,
-+							     SEND_BUFFER_SIZE,
-+							     &pdata->send_buffer.leak,
-+							     &pdata->send_buffer.gpadl);
-+		if (ret)
++			if (!pdata->send_gpadl.leak &&
++			    !pdata->send_gpadl.decrypted)
+ 				vfree(pdata->send_buf);
  			goto fail_close;
--		}
- 
- 		snprintf(pdata->send_name, sizeof(pdata->send_name),
--			 "send:%u", pdata->send_gpadl.gpadl_handle);
-+			 "send:%u", pdata->send_buffer.gpadl.gpadl_handle);
- 		pdata->info.mem[SEND_BUF_MAP].name = pdata->send_name;
--		pdata->info.mem[SEND_BUF_MAP].addr = (uintptr_t)pdata->send_buf;
-+		pdata->info.mem[SEND_BUF_MAP].addr =
-+			(uintptr_t)pdata->send_buffer.addr;
- 		pdata->info.mem[SEND_BUF_MAP].size = SEND_BUFFER_SIZE;
- 		pdata->info.mem[SEND_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
- 	}
+ 		}
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 9e109d91a..567679c68 100644
+index 9e109d91aa1430d83aaf37984f9d484641805873..567679c68da183f883ae32c3fd1a6d0d04a7378e 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -70,8 +70,7 @@
@@ -1035,3 +781,412 @@ index 9e109d91a..567679c68 100644
  
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
  
+-- 
+2.43.0
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emersonbusson <emersonbusson@gmail.com>
+Date: Thu, 24 Sep 2026 14:17:34 -0300
+Subject: [PATCH 2/4] hv: vmbus: validate chunk buffer allocation and cleanup
+
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2e94afcb0 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -12,6 +12,8 @@
+ #include <linux/sched.h>
+ #include <linux/wait.h>
+ #include <linux/mm.h>
++#include <linux/cc_platform.h>
++#include <kunit/test.h>
+ #include <linux/overflow.h>
+ #include <linux/slab.h>
+ #include <linux/log2.h>
+@@ -27,6 +29,134 @@
+ 
+ #include "hyperv_vmbus.h"
+ 
++static int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
++static unsigned int vmbus_buffer_order(unsigned long remaining,
++				       unsigned int max_order);
++static bool vmbus_buffer_lower_order(unsigned int *order);
++static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
++
++#if IS_ENABLED(CONFIG_KUNIT)
++static void vmbus_buffer_size_rounding_test(struct kunit *test)
++{
++	u32 rounded_size;
++
++	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(1, &rounded_size), 0);
++	KUNIT_EXPECT_EQ(test, rounded_size, (u32)PAGE_SIZE);
++	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(PAGE_SIZE, &rounded_size), 0);
++	KUNIT_EXPECT_EQ(test, rounded_size, (u32)PAGE_SIZE);
++}
++
++static void vmbus_buffer_size_overflow_test(struct kunit *test)
++{
++	u32 rounded_size = 0;
++	int ret;
++
++	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(0, &rounded_size), -EINVAL);
++	ret = vmbus_buffer_round_size(U32_MAX, &rounded_size);
++	KUNIT_EXPECT_EQ(test, ret, -EOVERFLOW);
++	ret = vmbus_buffer_round_size(U32_MAX - PAGE_SIZE + 1, &rounded_size);
++	KUNIT_EXPECT_EQ(test, ret, 0);
++	KUNIT_EXPECT_EQ(test, rounded_size,
++			(u32)(U32_MAX - PAGE_SIZE + 1));
++}
++
++static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
++{
++	unsigned int order;
++
++	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
++	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
++	while (order)
++		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
++	KUNIT_EXPECT_FALSE(test, vmbus_buffer_lower_order(&order));
++	KUNIT_EXPECT_EQ(test, order, 0U);
++	KUNIT_EXPECT_EQ(test, vmbus_buffer_order(3, MAX_PAGE_ORDER), 1U);
++}
++
++static void vmbus_buffer_failed_teardown_leaks_test(struct kunit *test)
++{
++	struct vmbus_buffer buffer = {
++		.addr = (void *)1,
++		.gpadl.gpadl_handle = 1,
++	};
++
++	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
++	buffer.gpadl.gpadl_handle = 0;
++	buffer.gpadl.leak = true;
++	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
++	buffer.gpadl.leak = false;
++	buffer.leak = true;
++	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
++	buffer.leak = false;
++	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
++}
++
++static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
++{
++	struct page **chunks;
++	struct vmbus_buffer buffer = {};
++
++	chunks = kmalloc_obj(*chunks, GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, chunks);
++	vmbus_free_buffer(NULL, chunks, 0);
++
++	buffer.addr = vzalloc(PAGE_SIZE);
++	KUNIT_ASSERT_NOT_NULL(test, buffer.addr);
++	vmbus_release_buffer(&buffer);
++	KUNIT_EXPECT_PTR_EQ(test, buffer.addr, NULL);
++	vmbus_release_buffer(&buffer);
++}
++
++static struct kunit_case vmbus_buffer_test_cases[] = {
++	KUNIT_CASE(vmbus_buffer_size_rounding_test),
++	KUNIT_CASE(vmbus_buffer_size_overflow_test),
++	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
++	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
++	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
++	{}
++};
++
++static struct kunit_suite vmbus_buffer_test_suite = {
++	.name = "hyperv-vmbus-buffer",
++	.test_cases = vmbus_buffer_test_cases,
++};
++
++kunit_test_suite(vmbus_buffer_test_suite);
++#endif
++
++static int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
++{
++	if (!size)
++		return -EINVAL;
++
++	if (size > U32_MAX - (u32)PAGE_SIZE + 1)
++		return -EOVERFLOW;
++
++	*rounded_size = round_up(size, (u32)PAGE_SIZE);
++	return 0;
++}
++
++static unsigned int vmbus_buffer_order(unsigned long remaining,
++				       unsigned int max_order)
++{
++	return min_t(unsigned int, max_order, ilog2(remaining));
++}
++
++static bool vmbus_buffer_lower_order(unsigned int *order)
++{
++	if (!*order)
++		return false;
++
++	(*order)--;
++	return true;
++}
++
++static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
++{
++	return !buffer->leak && !buffer->gpadl.leak &&
++	       !buffer->gpadl.gpadl_handle;
++}
++
+ /*
+  * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
+  *
+@@ -655,7 +785,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+ 		return;
+ 	}
+ 
+-	vunmap(addr);
++	if (addr)
++		vunmap(addr);
+ 
+ 	for (i = 0; i < chunk_cnt; i++) {
+ 		unsigned long vaddr =
+@@ -677,8 +808,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+ 		return;
+ 
+ 	kvfree(buffer->pages);
+-	if (!buffer->leak && !buffer->gpadl.leak &&
+-	    !buffer->gpadl.gpadl_handle)
++	if (vmbus_buffer_should_free(buffer))
+ 		vmbus_free_buffer(buffer->addr, buffer->chunks,
+ 				  buffer->chunk_cnt);
+ 	memset(buffer, 0, sizeof(*buffer));
+@@ -711,12 +841,13 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 			 struct page ***chunks_out,
+ 			 u32 *chunk_cnt_out)
+ {
+-	unsigned long nr_pages = PFN_UP(size);
+-	unsigned long remaining = nr_pages;
++	u32 rounded_size;
++	unsigned long nr_pages;
++	unsigned long remaining;
+ 	unsigned long page_idx = 0;
+ 	struct page **chunks = NULL;
+ 	struct page **pages = NULL;
+-	int order = MAX_PAGE_ORDER;
++	unsigned int order = MAX_PAGE_ORDER;
+ 	u32 chunk_cnt = 0;
+ 	void *addr;
+ 	u32 i;
+@@ -725,12 +856,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	*chunks_out = NULL;
+ 	*chunk_cnt_out = 0;
+ 
+-	if (!nr_pages)
++	if (vmbus_buffer_round_size(size, &rounded_size))
+ 		return NULL;
++	nr_pages = rounded_size >> PAGE_SHIFT;
++	remaining = nr_pages;
+ 
+ 	/* If the buffer does not need to be decrypted, just use vzalloc() */
+-	if (!hv_is_isolation_supported() || confidential)
+-		return vzalloc(nr_pages << PAGE_SHIFT);
++	if ((!hv_is_isolation_supported() &&
++	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
++		return vzalloc(rounded_size);
+ 
+ 	/* Worst case: every chunk is a single page. */
+ 	chunks = kvmalloc_objs(*chunks, nr_pages, GFP_KERNEL | __GFP_ZERO);
+@@ -745,7 +879,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 		struct page *page;
+ 		gfp_t gfp;
+ 
+-		order = min(order, ilog2(remaining));
++		order = vmbus_buffer_order(remaining, order);
+ 
+ 		/*
+ 		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
+@@ -760,7 +894,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
+ 					gfp, order);
+ 		if (!page) {
+-			if (!order--)
++			if (!vmbus_buffer_lower_order(&order))
+ 				goto err;
+ 			continue;
+ 		}
+@@ -787,7 +921,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	if (!addr)
+ 		goto err;
+ 
+-	memset(addr, 0, nr_pages << PAGE_SHIFT);
++	memset(addr, 0, rounded_size);
+ 
+ 	kvfree(pages);
+ 	*chunks_out = chunks;
+@@ -1052,8 +1186,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+ 
+ 	info = kzalloc(sizeof(*info) +
+ 		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
+-	if (!info)
++	if (!info) {
++		gpadl->leak = true;
+ 		return -ENOMEM;
++	}
+ 
+ 	init_completion(&info->waitevent);
+ 	info->waiting_channel = channel;
+-- 
+2.43.0
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emersonbusson <emersonbusson@gmail.com>
+Date: Thu, 24 Sep 2026 14:17:35 -0300
+Subject: [PATCH 3/4] uio: hv_generic: allocate host-visible buffers through
+ VMBus
+
+
+diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
+index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe71109331859 100644
+--- a/drivers/uio/uio_hv_generic.c
++++ b/drivers/uio/uio_hv_generic.c
+@@ -56,12 +56,10 @@ struct hv_uio_private_data {
+ 	struct hv_device *device;
+ 	atomic_t refcnt;
+ 
+-	void	*recv_buf;
+-	struct vmbus_gpadl recv_gpadl;
++	struct vmbus_buffer recv_buffer;
+ 	char	recv_name[32];	/* "recv_4294967295" */
+ 
+-	void	*send_buf;
+-	struct vmbus_gpadl send_gpadl;
++	struct vmbus_buffer send_buffer;
+ 	char	send_name[32];
+ };
+ 
+@@ -197,19 +195,13 @@ hv_uio_new_channel(struct vmbus_channel *new_sc)
+ static void
+ hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
+ {
+-	if (pdata->send_gpadl.gpadl_handle) {
+-		if (vmbus_teardown_gpadl(dev->channel, &pdata->send_gpadl))
+-			pdata->send_gpadl.leak = true;
+-		if (!pdata->send_gpadl.leak && !pdata->send_gpadl.decrypted)
+-			vfree(pdata->send_buf);
+-	}
++	if (pdata->send_buffer.gpadl.gpadl_handle)
++		vmbus_teardown_gpadl(dev->channel, &pdata->send_buffer.gpadl);
++	vmbus_release_buffer(&pdata->send_buffer);
+ 
+-	if (pdata->recv_gpadl.gpadl_handle) {
+-		if (vmbus_teardown_gpadl(dev->channel, &pdata->recv_gpadl))
+-			pdata->recv_gpadl.leak = true;
+-		if (!pdata->recv_gpadl.leak && !pdata->recv_gpadl.decrypted)
+-			vfree(pdata->recv_buf);
+-	}
++	if (pdata->recv_buffer.gpadl.gpadl_handle)
++		vmbus_teardown_gpadl(dev->channel, &pdata->recv_buffer.gpadl);
++	vmbus_release_buffer(&pdata->recv_buffer);
+ }
+ 
+ /* VMBus primary channel is opened on first use */
+@@ -306,48 +298,54 @@ hv_uio_probe(struct hv_device *dev,
+ 	pdata->info.mem[MON_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
+ 
+ 	if (channel->device_id == HV_NIC) {
+-		pdata->recv_buf = vzalloc(RECV_BUFFER_SIZE);
+-		if (!pdata->recv_buf) {
++		pdata->recv_buffer.addr =
++			vmbus_alloc_buffer(channel, RECV_BUFFER_SIZE, false,
++					   &pdata->recv_buffer.chunks,
++					   &pdata->recv_buffer.chunk_cnt);
++		if (!pdata->recv_buffer.addr) {
+ 			ret = -ENOMEM;
+ 			goto fail_free_ring;
+ 		}
+ 
+-		ret = vmbus_establish_gpadl(channel, pdata->recv_buf,
+-					    RECV_BUFFER_SIZE, &pdata->recv_gpadl);
+-		if (ret) {
+-			if (!pdata->recv_gpadl.leak &&
+-			    !pdata->recv_gpadl.decrypted)
+-				vfree(pdata->recv_buf);
++		ret = vmbus_establish_gpadl_caller_decrypted(channel,
++							     pdata->recv_buffer.addr,
++							     RECV_BUFFER_SIZE,
++							     &pdata->recv_buffer.leak,
++							     &pdata->recv_buffer.gpadl);
++		if (ret)
+ 			goto fail_close;
+-		}
+ 
+ 		/* put Global Physical Address Label in name */
+ 		snprintf(pdata->recv_name, sizeof(pdata->recv_name),
+-			 "recv:%u", pdata->recv_gpadl.gpadl_handle);
++			 "recv:%u", pdata->recv_buffer.gpadl.gpadl_handle);
+ 		pdata->info.mem[RECV_BUF_MAP].name = pdata->recv_name;
+-		pdata->info.mem[RECV_BUF_MAP].addr = (uintptr_t)pdata->recv_buf;
++		pdata->info.mem[RECV_BUF_MAP].addr =
++			(uintptr_t)pdata->recv_buffer.addr;
+ 		pdata->info.mem[RECV_BUF_MAP].size = RECV_BUFFER_SIZE;
+ 		pdata->info.mem[RECV_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
+ 
+-		pdata->send_buf = vzalloc(SEND_BUFFER_SIZE);
+-		if (!pdata->send_buf) {
++		pdata->send_buffer.addr =
++			vmbus_alloc_buffer(channel, SEND_BUFFER_SIZE, false,
++					   &pdata->send_buffer.chunks,
++					   &pdata->send_buffer.chunk_cnt);
++		if (!pdata->send_buffer.addr) {
+ 			ret = -ENOMEM;
+ 			goto fail_close;
+ 		}
+ 
+-		ret = vmbus_establish_gpadl(channel, pdata->send_buf,
+-					    SEND_BUFFER_SIZE, &pdata->send_gpadl);
+-		if (ret) {
+-			if (!pdata->send_gpadl.leak &&
+-			    !pdata->send_gpadl.decrypted)
+-				vfree(pdata->send_buf);
++		ret = vmbus_establish_gpadl_caller_decrypted(channel,
++							     pdata->send_buffer.addr,
++							     SEND_BUFFER_SIZE,
++							     &pdata->send_buffer.leak,
++							     &pdata->send_buffer.gpadl);
++		if (ret)
+ 			goto fail_close;
+-		}
+ 
+ 		snprintf(pdata->send_name, sizeof(pdata->send_name),
+-			 "send:%u", pdata->send_gpadl.gpadl_handle);
++			 "send:%u", pdata->send_buffer.gpadl.gpadl_handle);
+ 		pdata->info.mem[SEND_BUF_MAP].name = pdata->send_name;
+-		pdata->info.mem[SEND_BUF_MAP].addr = (uintptr_t)pdata->send_buf;
++		pdata->info.mem[SEND_BUF_MAP].addr =
++			(uintptr_t)pdata->send_buffer.addr;
+ 		pdata->info.mem[SEND_BUF_MAP].size = SEND_BUFFER_SIZE;
+ 		pdata->info.mem[SEND_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
+ 	}
+-- 
+2.43.0
+
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emersonbusson <emersonbusson@gmail.com>
+Date: Thu, 24 Sep 2026 14:34:41 -0300
+Subject: [PATCH 4/4] test(hv): correct VMBus fallback order vector
+
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 091288f8c00c8426480c08a1c91900c2e94afcb0..c47a923306f298291b169c5827c777082ba1b162 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -64,7 +64,7 @@ static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
+ {
+ 	unsigned int order;
+ 
+-	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
++	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
+ 	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
+ 	while (order)
+ 		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
+-- 
+2.43.0
+

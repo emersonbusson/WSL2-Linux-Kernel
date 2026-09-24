@@ -1,5 +1,11 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emersonbusson <emersonbusson@gmail.com>
+Date: Thu, 24 Sep 2026 14:17:34 -0300
+Subject: [PATCH 2/4] hv: vmbus: validate chunk buffer allocation and cleanup
+
+
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 87b806a48..091288f8c 100644
+index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2e94afcb0 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,8 @@
@@ -241,3 +247,6 @@ index 87b806a48..091288f8c 100644
  
  	init_completion(&info->waitevent);
  	info->waiting_channel = channel;
+-- 
+2.43.0
+

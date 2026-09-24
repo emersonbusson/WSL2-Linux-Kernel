@@ -1,5 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Wed, 23 Sep 2026 09:57:36 -0300
+Subject: [PATCH 1/4] hv: vmbus: convert ring buffer allocation to
+ vmbus_alloc_buffer()
+
+When opening VMBus channels under memory pressure or heavy buddy
+allocator fragmentation, high-order allocations in vmbus_alloc_ring()
+can fail. While an initial fallback to vzalloc() was proposed, that
+breaks Confidential Computing (CoCo) guests (such as ARM64 CCA and
+Intel TDX without a paravisor), because set_memory_decrypted() only
+supports physically contiguous, direct-mapped memory ranges.
+
+With vmbus_alloc_buffer() available upstream, buffer allocations are
+handled as a series of physically contiguous chunks down to order 0,
+decrypted individually via set_memory_decrypted(), and mapped together
+into a virtually contiguous range via vmap().
+
+Convert vmbus_alloc_ring() and vmbus_free_ring() to use
+vmbus_alloc_buffer() and encapsulate the buffer address, page pointers,
+chunks and GPADL state in struct vmbus_buffer. This reduces high-order
+allocation failures and retains chunk-based CoCo handling. Platform support
+still requires hardware validation.
+
+Suggested-by: Michael Kelley <mhklinux@outlook.com>
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f55..87b806a48 100644
+index 7e4cc6f55237a8945d51696a6520b2ecc31b805e..87b806a4846d8c9b803c7d51ccc7427c5ae9d148 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,7 @@
@@ -359,7 +386,7 @@ index 7e4cc6f55..87b806a48 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 33923621a..20d023c97 100644
+index 33923621a5a3f2646f13b9eb281fa69b56d2502d..20d023c9735e9e3e4d32196619ff50131befd5e2 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -204,8 +204,8 @@ extern int hv_synic_cleanup(unsigned int cpu);
@@ -374,7 +401,7 @@ index 33923621a..20d023c97 100644
  void hv_ringbuffer_cleanup(struct hv_ring_buffer_info *ring_info);
  
 diff --git a/drivers/hv/ring_buffer.c b/drivers/hv/ring_buffer.c
-index 592a9601f..16b1c2910 100644
+index 592a9601faaafa082198fee593581f8702f97503..16b1c291078908c41b82b5a482fa84a8a1f379a3 100644
 --- a/drivers/hv/ring_buffer.c
 +++ b/drivers/hv/ring_buffer.c
 @@ -184,8 +184,8 @@ void hv_ringbuffer_pre_init(struct vmbus_channel *channel)
@@ -403,7 +430,7 @@ index 592a9601f..16b1c2910 100644
  	ring_info->ring_buffer = (struct hv_ring_buffer *)
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-index 4841367fd..a15cb2460 100644
+index 4841367fdab2fccc8dd974cce754bc71f25a9ea3..a15cb2460344f4b96c4d21d60922002488020438 100644
 --- a/drivers/net/hyperv/hyperv_net.h
 +++ b/drivers/net/hyperv/hyperv_net.h
 @@ -1158,21 +1158,15 @@ struct netvsc_device {
@@ -431,7 +458,7 @@ index 4841367fd..a15cb2460 100644
  	u32 send_section_size;
  	unsigned long *send_section_map;
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 5cd084e56..29ccd77fb 100644
+index 5cd084e5696cd1683694ba1c8b5d0362b0428887..29ccd77fb177e455ead4f1b1eda2165ba5fdb678 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -134,10 +134,8 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
@@ -602,7 +629,7 @@ index 5cd084e56..29ccd77fb 100644
  	int i;
  	int count = 0;
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 7b4cc456c..b3f41ffc7 100644
+index 7b4cc456c453419b64e331f58163b0ee5b5ca98c..b3f41ffc74f81854a7f478dd1c54d6fb235f5987 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -150,19 +150,21 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
@@ -691,7 +718,7 @@ index 7b4cc456c..b3f41ffc7 100644
  			goto fail_close;
  		}
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 9e109d91a..567679c68 100644
+index 9e109d91aa1430d83aaf37984f9d484641805873..567679c68da183f883ae32c3fd1a6d0d04a7378e 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -70,8 +70,7 @@
@@ -754,3 +781,6 @@ index 9e109d91a..567679c68 100644
  
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
  
+-- 
+2.43.0
+

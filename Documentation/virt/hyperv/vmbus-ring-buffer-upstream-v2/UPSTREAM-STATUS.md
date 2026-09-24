@@ -3,7 +3,7 @@
 - **Target Repository:** [`microsoft/WSL#41634`](https://github.com/microsoft/WSL/issues/41634) (combined proposal) · [`microsoft/WSL#40795`](https://github.com/microsoft/WSL/issues/40795#issuecomment-5716513649) (solution comment) & Linux Hyper-V Subsystem (LKML)
 - **Kernel Subsystem:** `drivers/hv/` (Hyper-V Synthetic Transport)
 - **Patch Reference:** [`docs/upstream/patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch`](../patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch)
-- **Status:** v1 proposal submitted; v2 patch is a local draft with partial validation
+- **Status:** v1 proposal submitted; v2 is a public, versioned candidate with partial hosted validation
 
 ---
 
@@ -99,14 +99,11 @@ reports the same build identity. This proves the local candidate image booted;
 it does not prove that the order-7 fallback was exercised or that the patch is
 ready for upstream.
 
-The current candidate is a seven-file, uncommitted diff in
-`WSL2-Linux-Kernel-contribution`. `checkpatch.pl --strict` reports zero errors
-and warnings, plus four style checks (two continuation alignments and two
-unnecessary `extern` declarations). Code review also found that
-`vmbus_alloc_buffer()` narrows `PFN_UP(size) << PAGE_SHIFT` to `u32` without
-checking the rounded-size overflow, and the DXG GPADL caller does not act on the
-new buffer leak state if GPADL teardown fails. Resolve these before generating
-the upstream series.
+The proposal is now a four-commit mainline series, separate from the WSL 6.18
+backport. Review fixed rounded-size overflow handling, audited the DXG
+caller's GPADL ownership, and removed an unsupported universal CoCo
+compatibility claim from the first commit message. The WSL backport preserves
+pinned DXG pages when GPADL teardown is uncertain.
 
 Michael Kelley's September 22 reply endorses using `vmbus_alloc_buffer()` for
 ring allocations, grouping buffer and GPADL lifetime state, and preserving
@@ -116,27 +113,33 @@ order for selected host-initiated hv_sock listeners and describes a kernel
 allocator change as complementary. It does not remove the high-order
 allocation requirement from all VMBus users.
 
-The local draft has not passed allocation/decryption/GPADL fault injection,
-ordinary and Confidential VM teardown tests, or a clean build of the exact
-upstream patch series. The September 24 issue comment records the relationship
-without claiming the bug was reproduced or fixed.
+The exact source changes have passed hosted per-commit x86_64/arm64 builds and
+the five VMBus KUnit cases, along with the WSL VMBus/NetVSC/UIO Sparse build
+and DXG compile. Allocation and GPADL stage fault injection, UIO mmap,
+ordinary Hyper-V runtime, and Confidential VM transitions remain untested.
+The September 24 issue comment records the relationship without claiming the
+bug was reproduced or fixed.
 
 The September 24 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
-contains four commits: ring ownership (`504b66eb5`), allocator and cleanup
-safety (`edd48a46d`), UIO ownership (`fc5abc6ec`), and the corrected fallback
-test vector (`52b4700eb`). It adds an arm64 CCA allocation guard, checked page rounding, UIO GPADL buffer
+contains four commits: ring ownership (`c21852ae7`), allocator and cleanup
+safety (`a26496f6c`), UIO ownership (`6bda68531`), and the corrected fallback
+test vector (`e6ac0fa2d`). The first commit avoids a universal CoCo
+compatibility claim. It adds an arm64 CCA allocation guard, checked page
+rounding, UIO GPADL buffer
 ownership, and a guard against `vunmap(NULL)` during partial-allocation
 cleanup. Five KUnit cases cover rounding, overflow, order descent, uncertain
 release ownership, and partial cleanup. The hosted workflow now uses only
 runner-provided tools, generates its KUnit config, and builds after every
-patch. Run 36034196665 passed WSL backport and all per-commit x86_64/arm64
-build/style gates, then ran KUnit and found a wrong expected order in one test
-(4/5 VMBus cases passed). The test vector is fixed in `52b4700eb`; its hosted
-rerun is pending. Earlier runs
-36028612962 and 36030304931 passed WSL backport and mainline build/style gates;
-both stopped before KUnit because the previous workflow required absent tests,
-and the second also exposed an undeclared `rg` dependency. The updated workflow
-has not run yet. No cross-architecture compatibility claim is qualified. The
+patch. Run 36040552037 passed WSL Sparse/compile, all per-commit x86_64/arm64
+builds, and all five named VMBus KUnit cases (nine KUnit cases passed in
+total), using the prior patch mail. Runs 36038457091 and 36039517554 exposed
+and led to fixes for an invalid WSL make target and trace-only DXG variables
+with DEBUG disabled. No cross-architecture or CoCo compatibility claim is
+qualified. GPADL
+header/body/response failure injection, UIO mmap, and live Hyper-V/CoCo tests
+remain open. The regenerated patch series has the same source diff and a
+corrected commit message; a new hosted run is required to validate the exact
+refreshed patch files. The
 unversioned September 17 `[PATCH 2/2]` makes the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport remains
 separate. Its DXG destroy path now retains pinned user pages and its `vmap()`
