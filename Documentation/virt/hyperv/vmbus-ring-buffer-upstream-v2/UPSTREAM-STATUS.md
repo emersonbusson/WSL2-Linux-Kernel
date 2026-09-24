@@ -2,7 +2,7 @@
 
 - **Target Repository:** [`microsoft/WSL#41634`](https://github.com/microsoft/WSL/issues/41634) (combined proposal) · [`microsoft/WSL#40795`](https://github.com/microsoft/WSL/issues/40795#issuecomment-5716513649) (solution comment) & Linux Hyper-V Subsystem (LKML)
 - **Kernel Subsystem:** `drivers/hv/` (Hyper-V Synthetic Transport)
-- **Patch Reference:** [the original v1 fallback patch](https://github.com/emersonbusson/ramshared/blob/feat/ramshared-20260921-consolidation/docs/upstream/patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch)
+- **Patch Reference:** [`docs/upstream/patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch`](../patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch)
 - **Status:** v1 proposal submitted; v2 patch is a local draft with partial validation
 
 ---
@@ -121,11 +121,9 @@ ordinary and Confidential VM teardown tests, or a clean build of the exact
 upstream patch series. The September 24 issue comment records the relationship
 without claiming the bug was reproduced or fixed.
 
-The September 24 combined [mainline candidate in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/blob/linux-msft-wsl-6.18.y/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch)
+The September 24 combined [mainline candidate in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/blob/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch)
 adds an arm64 CCA allocation guard, checked page rounding, and UIO GPADL
-buffer ownership. Local reverse-apply and strict checkpatch pass. Hosted
-builds and KUnit have not run, and the required fault-injection cases do not
-yet exist. No cross-architecture compatibility claim is qualified. The
+buffer ownership. Local reverse-apply and strict checkpatch pass. Hosted run 36028612962 passed WSL backport, arm64, and x86_64 build/style checks; x86_64 stopped at the KUnit gate because named fault-injection cases do not yet exist. No cross-architecture compatibility claim is qualified. The
 unversioned September 17 `[PATCH 2/2]` makes the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport and DXG audit
 remain separate from this mainline patch.

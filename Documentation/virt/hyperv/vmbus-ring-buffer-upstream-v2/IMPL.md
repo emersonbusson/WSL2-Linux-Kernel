@@ -1,14 +1,14 @@
 # IMPL — Fragmentation-resilient VMBus rings across confidential guests
 
-> Candidate implementation record · SPEC: `Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/SPEC.md`
+> SSDV3 Step 3 · SPEC: `docs/specs/no-milestone/vmbus-ring-buffer-upstream-v2/SPEC.md`
 
 ## Status
 
 **PARTIAL — local design and source draft only. Not ready to send or install.**
 
-The versioned candidate in `vmbus-ring-buffer-v2.patch` is a combined diff
-against Linux `v7.3-rc4` (`93f51579e7df248780214094418f205253383cc5`). It is
-not a replacement kernel, WSL backport, or upstream email.
+The draft at `docs/upstream/patches/vmbus-ring-buffer-v2-draft.patch` is a
+working diff against Linux `v7.3-rc4` (`93f51579e7df248780214094418f205253383cc5`).
+It is not a replacement kernel, distribution backport, or upstream email.
 
 ## Implemented draft
 
@@ -84,7 +84,7 @@ not a replacement kernel, WSL backport, or upstream email.
 
 The reviewable, versioned diff and contribution dossier are maintained in the
 public kernel fork at
-[`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/linux-msft-wsl-6.18.y/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
+[`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
 based on `93f51579e7df248780214094418f205253383cc5`. The local mainline
 checkout remains at `504b66eb5324550494bb6ea03166880d1a303df4` with
 additional uncommitted edits; the patch contains the combined candidate.
