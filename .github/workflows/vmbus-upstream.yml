@@ -107,8 +107,8 @@ jobs:
             git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
             git -C linux apply "$GITHUB_WORKSPACE/$patch"
             git -C linux diff --check
-            linux/scripts/checkpatch.pl --strict --no-tree \
-              "$GITHUB_WORKSPACE/$patch" 2>&1 \
+            (cd linux && scripts/checkpatch.pl --strict --no-tree \
+              "$GITHUB_WORKSPACE/$patch") 2>&1 \
               | tee "vmbus-artifacts/checkpatch-${stage}.log"
             grep -q 'total: 0 errors, 0 warnings, 0 checks' \
               "vmbus-artifacts/checkpatch-${stage}.log"
@@ -117,7 +117,7 @@ jobs:
               drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
               2>&1 | tee "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
           done
-          test "$stage" -eq 3
+          test "$stage" -eq 4
       - name: Require and run VMBus KUnit cases
         if: matrix.arch == 'x86_64'
         run: |

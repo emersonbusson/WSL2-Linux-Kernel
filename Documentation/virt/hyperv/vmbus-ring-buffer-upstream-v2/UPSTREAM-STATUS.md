@@ -122,14 +122,17 @@ upstream patch series. The September 24 issue comment records the relationship
 without claiming the bug was reproduced or fixed.
 
 The September 24 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
-contains three commits: ring ownership (`504b66eb5`), allocator and cleanup
-safety (`edd48a46d`), and UIO ownership (`fc5abc6ec`). It adds an arm64 CCA allocation guard, checked page rounding, UIO GPADL buffer
+contains four commits: ring ownership (`504b66eb5`), allocator and cleanup
+safety (`edd48a46d`), UIO ownership (`fc5abc6ec`), and the corrected fallback
+test vector (`52b4700eb`). It adds an arm64 CCA allocation guard, checked page rounding, UIO GPADL buffer
 ownership, and a guard against `vunmap(NULL)` during partial-allocation
 cleanup. Five KUnit cases cover rounding, overflow, order descent, uncertain
 release ownership, and partial cleanup. The hosted workflow now uses only
 runner-provided tools, generates its KUnit config, and builds after every
-patch. Run 36032715754 is validating the previous combined-patch workflow;
-the per-commit workflow has not run yet. The earlier runs
+patch. Run 36034196665 passed WSL backport and all per-commit x86_64/arm64
+build/style gates, then ran KUnit and found a wrong expected order in one test
+(4/5 VMBus cases passed). The test vector is fixed in `52b4700eb`; its hosted
+rerun is pending. Earlier runs
 36028612962 and 36030304931 passed WSL backport and mainline build/style gates;
 both stopped before KUnit because the previous workflow required absent tests,
 and the second also exposed an undeclared `rg` dependency. The updated workflow

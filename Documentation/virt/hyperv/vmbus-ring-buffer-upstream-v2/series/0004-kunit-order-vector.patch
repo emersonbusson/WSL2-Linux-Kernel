@@ -1,0 +1,13 @@
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 091288f8c..c47a92330 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -64,7 +64,7 @@ static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
+ {
+ 	unsigned int order;
+ 
+-	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
++	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
+ 	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
+ 	while (order)
+ 		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));

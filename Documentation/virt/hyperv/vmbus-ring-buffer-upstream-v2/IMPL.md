@@ -86,8 +86,9 @@ The reviewable, versioned diff and contribution dossier are maintained in the
 public kernel fork at
 [`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
 based on `93f51579e7df248780214094418f205253383cc5`. The local mainline
-checkout contains three commits: `504b66eb5` for ring ownership,
-`edd48a46d` for allocator/cleanup safety, and `fc5abc6ec` for UIO ownership.
+checkout contains four commits: `504b66eb5` for ring ownership,
+`edd48a46d` for allocator/cleanup safety, `fc5abc6ec` for UIO ownership,
+and `52b4700eb` for the corrected fallback-order test vector.
 The public dossier carries one patch file per commit under `series/`, plus a
 consolidated snapshot. The hosted workflow applies and builds after each patch.
 
@@ -105,9 +106,12 @@ built or tested on CCA, TDX, or SEV-SNP.
 Linux `checkpatch.pl --strict` passed on the current patch (0 errors, 0
 warnings, 0 checks). The hosted workflow pins the base, records each patch SHA
 and configuration, and requires x86_64/arm64 builds with sparse after each
-commit and the five KUnit cases above. It creates its KUnit configuration in the runner. The
-current hosted run is pending; no linked kernel or live Hyper-V guest has
-been qualified for this candidate.
+commit and the five KUnit cases above. It creates its KUnit configuration in
+the runner. Run 36034196665 passed the WSL build and all three mainline patch
+builds on x86_64 and arm64, then exposed an incorrect expected order in the
+new fallback test (4/5 tests passed). Commit `52b4700eb` fixes the vector; a
+new hosted run is pending. No linked kernel or live Hyper-V guest has been
+qualified for this candidate.
 
 The WSL 6.18 backport remains a separate tree with its own DXG GPADL
 consumer audit. The exact source candidate has not been booted there. The

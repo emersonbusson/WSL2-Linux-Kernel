@@ -1,5 +1,5 @@
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f55..091288f8c 100644
+index 7e4cc6f55..c47a92330 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,9 @@
@@ -51,7 +51,7 @@ index 7e4cc6f55..091288f8c 100644
 +{
 +	unsigned int order;
 +
-+	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
++	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
 +	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
 +	while (order)
 +		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
