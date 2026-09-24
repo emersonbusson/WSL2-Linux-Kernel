@@ -75,12 +75,14 @@ preparation. A test kernel is rolled back by rebooting the prior image.
 
 | Production path | Named test | Kind | Cover |
 | --- | --- | --- | --- |
-| Ring allocation and mapping | `vmbus_ring_buffer_noncontiguous_pages` | KUnit / failure injection | N/A — kernel slice; targeted build + live drill |
-| Confidential ring GPADL | `vmbus_ring_buffer_coco_decrypt_once` | KUnit / CoCo lab | N/A — kernel slice; CoCo evidence |
-| GPADL teardown and buffer free | `vmbus_buffer_failed_teardown_leaks` | KUnit / failure injection | N/A — kernel slice; targeted build + live drill |
-| Partial allocation | `vmbus_buffer_partial_allocation_cleanup` | KUnit / failure injection | N/A — kernel slice; targeted build + live drill |
+| Page rounding | `vmbus_buffer_size_rounding_test` | KUnit | N/A — kernel slice |
+| Page-rounding overflow | `vmbus_buffer_size_overflow_test` | KUnit | N/A — kernel slice |
+| Allocation-order descent | `vmbus_ring_fallback_order_zero_test` | KUnit helper test; allocator fault injection still required | N/A — kernel slice; live fragmentation drill |
+| GPADL release ownership predicate | `vmbus_buffer_failed_teardown_leaks_test` | KUnit predicate test; each post/response failure still needs injection | N/A — kernel slice; live teardown drill |
+| Partial allocation cleanup | `vmbus_buffer_partial_allocation_cleanup_test` | KUnit | N/A — kernel slice; allocation fault injection still required |
+| Confidential ring GPADL | `vmbus_ring_buffer_coco_decrypt_once` | CoCo lab; not implemented | N/A — kernel slice; CCA/TDX/SNP evidence |
 | Netvsc buffer migration | `netvsc_buffer_lifecycle` | integration / Hyper-V lab | N/A — kernel slice; live drill |
-| UIO ring mapping | `uio_hv_ring_noncontiguous_mmap` | integration / Hyper-V lab | N/A — kernel slice; live drill |
+| UIO ring mapping | `uio_hv_ring_noncontiguous_mmap` | Hyper-V integration / mmap test; not implemented | N/A — kernel slice; live drill |
 
 ## Observability and living docs
 

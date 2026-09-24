@@ -121,12 +121,15 @@ ordinary and Confidential VM teardown tests, or a clean build of the exact
 upstream patch series. The September 24 issue comment records the relationship
 without claiming the bug was reproduced or fixed.
 
-The September 24 combined [mainline candidate in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/blob/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch)
-adds an arm64 CCA allocation guard, checked page rounding, UIO GPADL buffer
+The September 24 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
+contains three commits: ring ownership (`504b66eb5`), allocator and cleanup
+safety (`edd48a46d`), and UIO ownership (`fc5abc6ec`). It adds an arm64 CCA allocation guard, checked page rounding, UIO GPADL buffer
 ownership, and a guard against `vunmap(NULL)` during partial-allocation
 cleanup. Five KUnit cases cover rounding, overflow, order descent, uncertain
 release ownership, and partial cleanup. The hosted workflow now uses only
-runner-provided tools and generates its KUnit config. The earlier runs
+runner-provided tools, generates its KUnit config, and builds after every
+patch. Run 36032715754 is validating the previous combined-patch workflow;
+the per-commit workflow has not run yet. The earlier runs
 36028612962 and 36030304931 passed WSL backport and mainline build/style gates;
 both stopped before KUnit because the previous workflow required absent tests,
 and the second also exposed an undeclared `rg` dependency. The updated workflow

@@ -69,7 +69,6 @@ jobs:
       - name: Fetch fixed mainline base and apply candidate
         env:
           BASE: 93f51579e7df248780214094418f205253383cc5
-          PATCH: Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch
         run: |
           set -euo pipefail
           mkdir -p vmbus-artifacts
@@ -78,18 +77,7 @@ jobs:
           git -C linux checkout --detach FETCH_HEAD
           test "$(git -C linux rev-parse HEAD)" = "$BASE"
           printf '%s\n' "$BASE" > vmbus-artifacts/base-sha.txt
-          sha256sum "$PATCH" > vmbus-artifacts/series-sha256.txt
-          git -C linux apply --check "$GITHUB_WORKSPACE/$PATCH"
-          git -C linux apply "$GITHUB_WORKSPACE/$PATCH"
-          git -C linux diff --check
-          git -C linux diff --binary > vmbus-artifacts/applied.patch
-      - name: Check patch style
-        run: |
-          set -euo pipefail
-          linux/scripts/checkpatch.pl --strict --no-tree vmbus-artifacts/applied.patch \
-            2>&1 | tee vmbus-artifacts/checkpatch.log
-          grep -q 'total: 0 errors, 0 warnings, 0 checks' vmbus-artifacts/checkpatch.log
-      - name: Configure kernel
+      - name: Configure candidate build
         env:
           ARCH: ${{ matrix.arch }}
           CROSS_COMPILE: ${{ matrix.cross_compile }}
@@ -105,17 +93,31 @@ jobs:
           for symbol in HYPERV HYPERV_VMBUS HYPERV_NET UIO UIO_HV_GENERIC; do
             grep -Eq "^CONFIG_${symbol}=[ym]$" kernel-out/.config
           done
-      - name: Build affected drivers with W=1 and sparse
+      - name: Apply and build every patch in the series
         env:
           ARCH: ${{ matrix.arch }}
           CROSS_COMPILE: ${{ matrix.cross_compile }}
         run: |
           set -euo pipefail
-          make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
-            O="$GITHUB_WORKSPACE/kernel-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
-            drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
-            2>&1 | tee vmbus-artifacts/build-${ARCH}.log
-          test -s vmbus-artifacts/build-${ARCH}.log
+          PATCH_DIR=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series
+          sha256sum "$PATCH_DIR"/*.patch > vmbus-artifacts/series-sha256.txt
+          stage=0
+          for patch in "$PATCH_DIR"/*.patch; do
+            stage=$((stage + 1))
+            git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
+            git -C linux apply "$GITHUB_WORKSPACE/$patch"
+            git -C linux diff --check
+            linux/scripts/checkpatch.pl --strict --no-tree \
+              "$GITHUB_WORKSPACE/$patch" 2>&1 \
+              | tee "vmbus-artifacts/checkpatch-${stage}.log"
+            grep -q 'total: 0 errors, 0 warnings, 0 checks' \
+              "vmbus-artifacts/checkpatch-${stage}.log"
+            make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
+              O="$GITHUB_WORKSPACE/kernel-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
+              drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
+              2>&1 | tee "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
+          done
+          test "$stage" -eq 3
       - name: Require and run VMBus KUnit cases
         if: matrix.arch == 'x86_64'
         run: |

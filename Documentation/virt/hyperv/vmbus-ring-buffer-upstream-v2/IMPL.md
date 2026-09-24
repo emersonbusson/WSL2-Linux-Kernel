@@ -86,9 +86,10 @@ The reviewable, versioned diff and contribution dossier are maintained in the
 public kernel fork at
 [`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
 based on `93f51579e7df248780214094418f205253383cc5`. The local mainline
-checkout remains at `504b66eb5324550494bb6ea03166880d1a303df4` with
-additional uncommitted edits; the patch contains the combined candidate.
-It has not been divided into individually compiling commits.
+checkout contains three commits: `504b66eb5` for ring ownership,
+`edd48a46d` for allocator/cleanup safety, and `fc5abc6ec` for UIO ownership.
+The public dossier carries one patch file per commit under `series/`, plus a
+consolidated snapshot. The hosted workflow applies and builds after each patch.
 
 The candidate checks the rounded `u32` allocation size before rounding and
 uses `cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)` alongside Hyper-V isolation
@@ -102,9 +103,9 @@ CoCo page-state transitions, or test UIO mmap. These changes have not been
 built or tested on CCA, TDX, or SEV-SNP.
 
 Linux `checkpatch.pl --strict` passed on the current patch (0 errors, 0
-warnings, 0 checks). The hosted workflow pins the base, records the patch SHA
-and configuration, and requires x86_64/arm64 builds with sparse and the five
-KUnit cases above. It creates its KUnit configuration in the runner. The
+warnings, 0 checks). The hosted workflow pins the base, records each patch SHA
+and configuration, and requires x86_64/arm64 builds with sparse after each
+commit and the five KUnit cases above. It creates its KUnit configuration in the runner. The
 current hosted run is pending; no linked kernel or live Hyper-V guest has
 been qualified for this candidate.
 
