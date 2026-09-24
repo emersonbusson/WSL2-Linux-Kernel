@@ -38,7 +38,8 @@ jobs:
           cp wsl-out/.config vmbus-wsl-artifacts/config-x86_64
           grep -Eq '^CONFIG_DXGKRNL=[ym]$' wsl-out/.config
           make O="$GITHUB_WORKSPACE/wsl-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
-            drivers/hv/hv_vmbus.o drivers/net/hyperv/ drivers/uio/ \
+            drivers/hv/vmbus_drv.o drivers/hv/ring_buffer.o \
+            drivers/net/hyperv/ drivers/uio/ \
             2>&1 | tee vmbus-wsl-artifacts/build-sparse.log
           make O="$GITHUB_WORKSPACE/wsl-out" -j2 W=1 C=0 \
             drivers/hv/dxgkrnl/ \
