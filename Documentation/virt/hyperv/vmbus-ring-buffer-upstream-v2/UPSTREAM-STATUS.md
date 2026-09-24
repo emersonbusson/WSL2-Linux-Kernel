@@ -122,8 +122,15 @@ upstream patch series. The September 24 issue comment records the relationship
 without claiming the bug was reproduced or fixed.
 
 The September 24 combined [mainline candidate in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/blob/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch)
-adds an arm64 CCA allocation guard, checked page rounding, and UIO GPADL
-buffer ownership. Local reverse-apply and strict checkpatch pass. Hosted run 36028612962 passed WSL backport, arm64, and x86_64 build/style checks; x86_64 stopped at the KUnit gate because named fault-injection cases do not yet exist. No cross-architecture compatibility claim is qualified. The
+adds an arm64 CCA allocation guard, checked page rounding, UIO GPADL buffer
+ownership, and a guard against `vunmap(NULL)` during partial-allocation
+cleanup. Five KUnit cases cover rounding, overflow, order descent, uncertain
+release ownership, and partial cleanup. The hosted workflow now uses only
+runner-provided tools and generates its KUnit config. The earlier runs
+36028612962 and 36030304931 passed WSL backport and mainline build/style gates;
+both stopped before KUnit because the previous workflow required absent tests,
+and the second also exposed an undeclared `rg` dependency. The updated workflow
+has not run yet. No cross-architecture compatibility claim is qualified. The
 unversioned September 17 `[PATCH 2/2]` makes the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport and DXG audit
 remain separate from this mainline patch.

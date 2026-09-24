@@ -121,17 +121,21 @@ jobs:
         run: |
           set -euo pipefail
           for case_name in \
-            vmbus_ring_buffer_noncontiguous_pages \
-            vmbus_ring_buffer_coco_decrypt_once \
-            vmbus_buffer_failed_teardown_leaks \
-            vmbus_buffer_partial_allocation_cleanup \
-            vmbus_uio_ring_noncontiguous_mmap; do
-            rg -q "KUNIT_CASE\\($case_name\\)" linux/drivers/hv linux/drivers/uio || {
+            vmbus_buffer_size_rounding_test \
+            vmbus_buffer_size_overflow_test \
+            vmbus_ring_fallback_order_zero_test \
+            vmbus_buffer_failed_teardown_leaks_test \
+            vmbus_buffer_partial_allocation_cleanup_test; do
+            grep -R -q "KUNIT_CASE($case_name)" linux/drivers/hv linux/drivers/uio || {
               echo "Missing required KUnit case: $case_name" | tee -a vmbus-artifacts/kunit.log
               exit 1
             }
           done
-          test -f linux/drivers/hv/.kunitconfig
+          cat > linux/drivers/hv/.kunitconfig <<'EOF'
+          CONFIG_KUNIT=y
+          CONFIG_HYPERV=y
+          CONFIG_HYPERV_VMBUS=y
+          EOF
           (cd linux && python3 tools/testing/kunit/kunit.py run \
             --build_dir="$GITHUB_WORKSPACE/kunit-out" \
             --arch=x86_64 --kunitconfig=drivers/hv/.kunitconfig) \

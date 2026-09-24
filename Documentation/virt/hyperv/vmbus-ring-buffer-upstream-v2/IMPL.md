@@ -95,15 +95,18 @@ uses `cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)` alongside Hyper-V isolation
 to avoid sending arm64 CCA shared pages through `vzalloc()`. UIO's receive and
 send GPADL buffers now use `vmbus_alloc_buffer()` and aggregate teardown
 ownership. A failed teardown metadata allocation marks the buffer unsafe to
-free. These changes have not been built or tested on CCA, TDX, or SEV-SNP.
+free. The candidate now includes five KUnit cases for page rounding, overflow,
+the allocation-order descent, uncertain GPADL release, and partial-allocation
+cleanup. They do not inject failures into GPADL header/body posting, exercise
+CoCo page-state transitions, or test UIO mmap. These changes have not been
+built or tested on CCA, TDX, or SEV-SNP.
 
-Local `git diff --check`, reverse `git apply --check`, and Linux
-`checkpatch.pl --strict` passed on the combined patch (0 errors, 0 warnings,
-0 checks). The new hosted workflow pins the base, records the patch SHA and
-configuration, and requires x86_64/arm64 builds with sparse plus named KUnit
-cases. Those cases and `.kunitconfig` are still absent, so the hosted KUnit
-gate intentionally fails. No hosted run has been observed and no linked
-kernel or live Hyper-V guest has been qualified for this candidate.
+Linux `checkpatch.pl --strict` passed on the current patch (0 errors, 0
+warnings, 0 checks). The hosted workflow pins the base, records the patch SHA
+and configuration, and requires x86_64/arm64 builds with sparse and the five
+KUnit cases above. It creates its KUnit configuration in the runner. The
+current hosted run is pending; no linked kernel or live Hyper-V guest has
+been qualified for this candidate.
 
 The WSL 6.18 backport remains a separate tree with its own DXG GPADL
 consumer audit. The exact source candidate has not been booted there. The
@@ -112,10 +115,11 @@ submission is v2 if and when all gates pass. No new email was sent.
 
 ## Next gate
 
-First add real fault-injection tests for the GPADL establishment and teardown
-state machine. Then link and boot one isolated upstream kernel, run Hyper-V/WSL2 integration
-tests in a disposable guest, and qualify CCA plus no-paravisor TDX. Only after
-those results and operator review may the diff be formatted as a sendable v2.
+Complete GPADL header/body/response failure injection, UIO mmap validation,
+and teardown/rescind interleaving tests. Then link and boot one isolated
+upstream kernel, run Hyper-V integration tests in a disposable guest, and
+qualify CCA plus no-paravisor TDX. Only after those results and maintainer
+review may the diff be formatted as a sendable v2.
 
 ## Rollback trigger
 
