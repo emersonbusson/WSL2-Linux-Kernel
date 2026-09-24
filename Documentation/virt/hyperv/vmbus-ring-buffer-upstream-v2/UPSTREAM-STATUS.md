@@ -138,5 +138,8 @@ both stopped before KUnit because the previous workflow required absent tests,
 and the second also exposed an undeclared `rg` dependency. The updated workflow
 has not run yet. No cross-architecture compatibility claim is qualified. The
 unversioned September 17 `[PATCH 2/2]` makes the next send v2, subject to
-the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport and DXG audit
-remain separate from this mainline patch.
+the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport remains
+separate. Its DXG destroy path now retains pinned user pages and its `vmap()`
+when GPADL teardown is uncertain; the hosted backport build enables
+`DXGKRNL`. DXG's externally pinned page encryption contract is still not
+qualified for CoCo guests.

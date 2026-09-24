@@ -113,8 +113,12 @@ new fallback test (4/5 tests passed). Commit `52b4700eb` fixes the vector; a
 new hosted run is pending. No linked kernel or live Hyper-V guest has been
 qualified for this candidate.
 
-The WSL 6.18 backport remains a separate tree with its own DXG GPADL
-consumer audit. The exact source candidate has not been booted there. The
+The WSL 6.18 backport remains a separate tree. Its DXG destruction path now
+keeps user pages pinned while a GPADL is active or uncertain, and releases its
+`vmap()` only after confirmed teardown. The hosted WSL build now enables
+`DXGKRNL` so that consumer is compiled. DXG's externally pinned user pages
+still lack CoCo page-state testing; the exact source candidate has not been
+booted there. The
 September 17 mailing-list message was unversioned `[PATCH 2/2]`, so the next
 submission is v2 if and when all gates pass. No new email was sent.
 

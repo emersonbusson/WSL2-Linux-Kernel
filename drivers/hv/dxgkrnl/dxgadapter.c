@@ -882,7 +882,9 @@ struct dxgallocation *dxgallocation_create(struct dxgprocess *process)
 
 void dxgallocation_stop(struct dxgallocation *alloc)
 {
-	if (alloc->pages) {
+	/* Keep GPADL backing pages pinned until the host releases the mapping. */
+	if (alloc->pages && !alloc->gpadl.gpadl_handle &&
+	    !alloc->gpadl.leak) {
 		unpin_user_pages(alloc->pages, alloc->num_pages);
 		vfree(alloc->pages);
 		alloc->pages = NULL;
@@ -914,6 +916,7 @@ void dxgallocation_destroy(struct dxgallocation *alloc)
 {
 	struct dxgprocess *process = alloc->process;
 	struct d3dkmt_destroyallocation2 args = { };
+	bool preserve_gpadl_pages = alloc->gpadl.leak;
 
 	dxgallocation_stop(alloc);
 	if (alloc->resource_owner)
@@ -929,9 +932,24 @@ void dxgallocation_destroy(struct dxgallocation *alloc)
 					       &args, &alloc->alloc_handle);
 	}
 	if (alloc->gpadl.gpadl_handle) {
+		int ret;
+
 		DXG_TRACE("Teardown gpadl %d", alloc->gpadl.gpadl_handle);
-		vmbus_teardown_gpadl(dxgglobal_get_vmbus(), &alloc->gpadl);
-		alloc->gpadl.gpadl_handle = 0;
+		ret = vmbus_teardown_gpadl(dxgglobal_get_vmbus(), &alloc->gpadl);
+		if (ret || alloc->gpadl.gpadl_handle) {
+			alloc->gpadl.leak = true;
+			preserve_gpadl_pages = true;
+			DXG_ERR("Unable to release GPADL backing pages: %d", ret);
+		}
+	}
+	if (!preserve_gpadl_pages) {
+		if (alloc->gpadl.addr) {
+			vunmap(alloc->gpadl.addr);
+			alloc->gpadl.addr = NULL;
+		}
+		dxgallocation_stop(alloc);
+	} else {
+		DXG_ERR("Leaking GPADL mapping and pinned pages after uncertain teardown");
 	}
 	if (alloc->priv_drv_data)
 		vfree(alloc->priv_drv_data);
