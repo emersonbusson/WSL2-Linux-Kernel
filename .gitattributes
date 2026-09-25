@@ -3,3 +3,5 @@
 *.dts diff=dts
 *.dts[io] diff=dts
 *.rs diff=rust
+# Embedded mail patches intentionally contain whitespace context markers.
+*.patch whitespace=-blank-at-eol,-space-before-tab,-blank-at-eof

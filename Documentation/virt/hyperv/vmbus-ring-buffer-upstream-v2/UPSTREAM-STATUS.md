@@ -99,7 +99,7 @@ reports the same build identity. This proves the local candidate image booted;
 it does not prove that the order-7 fallback was exercised or that the patch is
 ready for upstream.
 
-The proposal is now a four-commit mainline series, separate from the WSL 6.18
+The proposal is now a five-commit mainline series, separate from the WSL 6.18
 backport. Review fixed rounded-size overflow handling, audited the DXG
 caller's GPADL ownership, and removed an unsupported universal CoCo
 compatibility claim from the first commit message. The WSL backport preserves
@@ -114,16 +114,16 @@ allocator change as complementary. It does not remove the high-order
 allocation requirement from all VMBus users.
 
 The exact source changes have passed hosted per-commit x86_64/arm64 builds and
-the five VMBus KUnit cases, along with the WSL VMBus/NetVSC/UIO Sparse build
+the VMBus KUnit cases, along with the WSL VMBus/NetVSC/UIO Sparse build
 and DXG compile. Allocation and GPADL stage fault injection, UIO mmap,
 ordinary Hyper-V runtime, and Confidential VM transitions remain untested.
 The September 24 issue comment records the relationship without claiming the
 bug was reproduced or fixed.
 
-The September 24 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
-contains four commits: ring ownership (`50aac3dc3`), allocator and cleanup
-safety (`ca42ecd6b`), UIO ownership (`cd8c10eab`), and the corrected fallback
-test vector (`5959b9109`). The first commit avoids a universal CoCo
+The September 25 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
+contains five commits: ring ownership (`50aac3dc3`), allocator and cleanup
+safety (`ca42ecd6b`), UIO ownership (`cd8c10eab`), the corrected fallback
+test vector (`5959b9109`), and GPADL post fault injection. The first commit avoids a universal CoCo
 compatibility claim. It adds an arm64 CCA allocation guard, checked page
 rounding, UIO GPADL buffer
 ownership, and a guard against `vunmap(NULL)` during partial-allocation
@@ -140,10 +140,10 @@ descriptions and `Signed-off-by` trailers on commits 2–4, now fixed. Runs
 36038457091 and 36039517554 exposed
 and led to fixes for an invalid WSL make target and trace-only DXG variables
 with DEBUG disabled. No cross-architecture or CoCo compatibility claim is
-qualified. GPADL
-header/body/response failure injection, UIO mmap, and live Hyper-V/CoCo tests
-remain open. The regenerated patch series has the same source diff and a
-corrected commit message. The unversioned September 17 `[PATCH 2/2]` makes
+qualified. The new fifth patch adds callback-injected KUnit failures for GPADL
+header, body, and teardown sends plus response-state mapping. Live
+response/rescind interleaving, UIO mmap, and Hyper-V/CoCo tests remain open.
+The unversioned September 17 `[PATCH 2/2]` makes
 the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport remains
 separate. Its DXG destroy path now retains pinned user pages and its `vmap()`
@@ -154,4 +154,5 @@ qualified for CoCo guests.
 Sparse logs retain diagnostics in unchanged source, including a VMBus driver
 context-imbalance warning and a flexible-array warning in the GPADL header.
 The hosted artifacts preserve these logs; strict checkpatch reported no
-warnings for the four patches.
+warnings for the four original patches. The fifth patch independently passes
+strict checkpatch and exact-state apply checks; hosted build/KUnit is pending.

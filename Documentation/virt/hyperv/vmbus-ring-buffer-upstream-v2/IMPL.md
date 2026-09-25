@@ -119,19 +119,32 @@ warning prevents a clean Sparse run. These checks do not include GPADL stage
 fault injection, UIO mmap, or a linked and booted Hyper-V guest.
 
 The first commit message's unsupported universal CoCo claim has been removed.
-All four mail patches include descriptions and matching `Signed-off-by`
+The original four mail patches include descriptions and matching `Signed-off-by`
 trailers. Run 36042727085 passed WSL but exposed missing trailers on patches
 2–4. Run 36046920733 passed with the corrected patch files: per-commit
 x86_64/arm64 compile and Sparse, WSL VMBus/NetVSC/UIO Sparse, the separate DXG
 compile, and all five named VMBus KUnit cases (nine KUnit cases passed in
 total). It builds a pinned Sparse revision and fails if Sparse is not
-functional or is silently disabled. GPADL stage injection, UIO mmap, and live
-Hyper-V/CoCo evidence remain open.
+functional or is silently disabled. UIO mmap and live Hyper-V/CoCo evidence
+remain open. The GPADL stage injection candidate is described below.
 
 Sparse logs still contain diagnostics in unchanged baseline code, including
 the VMBus driver context-imbalance warning and the flexible-array warning in
-the GPADL header declaration. The workflow records these logs; the patch
-series itself passes strict checkpatch without warnings.
+the GPADL header declaration. The workflow records these logs; the four
+original patches pass strict checkpatch without warnings.
+
+## September 25 GPADL post-injection candidate
+
+Added a fifth patch that routes production GPADL header/body and teardown
+posts through a private callback. KUnit injects failure at the header and both
+body positions, checks that uncertain ownership remains marked posted, checks
+host rejection/rescind response-state mapping, and exercises teardown-post
+failure. The changes were rebuilt against the exact state after patches 1–4;
+the earlier draft had been reverted because it targeted an obsolete GPADL
+structure. The new mail patch applies cleanly to that exact state and passes
+strict checkpatch with zero errors, warnings, and checks. Hosted compilation
+and KUnit are pending; this does not cover real host-response/rescind races,
+allocator failure, UIO mmap, or CoCo memory transitions.
 
 The WSL 6.18 backport remains a separate tree. Its DXG destruction path now
 keeps user pages pinned while a GPADL is active or uncertain, and releases its
