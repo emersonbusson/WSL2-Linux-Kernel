@@ -68,19 +68,18 @@ It is not a replacement kernel, distribution backport, or upstream email.
 
 ## Blocking gaps
 
-1. The SPEC's named functional/fault-injection tests have not been built or
-   run. Static source assertions do not substitute for them.
-2. The target objects compiled but the kernel has not been linked or booted.
-   The available WSL2 6.18 tree predates the accepted allocation API and is
-   not this patch's base; a separate backport and isolated-guest validation
-   would be required before even considering host installation.
-3. The draft marks a partially posted GPADL or failed teardown as unsafe to
-   free, but these branches still need real fault injection across every
-   header/body/response failure and rescind interleaving. The no-paravisor
-   TDX and CCA memory-state contracts remain unverified.
-4. CoCo memory-state tests, normal/rescind/close integration tests, UIO/sysfs
-   mmap tests, and a
-   matched performance run remain absent.
+1. The hosted KUnit suite passed 13/13, including nine VMBus buffer cases and
+   injected GPADL post failures. Allocator fault injection at order zero and
+   live host-response/rescind interleaving remain untested.
+2. The exact candidate kernel has been linked and booted in an ordinary
+   x86_64 Hyper-V guest. This does not qualify the separate WSL 6.18 backport
+   or any CoCo platform.
+3. The GPADL callback tests cover header/body/teardown send errors and
+   response-state mapping. Real no-paravisor TDX and CCA memory-state contracts
+   remain unverified.
+4. CoCo memory-state tests, live rescind/close races, allocator fallback under
+   fragmentation, and a matched performance run remain absent. Ordinary
+   Hyper-V UIO/sysfs mmap validation is recorded in EVD-0054.
 
 ## September 24 candidate update
 
@@ -133,7 +132,7 @@ the VMBus driver context-imbalance warning and the flexible-array warning in
 the GPADL header declaration. The workflow records these logs; the four
 original patches pass strict checkpatch without warnings.
 
-## September 25 GPADL post-injection candidate
+## September 25 GPADL post-injection qualification
 
 Added a fifth patch that routes production GPADL header/body and teardown
 posts through a private callback. KUnit injects failure at the header and both
@@ -142,8 +141,11 @@ host rejection/rescind response-state mapping, and exercises teardown-post
 failure. The changes were rebuilt against the exact state after patches 1–4;
 the earlier draft had been reverted because it targeted an obsolete GPADL
 structure. The new mail patch applies cleanly to that exact state and passes
-strict checkpatch with zero errors, warnings, and checks. Hosted compilation
-and KUnit are pending; this does not cover real host-response/rescind races,
+strict checkpatch with zero errors, warnings, and checks. Hosted run 36143196834
+passed all five patch stages on x86_64 and arm64, the WSL backport, and all 13
+x86_64 KUnit tests. The `hyperv-vmbus-buffer` suite passed 9/9, including the
+four new GPADL cases; arm64 KUnit was skipped. This covers injected outgoing
+post failures and response-state mapping, not real host-response/rescind races,
 allocator failure, UIO mmap, or CoCo memory transitions.
 
 The WSL 6.18 backport remains a separate tree. Its DXG destruction path now
@@ -157,10 +159,9 @@ submission is v2 if and when all gates pass. No new email was sent.
 
 ## Next gate
 
-Complete GPADL header/body/response failure injection, UIO mmap validation,
-and teardown/rescind interleaving tests. Then link and boot one isolated
-upstream kernel, run ordinary Hyper-V integration tests, and qualify the
-exact code on SEV-SNP, TDX, and Arm CCA hosts. Hosted CI does not emulate
+Exercise live host response/rescind interleavings and force order-zero
+allocation fallback during allocation. Then qualify the exact code on SEV-SNP,
+TDX, and Arm CCA hosts. Hosted CI does not emulate
 those host/guest memory-state transitions. Send v2 only after required
 evidence and maintainer review.
 

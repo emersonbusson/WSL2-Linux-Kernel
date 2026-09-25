@@ -115,10 +115,10 @@ allocation requirement from all VMBus users.
 
 The exact source changes have passed hosted per-commit x86_64/arm64 builds and
 the VMBus KUnit cases, along with the WSL VMBus/NetVSC/UIO Sparse build
-and DXG compile. Allocation and GPADL stage fault injection, UIO mmap,
-ordinary Hyper-V runtime, and Confidential VM transitions remain untested.
-The September 24 issue comment records the relationship without claiming the
-bug was reproduced or fixed.
+and DXG compile. Allocation fault injection, UIO mmap, and Confidential VM
+transitions remain untested. The ordinary Hyper-V runtime test is recorded in
+EVD-0054. The September 24 issue comment records the relationship without
+claiming the bug was reproduced or fixed.
 
 The September 25 [mainline patch series in the kernel fork](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series)
 contains five commits: ring ownership (`50aac3dc3`), allocator and cleanup
@@ -127,8 +127,9 @@ test vector (`5959b9109`), and GPADL post fault injection. The first commit avoi
 compatibility claim. It adds an arm64 CCA allocation guard, checked page
 rounding, UIO GPADL buffer
 ownership, and a guard against `vunmap(NULL)` during partial-allocation
-cleanup. Five KUnit cases cover rounding, overflow, order descent, uncertain
-release ownership, and partial cleanup. The hosted workflow now uses only
+cleanup. Nine VMBus KUnit cases cover rounding, overflow, order descent,
+uncertain release ownership, partial cleanup, and injected GPADL post errors.
+The hosted workflow now uses only
 runner-provided tools, generates its KUnit config, and builds after every
 patch. Run 36046920733 passed with the refreshed patch files: WSL
 VMBus/NetVSC/UIO Sparse, separate DXG compile, per-commit x86_64/arm64
@@ -141,8 +142,10 @@ descriptions and `Signed-off-by` trailers on commits 2–4, now fixed. Runs
 and led to fixes for an invalid WSL make target and trace-only DXG variables
 with DEBUG disabled. No cross-architecture or CoCo compatibility claim is
 qualified. The new fifth patch adds callback-injected KUnit failures for GPADL
-header, body, and teardown sends plus response-state mapping. Live
-response/rescind interleaving, UIO mmap, and Hyper-V/CoCo tests remain open.
+header, body, and teardown sends plus response-state mapping. Run 36143196834
+passed all five patch builds and x86_64 KUnit 13/13, including the VMBus
+buffer suite 9/9; arm64 KUnit is skipped. Live response/rescind interleaving,
+UIO mmap, and CoCo tests remain open.
 The unversioned September 17 `[PATCH 2/2]` makes
 the next send v2, subject to
 the ordinary Hyper-V and CoCo lab gates. The WSL 6.18 backport remains
@@ -154,5 +157,5 @@ qualified for CoCo guests.
 Sparse logs retain diagnostics in unchanged source, including a VMBus driver
 context-imbalance warning and a flexible-array warning in the GPADL header.
 The hosted artifacts preserve these logs; strict checkpatch reported no
-warnings for the four original patches. The fifth patch independently passes
-strict checkpatch and exact-state apply checks; hosted build/KUnit is pending.
+warnings for the four original patches. The fifth patch passes strict
+checkpatch, exact-state apply, hosted builds, and its KUnit cases.
