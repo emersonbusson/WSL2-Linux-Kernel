@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH 2/4] hv: vmbus: validate chunk buffer allocation and cleanup
+Subject: [PATCH v2 2/5] hv: vmbus: validate chunk buffer allocation and cleanup
 
 Validate rounded sizes before storing them and preserve allocated
 chunks when cleanup or GPADL teardown has an uncertain outcome. Add focused

@@ -3,3 +3,6 @@
 *.dts diff=dts
 *.dts[io] diff=dts
 *.rs diff=rust
+# Embedded unified diffs preserve context-marker whitespace by design.
+Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series/*.patch whitespace=-blank-at-eol,-space-before-tab
+Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch whitespace=-blank-at-eol,-space-before-tab

@@ -88,10 +88,11 @@ The reviewable, versioned diff and contribution dossier are maintained in the
 public kernel fork at
 [`Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/`](https://github.com/emersonbusson/WSL2-Linux-Kernel/tree/vmbus-ring-buffer-upstream-v2/Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2),
 based on `93f51579e7df248780214094418f205253383cc5`. The local mainline
-checkout contains four commits: `50aac3dc3` for ring ownership,
-`ca42ecd6b` for allocator/cleanup safety, `cd8c10eab` for UIO ownership,
-and `5959b9109` for the corrected fallback-order test vector. Each has a
-complete commit message and `Signed-off-by` trailer.
+The four previously built commits are `50aac3dc3` for ring ownership,
+`ca42ecd6b` for allocator/cleanup safety, `cd8c10eab` for UIO ownership, and
+`5959b9109` for the corrected fallback-order test vector. A fifth patch now adds
+deterministic GPADL post-failure injection. Each has a complete
+commit message and `Signed-off-by` trailer.
 The public dossier carries one patch file per commit under `series/`, plus a
 consolidated snapshot. The hosted workflow applies and builds after each patch.
 
@@ -100,11 +101,13 @@ uses `cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)` alongside Hyper-V isolation
 to avoid sending arm64 CCA shared pages through `vzalloc()`. UIO's receive and
 send GPADL buffers now use `vmbus_alloc_buffer()` and aggregate teardown
 ownership. A failed teardown metadata allocation marks the buffer unsafe to
-free. The candidate now includes five KUnit cases for page rounding, overflow,
-the allocation-order descent, uncertain GPADL release, and partial-allocation
-cleanup. They do not inject failures into GPADL header/body posting, exercise
-CoCo page-state transitions, or test UIO mmap. These changes have not been
-built or tested on CCA, TDX, or SEV-SNP.
+free. The candidate now includes nine named KUnit cases for allocation safety and
+GPADL lifecycle: header/body post failures at each position, successful post
+ordering, host rejection, channel rescind, and teardown post failure. These use
+the same private posting helpers as production, with a deterministic injected
+callback; they do not emulate a real host response transport, exercise CoCo
+page-state transitions, or test UIO mmap. Hosted execution of the new cases is
+pending; the existing CoCo changes have not been tested on CCA, TDX, or SEV-SNP.
 
 Linux `checkpatch.pl --strict` passed on the current patch (0 errors, 0
 warnings, 0 checks). Hosted run 36038457091 passed per-commit x86_64/arm64
@@ -115,18 +118,17 @@ become unused with DEBUG disabled. Commit `e4f31922b` fixed those warnings;
 run 36040552037 passed the corrected WSL gate. The workflow records the
 base/series SHA, configs, and logs. Sparse runs on WSL VMBus, NetVSC, and UIO
 objects; DXG is compile-checked separately because its signed-bitfield
-warning prevents a clean Sparse run. These checks do not include GPADL stage
-fault injection, UIO mmap, or a linked and booted Hyper-V guest.
+warning prevents a clean Sparse run. These runs predate the GPADL injection
+patch and do not include UIO mmap or a linked and booted Hyper-V guest.
 
 The first commit message's unsupported universal CoCo claim has been removed.
-All four mail patches include descriptions and matching `Signed-off-by`
-trailers. Run 36042727085 passed WSL but exposed missing trailers on patches
-2–4. Run 36046920733 passed with the corrected patch files: per-commit
-x86_64/arm64 compile and Sparse, WSL VMBus/NetVSC/UIO Sparse, the separate DXG
-compile, and all five named VMBus KUnit cases (nine KUnit cases passed in
-total). It builds a pinned Sparse revision and fails if Sparse is not
-functional or is silently disabled. GPADL stage injection, UIO mmap, and live
-Hyper-V/CoCo evidence remain open.
+All five patches are formatted as the next v2 series and include descriptions
+and matching `Signed-off-by` trailers. Run 36042727085 passed WSL but exposed
+missing trailers on patches 2–4. Run 36046920733 passed with the four-patch candidate. The added fifth patch
+requires a new hosted run before it is qualified. The workflow builds a pinned
+Sparse revision and fails if Sparse is not functional or is silently disabled.
+Allocation fault injection, UIO mmap, and live Hyper-V/CoCo evidence remain
+open.
 
 Sparse logs still contain diagnostics in unchanged baseline code, including
 the VMBus driver context-imbalance warning and the flexible-array warning in
@@ -138,14 +140,13 @@ keeps user pages pinned while a GPADL is active or uncertain, and releases its
 `vmap()` only after confirmed teardown. The hosted WSL build now enables
 `DXGKRNL` so that consumer is compiled. DXG's externally pinned user pages
 still lack CoCo page-state testing; the exact source candidate has not been
-booted there. The
-September 17 mailing-list message was unversioned `[PATCH 2/2]`, so the next
-submission is v2 if and when all gates pass. No new email was sent.
+booted there. The September 17 mailing-list message was unversioned `[PATCH 2/2]`, so this
+revised series is labeled v2. No revised email was sent.
 
 ## Next gate
 
-Complete GPADL header/body/response failure injection, UIO mmap validation,
-and teardown/rescind interleaving tests. Then link and boot one isolated
+Run hosted CI on the five-patch series and review its KUnit logs. Complete
+UIO mmap validation and teardown/rescind interleaving tests. Then link and boot one isolated
 upstream kernel, run ordinary Hyper-V integration tests, and qualify the
 exact code on SEV-SNP, TDX, and Arm CCA hosts. Hosted CI does not emulate
 those host/guest memory-state transitions. Send v2 only after required

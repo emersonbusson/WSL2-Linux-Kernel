@@ -78,7 +78,11 @@ preparation. A test kernel is rolled back by rebooting the prior image.
 | Page rounding | `vmbus_buffer_size_rounding_test` | KUnit | N/A — kernel slice |
 | Page-rounding overflow | `vmbus_buffer_size_overflow_test` | KUnit | N/A — kernel slice |
 | Allocation-order descent | `vmbus_ring_fallback_order_zero_test` | KUnit helper test; allocator fault injection still required | N/A — kernel slice; live fragmentation drill |
-| GPADL release ownership predicate | `vmbus_buffer_failed_teardown_leaks_test` | KUnit predicate test; each post/response failure still needs injection | N/A — kernel slice; live teardown drill |
+| Failed GPADL header and body posts | `vmbus_gpadl_post_failure_test` | KUnit injected callback; covers header and each body send position | N/A — kernel slice; hosted run pending |
+| Successful GPADL message ordering | `vmbus_gpadl_post_success_test` | KUnit injected callback | N/A — kernel slice; hosted run pending |
+| Host rejection and channel rescind response | `vmbus_gpadl_response_state_test` | KUnit response-state test | N/A — kernel slice; hosted run pending |
+| GPADL teardown post failure | `vmbus_gpadl_teardown_post_failure_test` | KUnit injected callback; return code and message fields | N/A — kernel slice; hosted run pending |
+| GPADL release ownership predicate | `vmbus_buffer_failed_teardown_leaks_test` | KUnit predicate test | N/A — kernel slice; live teardown drill |
 | Partial allocation cleanup | `vmbus_buffer_partial_allocation_cleanup_test` | KUnit | N/A — kernel slice; allocation fault injection still required |
 | Confidential ring GPADL | `vmbus_ring_buffer_coco_decrypt_once` | CoCo lab; not implemented | N/A — kernel slice; CCA/TDX/SNP evidence |
 | Netvsc buffer migration | `netvsc_buffer_lifecycle` | integration / Hyper-V lab | N/A — kernel slice; live drill |
