@@ -68,10 +68,12 @@ It is not a replacement kernel, distribution backport, or upstream email.
 
 ## Blocking gaps
 
-1. Hosted CI run 36145111714 passed the prior five-patch state (13/13 KUnit,
-   nine VMBus cases). A sixth patch now adds allocator callback injection to
-   exercise descent to a real order-0 allocation and clean order-0 exhaustion;
-   its hosted run is pending. Live host-response/rescind interleaving remains
+1. Hosted CI run 36148296003 passed all six patch stages on x86_64 and arm64,
+   the separate WSL backport, and x86_64 KUnit 14/14 (VMBus suite 10/10). The
+   added callback-injection case descends through failures above order zero,
+   allocates/frees a real order-zero page, then verifies order-zero exhaustion.
+   This proves helper behavior under deterministic injection, not fragmentation
+   under live memory pressure. Host response/rescind interleaving remains
    untested.
 2. The exact candidate kernel has been linked and booted in an ordinary
    x86_64 Hyper-V guest. This does not qualify the separate WSL 6.18 backport
@@ -166,10 +168,13 @@ private callback. Its KUnit case injects failure at every order above zero,
 then allows a real order-0 allocation and frees it; a second pass injects
 order-0 failure and checks clean exhaustion. The patch applies after patch 5
 and passes strict checkpatch locally. Hosted x86_64/arm64 build and KUnit
-qualification are pending; do not report this as passed until the workflow
-run completes. Even after that run, real allocator fragmentation, live
-response/rescind interleavings, UIO mmap, and CoCo SEV-SNP/TDX/CCA transitions
-remain lab gates.
+qualification passed in run 36148296003: all six stages built on x86_64 and
+arm64, the WSL backport passed, and x86_64 KUnit passed 14/14 (VMBus suite
+10/10). The artifacts bind to base
+`93f51579e7df248780214094418f205253383cc5` and series commit
+`dbec28671d5f7bb3c1017151574a7649019671aa`. Real allocator fragmentation,
+live response/rescind interleavings, and CoCo SEV-SNP/TDX/CCA transitions
+remain lab gates. Ordinary Hyper-V UIO mmap is recorded in EVD-0054.
 
 ## Rollback trigger
 

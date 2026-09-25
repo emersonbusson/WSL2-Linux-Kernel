@@ -169,11 +169,13 @@ ordered series. Patch 6 factors the production page-allocation descent loop
 behind a private callback. Its KUnit test injects failure at every order
 above zero, permits a real order-0 allocation, frees the page, then checks
 that injected order-0 exhaustion returns cleanly without underflow. Strict
-checkpatch passes locally. Hosted build and KUnit results are pending; the
-prior successful run 36145111714 covers only five patches and 13 tests.
-
-After hosted success, KUnit will establish the order-0 fallback logic under
-injected high-order failures, but it will not prove allocator fragmentation
-on a live host. Live response/rescind races, UIO mmap, and SEV-SNP, TDX, and
-Arm CCA transitions remain unqualified. No v2 email is sent until those
-required runtime gates and maintainer review are complete.
+checkpatch passes locally. Hosted run 36148296003 passed all six patch stages
+on x86_64 and arm64, the WSL backport, and x86_64 KUnit 14/14, including all
+ten `hyperv-vmbus-buffer` cases. The artifact records base
+`93f51579e7df248780214094418f205253383cc5` and series commit
+`dbec28671d5f7bb3c1017151574a7649019671aa`. This proves the fallback logic
+under deterministic injected failures; it does not prove allocator
+fragmentation on a live host. Live response/rescind races and SEV-SNP, TDX,
+and Arm CCA transitions remain unqualified. Ordinary Hyper-V UIO mmap is
+recorded separately in EVD-0054. No v2 email is sent until the required
+runtime/platform gates and maintainer review are complete.
