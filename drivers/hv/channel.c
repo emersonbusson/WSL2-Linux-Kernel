@@ -9,6 +9,11 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
+#include <linux/cc_platform.h>
+#include <linux/kconfig.h>
+#if IS_ENABLED(CONFIG_KUNIT)
+#include <kunit/test.h>
+#endif
 #include <linux/sched.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
@@ -26,6 +31,101 @@
 #include <asm/mshyperv.h>
 
 #include "hyperv_vmbus.h"
+
+static int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
+static unsigned int vmbus_buffer_order(unsigned long remaining,
+				       unsigned int max_order);
+static bool vmbus_buffer_lower_order(unsigned int *order);
+static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
+static void __vmbus_free_buffer_mem(void *addr, struct page **chunks,
+				    u32 chunk_cnt);
+
+#if IS_ENABLED(CONFIG_KUNIT)
+static void vmbus_buffer_size_rounding_test(struct kunit *test)
+{
+	u32 rounded_size;
+
+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(1, &rounded_size), 0);
+	KUNIT_EXPECT_EQ(test, rounded_size, (u32)PAGE_SIZE);
+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(PAGE_SIZE, &rounded_size), 0);
+	KUNIT_EXPECT_EQ(test, rounded_size, (u32)PAGE_SIZE);
+}
+
+static void vmbus_buffer_size_overflow_test(struct kunit *test)
+{
+	u32 rounded_size = 0;
+
+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(0, &rounded_size),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, vmbus_buffer_round_size(U32_MAX, &rounded_size),
+			-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test,
+			vmbus_buffer_round_size(U32_MAX - PAGE_SIZE + 1,
+						&rounded_size), 0);
+	KUNIT_EXPECT_EQ(test, rounded_size,
+			(u32)(U32_MAX - PAGE_SIZE + 1));
+}
+
+static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
+{
+	unsigned int order;
+
+	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
+	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
+	while (order)
+		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_lower_order(&order));
+	KUNIT_EXPECT_EQ(test, order, 0U);
+	KUNIT_EXPECT_EQ(test, vmbus_buffer_order(3, MAX_PAGE_ORDER), 1U);
+}
+
+static void vmbus_buffer_failed_teardown_leaks_test(struct kunit *test)
+{
+	struct vmbus_buffer buffer = {
+		.addr = (void *)1,
+		.gpadl_handle = 1,
+	};
+
+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
+	buffer.gpadl_handle = 0;
+	buffer.leak = true;
+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
+	buffer.leak = false;
+	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
+}
+
+static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
+{
+	struct page **chunks;
+	struct vmbus_buffer buffer = {};
+
+	chunks = kmalloc(sizeof(*chunks), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, chunks);
+	__vmbus_free_buffer_mem(NULL, chunks, 0);
+
+	buffer.addr = vzalloc(PAGE_SIZE);
+	KUNIT_ASSERT_NOT_NULL(test, buffer.addr);
+	vmbus_free_buffer(&buffer);
+	KUNIT_EXPECT_PTR_EQ(test, buffer.addr, NULL);
+	vmbus_free_buffer(&buffer);
+}
+
+static struct kunit_case vmbus_buffer_test_cases[] = {
+	KUNIT_CASE(vmbus_buffer_size_rounding_test),
+	KUNIT_CASE(vmbus_buffer_size_overflow_test),
+	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
+	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
+	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
+	{}
+};
+
+static struct kunit_suite vmbus_buffer_test_suite = {
+	.name = "hyperv-vmbus-buffer-wsl",
+	.test_cases = vmbus_buffer_test_cases,
+};
+
+kunit_test_suite(vmbus_buffer_test_suite);
+#endif
 
 /*
  * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
@@ -582,7 +682,8 @@ static void __vmbus_free_buffer_mem(void *addr, struct page **chunks,
 		return;
 	}
 
-	vunmap(addr);
+	if (addr)
+		vunmap(addr);
 
 	for (i = 0; i < chunk_cnt; i++) {
 		unsigned long vaddr =
@@ -597,6 +698,11 @@ static void __vmbus_free_buffer_mem(void *addr, struct page **chunks,
 	kvfree(chunks);
 }
 
+static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
+{
+	return !buffer->leak && !buffer->gpadl_handle;
+}
+
 /**
  * vmbus_free_buffer - release a buffer filled by vmbus_alloc_buffer()
  *
@@ -609,7 +715,7 @@ static void __vmbus_free_buffer_mem(void *addr, struct page **chunks,
  */
 void vmbus_free_buffer(struct vmbus_buffer *buffer)
 {
-	bool keep_pages = buffer->leak || buffer->gpadl_handle;
+	bool keep_pages = !vmbus_buffer_should_free(buffer);
 
 	if (!buffer->addr)
 		return;
@@ -624,6 +730,33 @@ void vmbus_free_buffer(struct vmbus_buffer *buffer)
 	memset(buffer, 0, sizeof(*buffer));
 }
 EXPORT_SYMBOL_GPL(vmbus_free_buffer);
+
+static int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
+{
+	if (!size)
+		return -EINVAL;
+
+	if (size > U32_MAX - (u32)PAGE_SIZE + 1)
+		return -EOVERFLOW;
+
+	*rounded_size = round_up(size, (u32)PAGE_SIZE);
+	return 0;
+}
+
+static unsigned int vmbus_buffer_order(unsigned long remaining,
+				       unsigned int max_order)
+{
+	return min_t(unsigned int, max_order, ilog2(remaining));
+}
+
+static bool vmbus_buffer_lower_order(unsigned int *order)
+{
+	if (!*order)
+		return false;
+
+	(*order)--;
+	return true;
+}
 
 /**
  * vmbus_alloc_buffer - allocate a virtually-contiguous VMBus buffer
@@ -644,19 +777,20 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
  * vmbus_establish_gpadl() must not decrypt again (it cannot: set_memory_*()
  * does not work on vmalloc addresses in arm64 CCA / TDX-without-paravisor).
  *
- * Return: 0 on success, -ENOMEM or -EINVAL on failure.
+ * Return: 0 on success, -ENOMEM, -EINVAL, or -EOVERFLOW on failure.
  */
 int vmbus_alloc_buffer(struct vmbus_channel *channel,
 		       u32 size,
 		       bool encrypted,
 		       struct vmbus_buffer *buffer)
 {
-	unsigned long nr_pages = PFN_UP(size);
-	unsigned long remaining = nr_pages;
+	u32 rounded_size;
+	unsigned long nr_pages;
+	unsigned long remaining;
 	unsigned long page_idx = 0;
 	struct page **chunks = NULL;
 	struct page **pages = NULL;
-	int order = MAX_PAGE_ORDER;
+	unsigned int order = MAX_PAGE_ORDER;
 	u32 chunk_cnt = 0;
 	void *addr;
 	u32 i;
@@ -664,13 +798,17 @@ int vmbus_alloc_buffer(struct vmbus_channel *channel,
 
 	memset(buffer, 0, sizeof(*buffer));
 
-	if (!nr_pages)
-		return -EINVAL;
+	ret = vmbus_buffer_round_size(size, &rounded_size);
+	if (ret)
+		return ret;
+	nr_pages = rounded_size >> PAGE_SHIFT;
+	remaining = nr_pages;
 
-	buffer->size = nr_pages << PAGE_SHIFT;
+	buffer->size = rounded_size;
 
 	/* Guest-private, or no isolation: nothing to decrypt */
-	if (!hv_is_isolation_supported() || encrypted) {
+	if ((!hv_is_isolation_supported() &&
+	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || encrypted) {
 		buffer->addr = vzalloc(buffer->size);
 		return buffer->addr ? 0 : -ENOMEM;
 	}
@@ -688,7 +826,7 @@ int vmbus_alloc_buffer(struct vmbus_channel *channel,
 		struct page *page;
 		gfp_t gfp;
 
-		order = min(order, ilog2(remaining));
+		order = vmbus_buffer_order(remaining, order);
 
 		/*
 		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
@@ -703,7 +841,7 @@ int vmbus_alloc_buffer(struct vmbus_channel *channel,
 		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
 					gfp, order);
 		if (!page) {
-			if (!order--)
+			if (!vmbus_buffer_lower_order(&order))
 				goto err;
 			continue;
 		}
