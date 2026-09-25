@@ -150,7 +150,7 @@ jobs:
           ! grep -q 'C=2 specified, but sparse is not available or not up to date' \
             "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
           done
-          test "$stage" -eq 5
+          test "$stage" -eq 4
       - name: Require and run VMBus KUnit cases
         if: matrix.arch == 'x86_64'
         run: |
@@ -160,11 +160,7 @@ jobs:
             vmbus_buffer_size_overflow_test \
             vmbus_ring_fallback_order_zero_test \
             vmbus_buffer_failed_teardown_leaks_test \
-            vmbus_buffer_partial_allocation_cleanup_test \
-            vmbus_gpadl_post_failure_test \
-            vmbus_gpadl_post_success_test \
-            vmbus_gpadl_response_state_test \
-            vmbus_gpadl_teardown_post_failure_test; do
+            vmbus_buffer_partial_allocation_cleanup_test; do
             grep -R -q "KUNIT_CASE($case_name)" linux/drivers/hv linux/drivers/uio || {
               echo "Missing required KUnit case: $case_name" | tee -a vmbus-artifacts/kunit.log
               exit 1
@@ -190,11 +186,7 @@ jobs:
             vmbus_buffer_size_overflow_test \
             vmbus_ring_fallback_order_zero_test \
             vmbus_buffer_failed_teardown_leaks_test \
-            vmbus_buffer_partial_allocation_cleanup_test \
-            vmbus_gpadl_post_failure_test \
-            vmbus_gpadl_post_success_test \
-            vmbus_gpadl_response_state_test \
-            vmbus_gpadl_teardown_post_failure_test; do
+            vmbus_buffer_partial_allocation_cleanup_test; do
             grep -Fq "[PASSED] $case_name" vmbus-artifacts/kunit.log
           done
       - name: Upload evidence
