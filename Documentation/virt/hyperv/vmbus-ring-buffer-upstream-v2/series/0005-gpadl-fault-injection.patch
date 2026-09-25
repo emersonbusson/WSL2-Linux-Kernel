@@ -1,7 +1,7 @@
 From b5671d1204dac44ae65f97cf6e0a985fb9c435e6 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 5/5] test(hv): inject VMBus GPADL post failures
+Subject: [PATCH v2 5/6] test(hv): inject VMBus GPADL post failures
 
 Route GPADL message posting through a private callback so KUnit can inject
 header, each body, and teardown post failures without a live host. Exercise

@@ -77,7 +77,7 @@ preparation. A test kernel is rolled back by rebooting the prior image.
 | --- | --- | --- | --- |
 | Page rounding | `vmbus_buffer_size_rounding_test` | KUnit | N/A — kernel slice |
 | Page-rounding overflow | `vmbus_buffer_size_overflow_test` | KUnit | N/A — kernel slice |
-| Allocation-order descent | `vmbus_ring_fallback_order_zero_test` | KUnit helper test; allocator fault injection still required | N/A — kernel slice; live fragmentation drill |
+| Allocation-order descent | `vmbus_ring_fallback_order_zero_test`, `vmbus_buffer_order_zero_allocation_test` | KUnit helper test plus injected failures above order 0; exercises a real order-0 allocation and order-0 exhaustion | N/A — kernel slice; live fragmentation drill remains required |
 | GPADL release ownership predicate | `vmbus_buffer_failed_teardown_leaks_test` | KUnit predicate test; callback-injected header/body/teardown post failures and response-state mapping are covered separately | N/A — kernel slice; live response/rescind drill |
 | Partial allocation cleanup | `vmbus_buffer_partial_allocation_cleanup_test` | KUnit | N/A — kernel slice; allocation fault injection still required |
 | GPADL message post ordering and failure ownership | `vmbus_gpadl_post_failure_test`, `vmbus_gpadl_post_success_test`, `vmbus_gpadl_response_state_test`, `vmbus_gpadl_teardown_post_failure_test` | KUnit with injected post callback; exercises header, each body position, teardown, host rejection status, and rescind status | N/A — kernel slice; live Hyper-V response/rescind remains required |

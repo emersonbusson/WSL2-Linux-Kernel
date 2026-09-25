@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH 1/4] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 1/6] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy
@@ -787,7 +787,7 @@ index 9e109d91aa1430d83aaf37984f9d484641805873..567679c68da183f883ae32c3fd1a6d0d
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH 2/4] hv: vmbus: validate chunk buffer allocation and cleanup
+Subject: [PATCH v2 2/6] hv: vmbus: validate chunk buffer allocation and cleanup
 
 Validate rounded sizes before storing them and preserve allocated
 chunks when cleanup or GPADL teardown has an uncertain outcome. Add focused
@@ -1044,7 +1044,7 @@ index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH 3/4] uio: hv_generic: allocate host-visible buffers through
+Subject: [PATCH v2 3/6] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
 Route generic VMBus UIO send and receive buffers through the VMBus
@@ -1180,7 +1180,7 @@ index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe711
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:34:41 -0300
-Subject: [PATCH 4/4] test(hv): correct VMBus fallback order vector
+Subject: [PATCH v2 4/6] test(hv): correct VMBus fallback order vector
 
 Use the order that matches the remaining page count in the fallback
 helper test.
@@ -1206,7 +1206,7 @@ index 091288f8c00c8426480c08a1c91900c2e94afcb0..c47a923306f298291b169c5827c77708
 From b5671d1204dac44ae65f97cf6e0a985fb9c435e6 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 5/5] test(hv): inject VMBus GPADL post failures
+Subject: [PATCH v2 5/6] test(hv): inject VMBus GPADL post failures
 
 Route GPADL message posting through a private callback so KUnit can inject
 header, each body, and teardown post failures without a live host. Exercise
@@ -1626,6 +1626,178 @@ index c47a923..35bdc94 100644
  
  	if (ret)
  		goto post_msg_err;
+-- 
+2.43.0
+
+From 3bbc9bc7c62db3ec0831de9a7ca659990747060f Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Fri, 25 Sep 2026 11:05:00 -0300
+Subject: [PATCH v2 6/6] test(hv): exercise order-zero allocation fallback
+
+Factor the order-descent allocation loop so KUnit can inject failures for
+orders above zero while retaining a real order-zero allocation in the test
+path. Also verify clean exhaustion when the order-zero attempt fails.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+
+Rollback trigger: Revert if an allocation failure skips order zero or underflows the order.
+---
+ drivers/hv/channel.c | 100 ++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 93 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 35bdc94..6b1e1fd 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -34,6 +34,13 @@ static unsigned int vmbus_buffer_order(unsigned long remaining,
+ 				       unsigned int max_order);
+ static bool vmbus_buffer_lower_order(unsigned int *order);
+ static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
++typedef struct page *(*vmbus_alloc_pages_fn)(void *context, int nid,
++					     gfp_t gfp,
++					     unsigned int order);
++static struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
++						    unsigned int *order,
++						    vmbus_alloc_pages_fn alloc,
++						    void *context);
+ typedef int (*vmbus_gpadl_post_fn)(void *context, void *buffer,
+ 					  size_t buflen, bool can_sleep);
+ static int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
+@@ -120,6 +127,63 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
+ 	vmbus_release_buffer(&buffer);
+ }
+ 
++struct vmbus_buffer_page_alloc_test_context {
++	struct kunit *test;
++	unsigned int attempts;
++	unsigned int expected_order;
++	bool fail_order_zero;
++};
++
++static struct page *vmbus_buffer_test_alloc_page(void *context, int nid,
++						 gfp_t gfp,
++						 unsigned int order)
++{
++	struct vmbus_buffer_page_alloc_test_context *test_context = context;
++
++	(void)nid;
++	KUNIT_EXPECT_EQ(test_context->test, order,
++			test_context->expected_order);
++	test_context->attempts++;
++	if (test_context->expected_order)
++		test_context->expected_order--;
++
++	if (order)
++		return NULL;
++	if (test_context->fail_order_zero)
++		return NULL;
++
++	return alloc_pages(gfp, 0);
++}
++
++static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
++{
++	struct vmbus_buffer_page_alloc_test_context context = {
++		.test = test,
++		.expected_order = MAX_PAGE_ORDER,
++	};
++	struct page *page;
++	unsigned int order = MAX_PAGE_ORDER;
++
++	page = vmbus_alloc_pages_with_fallback(0, GFP_KERNEL, &order,
++					       vmbus_buffer_test_alloc_page, &context);
++	KUNIT_ASSERT_NOT_NULL(test, page);
++	KUNIT_EXPECT_EQ(test, order, 0U);
++	KUNIT_EXPECT_EQ(test, context.expected_order, 0U);
++	KUNIT_EXPECT_EQ(test, context.attempts, (unsigned int)MAX_PAGE_ORDER + 1);
++	__free_pages(page, 0);
++
++	context.attempts = 0;
++	context.expected_order = MAX_PAGE_ORDER;
++	context.fail_order_zero = true;
++	order = MAX_PAGE_ORDER;
++	page = vmbus_alloc_pages_with_fallback(0, GFP_KERNEL, &order,
++					       vmbus_buffer_test_alloc_page, &context);
++	KUNIT_EXPECT_PTR_EQ(test, page, NULL);
++	KUNIT_EXPECT_EQ(test, order, 0U);
++	KUNIT_EXPECT_EQ(test, context.expected_order, 0U);
++	KUNIT_EXPECT_EQ(test, context.attempts, (unsigned int)MAX_PAGE_ORDER + 1);
++}
++
+ struct vmbus_gpadl_post_test_context {
+ 	struct kunit *test;
+ 	unsigned int call_count;
+@@ -301,6 +365,7 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+ 	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
+ 	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
+ 	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
++	KUNIT_CASE(vmbus_buffer_order_zero_allocation_test),
+ 	KUNIT_CASE(vmbus_gpadl_post_failure_test),
+ 	KUNIT_CASE(vmbus_gpadl_post_success_test),
+ 	KUNIT_CASE(vmbus_gpadl_response_state_test),
+@@ -343,6 +408,20 @@ static bool vmbus_buffer_lower_order(unsigned int *order)
+ 	return true;
+ }
+ 
++static struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
++						    unsigned int *order,
++						    vmbus_alloc_pages_fn alloc,
++						    void *context)
++{
++	struct page *page;
++
++	do {
++		page = alloc(context, nid, gfp, *order);
++		if (page || !vmbus_buffer_lower_order(order))
++			return page;
++	} while (true);
++}
++
+ static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
+ {
+ 	return !buffer->leak && !buffer->gpadl.leak &&
+@@ -1052,6 +1131,14 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+ }
+ EXPORT_SYMBOL_GPL(vmbus_release_buffer);
+ 
++static struct page *vmbus_alloc_pages_node(void *context, int nid,
++					   gfp_t gfp,
++					   unsigned int order)
++{
++	(void)context;
++	return alloc_pages_node(nid, gfp, order);
++}
++
+ /**
+  * vmbus_alloc_buffer - allocate a host-visible, virtually-contiguous buffer.
+  *
+@@ -1115,6 +1202,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	while (remaining) {
+ 		struct page *page;
+ 		gfp_t gfp;
++		int nid;
+ 
+ 		order = vmbus_buffer_order(remaining, order);
+ 
+@@ -1128,13 +1216,11 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 		if (order)
+ 			gfp |= __GFP_COMP | __GFP_NORETRY | __GFP_NOWARN;
+ 
+-		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
+-					gfp, order);
+-		if (!page) {
+-			if (!vmbus_buffer_lower_order(&order))
+-				goto err;
+-			continue;
+-		}
++		nid = cpu_to_node(channel->target_cpu);
++		page = vmbus_alloc_pages_with_fallback(nid, gfp, &order,
++						       vmbus_alloc_pages_node, NULL);
++		if (!page)
++			goto err;
+ 
+ 		ret = set_memory_decrypted((unsigned long)page_address(page),
+ 					   1U << order);
 -- 
 2.43.0
 

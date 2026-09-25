@@ -159,3 +159,21 @@ context-imbalance warning and a flexible-array warning in the GPADL header.
 The hosted artifacts preserve these logs; strict checkpatch reported no
 warnings for the four original patches. The fifth patch passes strict
 checkpatch, exact-state apply, hosted builds, and its KUnit cases.
+
+
+## September 25 order-zero fallback test candidate
+
+The versioned v2 draft now has six patch files. All subjects are numbered
+`[PATCH v2 n/6]`, and the consolidated patch snapshot is regenerated from the
+ordered series. Patch 6 factors the production page-allocation descent loop
+behind a private callback. Its KUnit test injects failure at every order
+above zero, permits a real order-0 allocation, frees the page, then checks
+that injected order-0 exhaustion returns cleanly without underflow. Strict
+checkpatch passes locally. Hosted build and KUnit results are pending; the
+prior successful run 36145111714 covers only five patches and 13 tests.
+
+After hosted success, KUnit will establish the order-0 fallback logic under
+injected high-order failures, but it will not prove allocator fragmentation
+on a live host. Live response/rescind races, UIO mmap, and SEV-SNP, TDX, and
+Arm CCA transitions remain unqualified. No v2 email is sent until those
+required runtime gates and maintainer review are complete.

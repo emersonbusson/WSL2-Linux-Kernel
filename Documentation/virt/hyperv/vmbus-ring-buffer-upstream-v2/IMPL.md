@@ -68,9 +68,11 @@ It is not a replacement kernel, distribution backport, or upstream email.
 
 ## Blocking gaps
 
-1. The hosted KUnit suite passed 13/13, including nine VMBus buffer cases and
-   injected GPADL post failures. Allocator fault injection at order zero and
-   live host-response/rescind interleaving remain untested.
+1. Hosted CI run 36145111714 passed the prior five-patch state (13/13 KUnit,
+   nine VMBus cases). A sixth patch now adds allocator callback injection to
+   exercise descent to a real order-0 allocation and clean order-0 exhaustion;
+   its hosted run is pending. Live host-response/rescind interleaving remains
+   untested.
 2. The exact candidate kernel has been linked and booted in an ordinary
    x86_64 Hyper-V guest. This does not qualify the separate WSL 6.18 backport
    or any CoCo platform.
@@ -157,13 +159,17 @@ booted there. The
 September 17 mailing-list message was unversioned `[PATCH 2/2]`, so the next
 submission is v2 if and when all gates pass. No new email was sent.
 
-## Next gate
+## September 25 order-zero injection patch
 
-Exercise live host response/rescind interleavings and force order-zero
-allocation fallback during allocation. Then qualify the exact code on SEV-SNP,
-TDX, and Arm CCA hosts. Hosted CI does not emulate
-those host/guest memory-state transitions. Send v2 only after required
-evidence and maintainer review.
+A sixth patch factors the production order-descent allocation loop behind a
+private callback. Its KUnit case injects failure at every order above zero,
+then allows a real order-0 allocation and frees it; a second pass injects
+order-0 failure and checks clean exhaustion. The patch applies after patch 5
+and passes strict checkpatch locally. Hosted x86_64/arm64 build and KUnit
+qualification are pending; do not report this as passed until the workflow
+run completes. Even after that run, real allocator fragmentation, live
+response/rescind interleavings, UIO mmap, and CoCo SEV-SNP/TDX/CCA transitions
+remain lab gates.
 
 ## Rollback trigger
 
