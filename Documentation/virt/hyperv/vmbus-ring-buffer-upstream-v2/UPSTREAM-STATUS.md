@@ -2,8 +2,8 @@
 
 - **Target Repository:** [`microsoft/WSL#41634`](https://github.com/microsoft/WSL/issues/41634) (combined proposal) · [`microsoft/WSL#40795`](https://github.com/microsoft/WSL/issues/40795#issuecomment-5716513649) (solution comment) & Linux Hyper-V Subsystem (LKML)
 - **Kernel Subsystem:** `drivers/hv/` (Hyper-V Synthetic Transport)
-- **Patch Reference:** [`docs/upstream/patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch`](../patches/0002-hv-vmbus-dedicated-ring-pool-and-virtual-fallback.patch)
-- **Status:** v1 proposal submitted; v2 is a public, versioned candidate with partial hosted validation
+- **Patch Reference:** [seven-patch v2 series](series/) · [consolidated snapshot](vmbus-ring-buffer-v2.patch)
+- **Status:** v1 proposal submitted; the seven-patch v2 candidate is under source review. Its latest patch has not yet passed hosted build/KUnit and the candidate is not ready to send.
 
 ---
 
@@ -45,21 +45,28 @@ Upstream Hyper-V guest drivers assume that physical memory contiguity can always
 ## 4. The Fix (Patch Series v2: `vmbus_alloc_buffer` Architecture)
 
 ### A. Non-Contiguous Chunked Buffer Allocation (`drivers/hv/channel.c`, `include/linux/hyperv.h`)
-Instead of a naive `vzalloc()` fallback that risks virtual address decryption panics on Confidential VMs, the v2 architecture implements upstream-aligned `vmbus_alloc_buffer()` and `vmbus_free_buffer()` centered around `struct vmbus_buffer`:
+The candidate uses an owned `struct vmbus_buffer` for ring and selected VMBus
+buffers. It retains the prior exported allocator/free/GPADL interfaces through
+compatibility adapters while migrated in-tree users call descriptor-aware
+`_owned` entry points:
 - Automatically attempts high-order contiguous physical allocations first (`alloc_pages_node()`).
 - Under physical fragmentation, dynamically falls back to decomposing the requested buffer into smaller contiguous physical chunks down to Order-0 individual pages.
-- Maps the physical chunks into a contiguous kernel virtual address range via `vmap()` / `vm_map_pages()`.
+- Maps the physical chunks into a contiguous kernel virtual address range via `vmap()`.
 
-### B. Confidential Computing (CoCo VM) Page Decryption per Chunk
-On modern Confidential VMs (Azure CVM, ARM64 CCA, Intel TDX, AMD SEV-SNP without a paravisor), `set_memory_decrypted()` requires direct-mapped physical pages and crashes on non-contiguous virtual address ranges.
-- The v2 fix iterates through each allocated contiguous physical chunk, decrypting each chunk individually *while physically contiguous*.
-- Only after all physical chunks are safely decrypted are they joined into the virtual address space with `pgprot_decrypted(PAGE_KERNEL)`.
-- Upon teardown, `vmbus_free_buffer()` safely re-encrypts chunks before releasing pages to the buddy allocator.
+### B. Page-State Handling and Confidential-Guest Limits
+The candidate calls the memory-encryption helpers on direct-map chunk
+addresses before joining those chunks with `vmap()`. It records unknown or
+failed page-state transitions and keeps those pages allocated. This is an
+implementation strategy, not a compatibility claim: no SEV-SNP, TDX, or Arm
+CCA transition has been qualified by the current candidate. No universal
+Confidential Computing support is claimed.
 
 ### C. Unified Buffer Lifecycle Management
-Unifies ring buffers and generic VMBus buffers into `struct vmbus_buffer`:
-- Stores contiguous and non-contiguous buffer representations, GPADL descriptors, and teardown flags uniformly.
-- NetVSC, StorVSC, and UIO drivers adopt the unified buffer lifecycle with zero regression.
+The descriptor groups buffer pages, virtual mapping, GPADL state, and the
+retained-owner record. Ring, NetVSC, and UIO paths use it; StorVSC has not
+been converted. The retained reclaimer waits for GPADL state, page-state, and
+mapping references before freeing backing pages. No regression-free runtime
+claim is established.
 
 ---
 
@@ -179,3 +186,75 @@ fragmentation on a live host. Live response/rescind races and SEV-SNP, TDX,
 and Arm CCA transitions remain unqualified. Ordinary Hyper-V UIO mmap is
 recorded separately in EVD-0054. No v2 email is sent until the required
 runtime/platform gates and maintainer review are complete.
+
+## September 28 seven-patch candidate re-audit
+
+The current candidate is based on Linux `v7.3-rc4`
+(`93f51579e7df248780214094418f205253383cc5`) and has seven ordered patch
+files. Patch 7 adds channel-keyed retained buffer owners, GPADL acknowledgment
+and host-rescind state updates, delayed reclamation, page-reference checks
+for UIO mappings, and adapters that preserve the previous exported APIs.
+The independent re-audit found the earlier status text stale: this is a
+production reclaimer in the source tree, not test-only cleanup. The host
+rescind path still relies on a protocol ordering assumption that the Linux
+documentation does not explicitly define for GPADL page access.
+
+The seven patches apply sequentially to the pinned base. `git diff --check`
+passes after each patch, cumulative `checkpatch.pl --strict` reports zero
+errors/warnings/checks at every stage, and the applied tree matches the exact
+candidate source byte-for-byte. The workflow now checks that same cumulative
+source diff after each patch; applying checkpatch directly to the mail files
+had reported blank context lines as trailing whitespace. The stale duplicate
+`0007-gpadl-rescind-reclaim.patch` was removed so the workflow applies exactly
+seven files. The consolidated snapshot was regenerated from those seven
+files.
+
+The current patch 7 is a plain unified diff, not a signed-off mail patch. It
+is an apply/build candidate and is not ready for LKML transmission. The latest
+API-adapter source has not yet run hosted compilation or KUnit. Prior hosted
+run `36148296003` qualified only the earlier six-patch series and is not
+evidence for this patch. No local heavy build, install, host stress, CoCo
+transition, or mailing-list send was performed.
+
+**Current status:** PARTIAL and blocked for upstream send/installation until
+hosted x86_64/arm64 build and KUnit pass, ordinary Hyper-V rescind/close and
+UIO mmap interleavings are exercised on this exact source, and supported CoCo
+page-state transitions receive platform-specific evidence. No all-architecture
+or universal CoCo claim is made.
+
+## September 28 UIO page-protection follow-up
+
+Source review found that UIO's ring, receive, and send mappings could retain
+the default encrypted page protection even when the owned allocator had
+already transitioned their backing pages to shared/decrypted state. The
+monitor page is also decrypted by VMBus setup. The candidate now maps the
+explicit page arrays, validates map/range selection, requires `MAP_SHARED`,
+keeps the normal UIO no-expand/no-dump flags, and applies decrypted protection
+only to the shared buffers and monitor page. Four named UIO KUnit cases and
+workflow assertions were added. The cases have not yet run on this revision.
+
+The exact source remains PARTIAL until the hosted x86_64/arm64 build and KUnit
+run passes, then live Hyper-V UIO close/unregister and CoCo page-state tests
+qualify the lifetime. Existing hosted run `36148296003` covers six earlier
+patches only. The series is not ready for LKML or kernel installation.
+
+## September 28 WSL mapping-reference follow-up
+
+Source review found that the WSL backport's KUnit test required mapping
+references to defer re-encryption, while its production free helper did not
+check those references. The free path now retains chunk-backed or `vzalloc()`
+pages while UIO PTE references remain and retries only after the GPADL and
+encryption gates are clear. Module exit cancels pending delayed work and waits
+for active reclaim callbacks. The disconnected VMBus message path also frees
+its allocated context.
+
+The WSL hosted job now records its source SHA and kernel version, builds the
+changed VMBus, NetVSC, UIO, and DXG objects with W=1/Sparse, and runs the
+11-case GPADL lifetime and three-case UIO mmap/protection KUnit suites under
+QEMU. The legacy UIO callback now maps pages with references, requires shared
+mappings, and applies decrypted protection to the shared ring/receive/send and
+monitor regions. Sysfs ring offsets are applied once. These checks have not
+yet run on the revised source. Live UIO mmap close/unregister, ordinary
+Hyper-V GPADL interleavings, and supported CoCo page transitions remain
+environment gates; the source is not qualified for installation or upstream
+send.

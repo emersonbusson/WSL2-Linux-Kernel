@@ -9,22 +9,37 @@ on:
       - .github/workflows/vmbus-upstream.yml
       - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/vmbus-ring-buffer-v2.patch
       - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/**
+      - drivers/hv/channel.c
+      - drivers/hv/channel_mgmt.c
+      - drivers/hv/hyperv_vmbus.h
+      - drivers/hv/vmbus_drv.c
+      - drivers/net/hyperv/netvsc.c
+      - drivers/uio/uio_hv_generic.c
+      - include/linux/hyperv.h
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: vmbus-upstream-global
+  cancel-in-progress: false
+
 jobs:
   wsl-backport:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install kernel tools
         run: |
           set -euo pipefail
+          mkdir -p vmbus-wsl-artifacts
+          touch vmbus-wsl-artifacts/job-started.txt
+          git rev-parse HEAD > vmbus-wsl-artifacts/source-sha.txt
+          make kernelversion > vmbus-wsl-artifacts/kernel-version.txt
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libelf-dev libssl-dev
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev qemu-system-x86
           SPARSE_SHA=37156835e3d725b6d750f000be33ba3814bb2310
           git init sparse-src
           git -C sparse-src remote add origin https://git.kernel.org/pub/scm/devel/sparse/sparse.git
@@ -49,6 +64,7 @@ jobs:
           cp wsl-out/.config vmbus-wsl-artifacts/config-x86_64
           grep -Eq '^CONFIG_DXGKRNL=[ym]$' wsl-out/.config
           make O="$GITHUB_WORKSPACE/wsl-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
+            drivers/hv/channel.o drivers/hv/channel_mgmt.o \
             drivers/hv/vmbus_drv.o drivers/hv/ring_buffer.o \
             drivers/net/hyperv/ drivers/uio/ \
             2>&1 | tee vmbus-wsl-artifacts/build-sparse.log
@@ -57,6 +73,52 @@ jobs:
           make O="$GITHUB_WORKSPACE/wsl-out" -j2 W=1 C=0 \
             drivers/hv/dxgkrnl/ \
             2>&1 | tee vmbus-wsl-artifacts/build-dxgkrnl.log
+      - name: Run WSL backport KUnit lifetime tests
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/wsl-kunitconfig" <<'EOF'
+          CONFIG_KUNIT=y
+          CONFIG_HYPERVISOR_GUEST=y
+          CONFIG_HYPERV=y
+          CONFIG_HYPERV_VMBUS=y
+          CONFIG_UIO=y
+          CONFIG_UIO_HV_GENERIC=y
+          EOF
+          cp "$RUNNER_TEMP/wsl-kunitconfig" \
+            vmbus-wsl-artifacts/config-kunit-requested
+          for case_name in \
+            vmbus_buffer_mapping_ref_defers_reencrypt_test \
+            vmbus_vmalloc_mapping_ref_defers_free_test; do
+            grep -q "KUNIT_CASE($case_name)" drivers/hv/channel.c
+          done
+          for case_name in \
+            hv_uio_mmap_validate_test \
+            hv_uio_ring_mmap_page_range_test \
+            hv_uio_mmap_page_protection_test; do
+            grep -q "KUNIT_CASE($case_name)" drivers/uio/uio_hv_generic.c
+          done
+          python3 tools/testing/kunit/kunit.py run \
+            --build_dir="$GITHUB_WORKSPACE/wsl-kunit-out" \
+            --arch=x86_64 --kunitconfig="$RUNNER_TEMP/wsl-kunitconfig" \
+            2>&1 | tee vmbus-wsl-artifacts/kunit.log
+          cp wsl-kunit-out/.config vmbus-wsl-artifacts/config-kunit-resolved
+          grep -Eq '^# hyperv-vmbus-gpadl-lifetime: pass:11 fail:0 skip:0 total:11$' \
+            vmbus-wsl-artifacts/kunit.log
+          grep -Eq '^# hyperv-uio-hv-generic-mmap: pass:3 fail:0 skip:0 total:3$' \
+            vmbus-wsl-artifacts/kunit.log
+          for case_name in \
+            vmbus_buffer_mapping_ref_defers_reencrypt_test \
+            vmbus_vmalloc_mapping_ref_defers_free_test; do
+            grep -Eq "^[[:space:]]*ok [0-9]+( -)? ${case_name}([[:space:]]|$)" \
+              vmbus-wsl-artifacts/kunit.log
+          done
+          for case_name in \
+            hv_uio_mmap_validate_test \
+            hv_uio_ring_mmap_page_range_test \
+            hv_uio_mmap_page_protection_test; do
+            grep -Eq "^[[:space:]]*ok [0-9]+( -)? ${case_name}([[:space:]]|$)" \
+              vmbus-wsl-artifacts/kunit.log
+          done
       - name: Upload WSL build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -66,10 +128,12 @@ jobs:
           if-no-files-found: error
 
   kernel:
+    needs: wsl-backport
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - arch: x86_64
@@ -81,6 +145,8 @@ jobs:
       - name: Install required kernel tools
         run: |
           set -euo pipefail
+          mkdir -p vmbus-artifacts
+          touch vmbus-artifacts/job-started.txt
           sudo apt-get update
           sudo apt-get install -y bc bison flex libelf-dev libssl-dev gcc-aarch64-linux-gnu qemu-system-x86
           SPARSE_SHA=37156835e3d725b6d750f000be33ba3814bb2310
@@ -102,7 +168,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p vmbus-artifacts
-          git clone --filter=blob:none --no-checkout https://github.com/torvalds/linux.git linux
+          git init linux
+          git -C linux remote add origin https://github.com/torvalds/linux.git
           git -C linux fetch --depth=1 origin "$BASE"
           git -C linux checkout --detach FETCH_HEAD
           test "$(git -C linux rev-parse HEAD)" = "$BASE"
@@ -139,8 +206,8 @@ jobs:
             git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
             git -C linux apply "$GITHUB_WORKSPACE/$patch"
             git -C linux diff --check
-            (cd linux && scripts/checkpatch.pl --strict --no-tree \
-              "$GITHUB_WORKSPACE/$patch") 2>&1 \
+            (cd linux && scripts/checkpatch.pl --strict --no-tree) \
+              < <(git -C linux diff --no-ext-diff --no-color) 2>&1 \
               | tee "vmbus-artifacts/checkpatch-${stage}.log"
             grep -q 'total: 0 errors, 0 warnings, 0 checks' \
               "vmbus-artifacts/checkpatch-${stage}.log"
@@ -151,7 +218,16 @@ jobs:
           ! grep -q 'C=2 specified, but sparse is not available or not up to date' \
             "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
           done
-          test "$stage" -eq 6
+          test "$stage" -eq 7
+          for symbol in \
+            vmbus_alloc_buffer \
+            vmbus_free_buffer \
+            vmbus_establish_gpadl \
+            vmbus_establish_gpadl_caller_decrypted \
+            vmbus_teardown_gpadl; do
+            grep -q "EXPORT_SYMBOL_GPL($symbol)" linux/drivers/hv/channel.c
+            grep -q "$symbol" linux/include/linux/hyperv.h
+          done
       - name: Require and run VMBus KUnit cases
         if: matrix.arch == 'x86_64'
         run: |
@@ -159,14 +235,24 @@ jobs:
           for case_name in \
             vmbus_buffer_size_rounding_test \
             vmbus_buffer_size_overflow_test \
+            vmbus_buffer_private_shared_selection_test \
             vmbus_ring_fallback_order_zero_test \
             vmbus_buffer_failed_teardown_leaks_test \
+            vmbus_buffer_owner_reclaim_gate_test \
+            vmbus_buffer_reclaim_schedule_gate_test \
+            vmbus_buffer_host_revoke_state_test \
+            vmbus_buffer_mapping_reference_test \
             vmbus_buffer_partial_allocation_cleanup_test \
+            vmbus_buffer_repeated_owner_release_test \
             vmbus_gpadl_post_failure_test \
             vmbus_gpadl_post_success_test \
             vmbus_gpadl_response_state_test \
             vmbus_gpadl_teardown_post_failure_test \
-            vmbus_buffer_order_zero_allocation_test; do
+            vmbus_buffer_order_zero_allocation_test \
+            hv_uio_ring_mmap_range_test \
+            hv_uio_ring_mmap_prepare_test \
+            hv_uio_mmap_region_select_test \
+            hv_uio_mmap_prepare_test; do
             grep -R -q "KUNIT_CASE($case_name)" linux/drivers/hv linux/drivers/uio || {
               echo "Missing required KUnit case: $case_name" | tee -a vmbus-artifacts/kunit.log
               exit 1
@@ -177,28 +263,41 @@ jobs:
           CONFIG_HYPERVISOR_GUEST=y
           CONFIG_HYPERV=y
           CONFIG_HYPERV_VMBUS=y
+          CONFIG_HYPERV_NET=y
+          CONFIG_UIO=y
+          CONFIG_UIO_HV_GENERIC=y
           EOF
           (cd linux && python3 tools/testing/kunit/kunit.py run \
             --build_dir="$GITHUB_WORKSPACE/kunit-out" \
             --arch=x86_64 --kunitconfig=drivers/hv/.kunitconfig) \
             2>&1 | tee -a vmbus-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran [0-9]+ tests: passed: [0-9]+$' \
+          grep -Eq '^# hyperv-vmbus-buffer: pass:16 fail:0 skip:0 total:16$' \
             vmbus-artifacts/kunit.log
-          if grep -Eq 'failed: [1-9]|\[FAILED\]' vmbus-artifacts/kunit.log; then
-            exit 1
-          fi
+          grep -Eq '^# hyperv-uio-mmap: pass:4 fail:0 skip:0 total:4$' \
+            vmbus-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_size_rounding_test \
             vmbus_buffer_size_overflow_test \
+            vmbus_buffer_private_shared_selection_test \
             vmbus_ring_fallback_order_zero_test \
             vmbus_buffer_failed_teardown_leaks_test \
+            vmbus_buffer_owner_reclaim_gate_test \
+            vmbus_buffer_reclaim_schedule_gate_test \
+            vmbus_buffer_host_revoke_state_test \
+            vmbus_buffer_mapping_reference_test \
             vmbus_buffer_partial_allocation_cleanup_test \
+            vmbus_buffer_repeated_owner_release_test \
             vmbus_gpadl_post_failure_test \
             vmbus_gpadl_post_success_test \
             vmbus_gpadl_response_state_test \
             vmbus_gpadl_teardown_post_failure_test \
-            vmbus_buffer_order_zero_allocation_test; do
-            grep -Fq "[PASSED] $case_name" vmbus-artifacts/kunit.log
+            vmbus_buffer_order_zero_allocation_test \
+            hv_uio_ring_mmap_range_test \
+            hv_uio_ring_mmap_prepare_test \
+            hv_uio_mmap_region_select_test \
+            hv_uio_mmap_prepare_test; do
+            grep -Eq "^[[:space:]]*ok [0-9]+( -)? ${case_name}([[:space:]]|$)" \
+              vmbus-artifacts/kunit.log
           done
       - name: Upload evidence
         if: always()
