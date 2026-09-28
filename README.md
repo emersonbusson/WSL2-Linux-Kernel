@@ -2,11 +2,11 @@
 
 [![Kernel Version](https://img.shields.io/badge/Kernel-6.18.40.1--microsoft--standard--WSL2%2B-blue.svg)](https://kernel.org)
 [![WSL2 Target](https://img.shields.io/badge/WSL2-2.7.14%2B%20%7C%20Windows%2011-success.svg)](https://github.com/microsoft/WSL)
-[![Stability Qualification](https://img.shields.io/badge/Stability-PASS__ZERO__PANIC-brightgreen.svg)]()
+[![Stability Qualification](https://img.shields.io/badge/Stability-NOT__QUALIFIED-red.svg)]()
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](COPYING)
 [![Upstream Target](https://img.shields.io/badge/Upstream-LKML%20%26%20linux--hyperv-orange.svg)](https://lore.kernel.org)
 
-This repository is an advanced, production-qualified fork of Microsoft's official [WSL2-Linux-Kernel][wsl2-kernel] maintained by [Emerson Busson](https://github.com/emersonbusson). It addresses critical architectural failure modes in stock WSL2—including control-plane starvation, watchdog VM restarts, and high-order buddy allocator fragmentation—while providing native zero-copy hardware VRAM tiering and modern userspace storage primitives.
+This repository is a development fork of Microsoft's official [WSL2-Linux-Kernel][wsl2-kernel], maintained by [Emerson Busson](https://github.com/emersonbusson). The current VMBus v2 candidate is not production-qualified: live allocator-fragmentation, GPADL response/rescind, UIO mapping-lifetime, and confidential-computing memory-transition evidence remain open. Results from earlier kernel builds apply only to their recorded source and test surface.
 
 ---
 
@@ -24,8 +24,8 @@ This repository is an advanced, production-qualified fork of Microsoft's officia
 - **The Solution ([`drivers/hv/channel.c`](drivers/hv/channel.c), [`drivers/hv/hyperv_vmbus.h`](drivers/hv/hyperv_vmbus.h), [`drivers/hv/ring_buffer.c`](drivers/hv/ring_buffer.c), [`include/linux/hyperv.h`](include/linux/hyperv.h)):**
   - Implements the unified `vmbus_alloc_buffer()` / `vmbus_free_buffer()` architecture centered on `struct vmbus_buffer`.
   - Dynamically decomposes allocations under buddy fragmentation down to Order-0 physical pages.
-  - **Confidential Computing (CoCo VM) Decryption:** Decrypts each contiguous chunk individually while physically contiguous before joining them into a contiguous virtual address space via `vmap(..., pgprot_decrypted(PAGE_KERNEL))` (or `vm_map_pages()`), guaranteeing strict hardware memory isolation and flawless GPADL registration across all Hyper-V guest architectures.
-- **Qualification:** Channel establishment succeeds with zero delay under complete Order-7 physical block exhaustion; qualified under 10.24 GiB dirty page stress and 979 MiB StorVSC swap with `PASS_ZERO_PANIC`.
+  - **Confidential Computing (CoCo VM) Decryption:** The candidate decrypts each contiguous chunk before mapping it into the buffer. This is an implementation design, not proof of support for every CoCo architecture or hypervisor configuration. SEV-SNP, TDX, and Arm CCA memory transitions remain unqualified.
+- **Qualification:** The current v2 candidate has not been shown to exercise fallback under live allocator fragmentation. Earlier Build #5 stress results do not qualify the current series or establish cross-architecture behavior.
 
 ### 3. Modern Userspace Storage Primitives: `ublk` (`io_uring`) & ZRAM Writeback
 - **The Problem:** Standard WSL2 relies on legacy NBD (Network Block Device) loopback sockets for userspace storage and swap engines, suffering from socket latency jitter, close deadlocks during teardown, and catastrophic OOM kills when compressed RAM (`zram`) fills with incompressible pages.
@@ -42,9 +42,17 @@ This repository is an advanced, production-qualified fork of Microsoft's officia
 
 ---
 
-## 📊 Empirical Hardware Benchmark Matrix (Kernel 6.18.40.1 Build #5)
+## 📊 Historical Build #5 Hardware Results (Not the Current v2 Candidate)
 
-Empirically qualified under live host memory pressure on physical silicon (**NVIDIA GeForce RTX 2060 over PCIe Gen 3 x16, 16 GiB Host RAM, Samsung SSD 850 EVO, WSL2 2.7.14.0, Kernel Build #5**):
+The table below records an earlier Build #5 test surface. It does not qualify
+the current v2 source candidate, prove that its allocator fallback ran, or
+establish UIO mapping lifetime or CoCo compatibility. The current v2 gate
+remains open until those results are reproduced against an exact build and
+source revision.
+
+Earlier testing reported the following results on physical silicon (NVIDIA
+GeForce RTX 2060, 16 GiB host RAM, Samsung SSD 850 EVO, WSL2 2.7.14.0, Kernel
+Build #5). These are historical observations for that build and host:
 
 | Category / Metric | Optimization Target | Baseline (Stock WSL2 / NBD) | Custom Kernel 6.18.40.1 (`ramshared` + `ublk` + VMBus) | Improvement / Delta | Verdict |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -65,7 +73,7 @@ Empirically qualified under live host memory pressure on physical silicon (**NVI
 | **4. Integrity & Stability** | | | | | |
 | Post-Pressure Restored RAM | 🔺 Higher is better | Abrupt termination | **10.24 GB clean memory (0.92s)** | Clean release (0 leak) | 🟢 ZERO_LEAK |
 | Memory Payload Integrity | Exactness | Data loss / VM crash | **100% bit-exact SHA-256** | 0 bit flips | 🟢 BIT_EXACT |
-| Overall Stability Verdict | Verification | System Panics / Restarts | **`PASS_ZERO_PANIC`** | **100% Production Ready** | 🟢 PASS |
+| Overall Stability Verdict | Build #5 test result only | `PASS_ZERO_PANIC` on that recorded surface | Not established for current v2 | Historical only | ⚪ |
 
 ---
 
