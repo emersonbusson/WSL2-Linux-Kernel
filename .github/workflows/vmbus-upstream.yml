@@ -269,7 +269,6 @@ jobs:
           CONFIG_HYPERVISOR_GUEST=y
           CONFIG_HYPERV=y
           CONFIG_HYPERV_VMBUS=y
-          CONFIG_HYPERV_NET=y
           CONFIG_UIO=y
           CONFIG_UIO_HV_GENERIC=y
           EOF
