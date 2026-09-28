@@ -102,21 +102,27 @@ jobs:
             --arch=x86_64 --kunitconfig="$RUNNER_TEMP/wsl-kunitconfig" \
             2>&1 | tee vmbus-wsl-artifacts/kunit.log
           cp wsl-kunit-out/.config vmbus-wsl-artifacts/config-kunit-resolved
-          grep -Eq '^# hyperv-vmbus-gpadl-lifetime: pass:11 fail:0 skip:0 total:11$' \
+          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(11 subtests\)' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq '^# hyperv-uio-hv-generic-mmap: pass:3 fail:0 skip:0 total:3$' \
+          grep -Eq '\[PASSED\] hyperv-vmbus-gpadl-lifetime' \
+            vmbus-wsl-artifacts/kunit.log
+          grep -Eq 'hyperv-uio-hv-generic-mmap \(3 subtests\)' \
+            vmbus-wsl-artifacts/kunit.log
+          grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
+            vmbus-wsl-artifacts/kunit.log
+          grep -Eq 'Testing complete\. Ran 14 tests: passed: 14$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
             vmbus_vmalloc_mapping_ref_defers_free_test; do
-            grep -Eq "^[[:space:]]*ok [0-9]+( -)? ${case_name}([[:space:]]|$)" \
+            grep -Eq "\\[PASSED\\] ${case_name}([[:space:]]|$)" \
               vmbus-wsl-artifacts/kunit.log
           done
           for case_name in \
             hv_uio_mmap_validate_test \
             hv_uio_ring_mmap_page_range_test \
             hv_uio_mmap_page_protection_test; do
-            grep -Eq "^[[:space:]]*ok [0-9]+( -)? ${case_name}([[:space:]]|$)" \
+            grep -Eq "\\[PASSED\\] ${case_name}([[:space:]]|$)" \
               vmbus-wsl-artifacts/kunit.log
           done
       - name: Upload WSL build evidence
