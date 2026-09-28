@@ -1024,6 +1024,8 @@ static const struct bus_type  hv_bus = {
 
 struct onmessage_work_context {
 	struct work_struct work;
+	/* False for locally synthesized suspend rescinds. */
+	bool host_generated;
 	struct {
 		struct hv_message_header header;
 		u8 payload[];
@@ -1034,14 +1036,16 @@ static void vmbus_onmessage_work(struct work_struct *work)
 {
 	struct onmessage_work_context *ctx;
 
-	/* Do not process messages if we're in DISCONNECTED state */
-	if (vmbus_connection.conn_state == DISCONNECTED)
-		return;
+	ctx = container_of(work, struct onmessage_work_context, work);
 
-	ctx = container_of(work, struct onmessage_work_context,
-			   work);
+	/* Do not process messages if we're in DISCONNECTED state */
+	if (vmbus_connection.conn_state == DISCONNECTED) {
+		kfree(ctx);
+		return;
+	}
+
 	vmbus_onmessage((struct vmbus_channel_message_header *)
-			&ctx->msg.payload);
+			&ctx->msg.payload, ctx->host_generated);
 	kfree(ctx);
 }
 
@@ -1110,6 +1114,7 @@ void vmbus_on_msg_dpc(unsigned long data)
 			return;
 
 		INIT_WORK(&ctx->work, vmbus_onmessage_work);
+		ctx->host_generated = true;
 		ctx->msg.header = msg_copy.header;
 		memcpy(&ctx->msg.payload, msg_copy.u.payload, payload_size);
 
@@ -3020,6 +3025,7 @@ static void __exit vmbus_exit(void)
 					&hyperv_panic_vmbus_unload_block);
 
 	bus_unregister(&hv_bus);
+	vmbus_buffer_reclaimer_shutdown();
 
 	cpuhp_remove_state(hyperv_cpuhp_online);
 	hv_synic_free();

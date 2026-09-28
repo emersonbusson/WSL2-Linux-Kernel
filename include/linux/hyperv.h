@@ -781,23 +781,37 @@ struct vmbus_device {
 
 #define VMBUS_DEFAULT_MAX_PKT_SIZE 4096
 
+enum vmbus_gpadl_state {
+	VMBUS_GPADL_NONE,
+	VMBUS_GPADL_PENDING,
+	/* Create posts completed without a definitive response. */
+	VMBUS_GPADL_UNCERTAIN,
+	VMBUS_GPADL_LIVE,
+	VMBUS_GPADL_TEARING_DOWN,
+};
+
+struct vmbus_buffer_retained;
+
 /**
  * struct vmbus_buffer - virtually-contiguous VMBus buffer with optional GPADL
  * @addr: kernel virtual address, set by vmbus_alloc_buffer()
  * @chunks: physically-contiguous chunks (CoCo path), or NULL for vzalloc()
  * @pages: page array for ring wraparound, or NULL
  * @chunk_cnt: number of entries in @chunks
- * @gpadl_handle: GPADL bound to @addr, or 0 if none is established
+ * @gpadl_handle: GPADL handle, including a possibly partial create
+ * @gpadl_state: host ownership state; pending, live, or tearing-down cannot be freed
  * @size: buffer size in bytes (always a page multiple)
- * @leak: set when @addr must not be freed (GPADL or encryption state unknown)
+ * @leak: independent reason the buffer must not be freed
+ * @owner: reserved record used to preserve ownership if safe release is unknown
  *
  * Lifecycle:
  *   vmbus_alloc_buffer()  -> fills @addr/@chunks/@size (decrypts CoCo chunks)
  *   vmbus_establish_gpadl() / vmbus_teardown_gpadl() -> @gpadl_handle
- *   vmbus_free_buffer()   -> drops everything (unless @leak)
+ *   vmbus_free_buffer()   -> releases only after GPADL ownership is clear
  *
  * Only buffers from vmbus_alloc_buffer() may be passed to vmbus_free_buffer().
- * A @leak or live @gpadl_handle makes vmbus_free_buffer() keep @addr.
+ * A pending/live GPADL or @leak makes vmbus_free_buffer() keep @addr and its
+ * backing-page metadata in the VMBus retained-buffer list.
  */
 struct vmbus_buffer {
 	void *addr;
@@ -806,7 +820,9 @@ struct vmbus_buffer {
 	u32 chunk_cnt;
 	u32 gpadl_handle;
 	u32 size;
+	enum vmbus_gpadl_state gpadl_state;
 	bool leak;
+	struct vmbus_buffer_retained *owner;
 };
 
 struct vmbus_channel {
@@ -824,7 +840,8 @@ struct vmbus_channel {
 	u8 monitor_grp;
 	u8 monitor_bit;
 
-	bool rescind; /* got rescind msg */
+	bool rescind; /* rescind processing or local channel removal */
+	bool rescind_from_host; /* host-delivered rescind, not local suspend/unload */
 	bool rescind_ref; /* got rescind msg, got channel reference */
 	struct completion rescind_event;
 
@@ -1133,7 +1150,8 @@ static inline void set_channel_pending_send_size(struct vmbus_channel *c,
 	c->outbound.ring_buffer->pending_send_sz = size;
 }
 
-void vmbus_onmessage(struct vmbus_channel_message_header *hdr);
+void vmbus_onmessage(struct vmbus_channel_message_header *hdr,
+		     bool host_generated);
 
 int vmbus_request_offers(void);
 

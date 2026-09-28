@@ -353,6 +353,7 @@ void vmbus_channel_unmap_relid(struct vmbus_channel *channel);
 struct vmbus_channel *relid2channel(u32 relid);
 
 void vmbus_free_channels(void);
+void vmbus_buffer_reclaimer_shutdown(void);
 
 /* Connection interface */
 
