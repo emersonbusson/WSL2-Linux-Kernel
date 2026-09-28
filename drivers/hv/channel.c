@@ -1075,6 +1075,12 @@ static void vmbus_test_drop_retained(struct vmbus_buffer_retained *owner)
 		list_del_init(&owner->list);
 	mutex_unlock(&vmbus_retained_buffers_lock);
 
+	if (owner->addr) {
+		if (owner->chunks)
+			vunmap(owner->addr);
+		else
+			vfree(owner->addr);
+	}
 	kvfree(owner->chunks);
 	owner->chunks = NULL;
 	kfree(owner);
@@ -1426,7 +1432,7 @@ static void vmbus_buffer_cleanup_repeated_test(struct kunit *test)
 	__vmbus_free_buffer(&buffer, vmbus_test_reencrypt_fail);
 	KUNIT_EXPECT_EQ(test, vmbus_test_retained_count(), before + 1);
 	KUNIT_EXPECT_PTR_EQ(test, buffer.addr, NULL);
-	KUNIT_EXPECT_PTR_EQ(test, owner->addr, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, owner->addr, addr);
 	KUNIT_EXPECT_PTR_EQ(test, owner->chunks, chunks);
 	KUNIT_EXPECT_EQ(test, owner->chunk_cnt, 1U);
 	KUNIT_EXPECT_EQ(test, vmbus_test_reencrypt_calls, 0U);
