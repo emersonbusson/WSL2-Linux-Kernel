@@ -1472,6 +1472,11 @@ int create_existing_sysmem(struct dxgdevice *device,
 
 	DXG_TRACE("Alloc size: %lld", alloc_size);
 
+	if (alloc_size > U32_MAX) {
+		DXG_ERR("allocation size is too large: %lld", alloc_size);
+		return -EINVAL;
+	}
+
 	dxgalloc->cpu_address = (void *)sysmem;
 
 	dxgalloc->pages = vzalloc(npages * sizeof(void *));
@@ -1508,7 +1513,7 @@ int create_existing_sysmem(struct dxgdevice *device,
 			goto cleanup;
 		}
 		dxgalloc->gpadl.addr = kmem;
-		dxgalloc->gpadl.size = alloc_size;
+		dxgalloc->gpadl.size = (u32)alloc_size;
 		ret1 = vmbus_establish_gpadl(dxgglobal_get_vmbus(),
 					     &dxgalloc->gpadl);
 		if (ret1) {
