@@ -188,16 +188,18 @@ static int vmbus_gpadl_teardown_result(struct vmbus_channel *channel,
 	}
 
 	/*
-	 * A host rescind revokes the device's GPADLs under the upstream VMBus
-	 * lifecycle contract. VMBus-owned buffers remain retained because this
-	 * layer cannot prove that all userspace mappings have been closed.
-	 * Ownerless callers manage their own pages and must quiesce them before
-	 * relying on host rescind; DXG stops the allocation before teardown.
+	 * A host rescind revokes GPADLs that were already established. A create
+	 * request with an uncertain response may still have a partial GPADL at
+	 * the host, so retain that state. vmbus_free_buffer() separately retains
+	 * backing pages while user mappings still reference them. Ownerless callers
+	 * manage their own pages and must quiesce them before relying on host
+	 * rescind; DXG stops the allocation before teardown.
 	 */
 	if (event == VMBUS_GPADL_TEARDOWN_HOST_RESCIND) {
 		WARN_ON_ONCE(vmbus_channel_rescind_source(channel) !=
 			     VMBUS_RESCIND_HOST);
-		if (!buffer->owner) {
+		if (buffer->gpadl_state == VMBUS_GPADL_LIVE ||
+		    buffer->gpadl_state == VMBUS_GPADL_TEARING_DOWN) {
 			buffer->gpadl_handle = 0;
 			buffer->gpadl_state = VMBUS_GPADL_NONE;
 		}
@@ -1176,9 +1178,17 @@ static void vmbus_gpadl_rescind_remote_vs_unload_test(struct kunit *test)
 					  VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
 					  -ENODEV);
 	KUNIT_EXPECT_EQ(test, ret, 0);
-	KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 42U);
-	KUNIT_EXPECT_EQ(test, buffer.gpadl_state, VMBUS_GPADL_LIVE);
-	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
+	KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 0U);
+	KUNIT_EXPECT_EQ(test, buffer.gpadl_state, VMBUS_GPADL_NONE);
+	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
+
+	buffer.gpadl_handle = 43;
+	buffer.gpadl_state = VMBUS_GPADL_TEARING_DOWN;
+	ret = vmbus_gpadl_teardown_result(&channel, &buffer,
+					  VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
+					  -ENODEV);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
 
 	memset(&channel, 0, sizeof(channel));
 	buffer.gpadl_handle = 42;
