@@ -401,7 +401,12 @@ hv_uio_new_channel(struct vmbus_channel *new_sc)
 	}
 }
 
-/* free the reserved buffers for send and receive */
+/*
+ * Release the reserved buffers for send and receive.
+ * Teardown before free so a live or uncertain GPADL is still resolved
+ * from the recorded handle; vmbus_free_buffer() retains pages it cannot
+ * prove are released. Probe error paths must not free buffers earlier.
+ */
 static void
 hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
 {
@@ -516,10 +521,8 @@ hv_uio_probe(struct hv_device *dev,
 			goto fail_free_ring;
 
 		ret = vmbus_establish_gpadl(channel, &pdata->recv_buf);
-		if (ret) {
-			vmbus_free_buffer(&pdata->recv_buf);
+		if (ret)
 			goto fail_close;
-		}
 
 		/* put Global Physical Address Label in name */
 		snprintf(pdata->recv_name, sizeof(pdata->recv_name),
@@ -537,10 +540,8 @@ hv_uio_probe(struct hv_device *dev,
 			goto fail_close;
 
 		ret = vmbus_establish_gpadl(channel, &pdata->send_buf);
-		if (ret) {
-			vmbus_free_buffer(&pdata->send_buf);
+		if (ret)
 			goto fail_close;
-		}
 
 		snprintf(pdata->send_name, sizeof(pdata->send_name),
 			 "send:%u", pdata->send_buf.gpadl_handle);
