@@ -1739,27 +1739,27 @@ index 0d7a9802e..740d47d8c 100644
 +
 +	ret = hv_uio_mmap_get_region(&pdata, TXRX_RING_MAP, &region);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
-+	KUNIT_EXPECT_PTR_EQ(test, region.pages, ring_pages);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &ring_pages[0]);
 +	KUNIT_EXPECT_TRUE(test, region.decrypted);
 +
 +	ret = hv_uio_mmap_get_region(&pdata, INT_PAGE_MAP, &region);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
-+	KUNIT_EXPECT_PTR_EQ(test, region.pages, pdata.int_pages);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &pdata.int_pages[0]);
 +	KUNIT_EXPECT_FALSE(test, region.decrypted);
 +
 +	ret = hv_uio_mmap_get_region(&pdata, MON_PAGE_MAP, &region);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
-+	KUNIT_EXPECT_PTR_EQ(test, region.pages, pdata.monitor_pages);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &pdata.monitor_pages[0]);
 +	KUNIT_EXPECT_TRUE(test, region.decrypted);
 +
 +	ret = hv_uio_mmap_get_region(&pdata, RECV_BUF_MAP, &region);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
-+	KUNIT_EXPECT_PTR_EQ(test, region.pages, recv_pages);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &recv_pages[0]);
 +	KUNIT_EXPECT_TRUE(test, region.decrypted);
 +
 +	ret = hv_uio_mmap_get_region(&pdata, SEND_BUF_MAP, &region);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
-+	KUNIT_EXPECT_PTR_EQ(test, region.pages, send_pages);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &send_pages[0]);
 +	KUNIT_EXPECT_FALSE(test, region.decrypted);
 +
 +	KUNIT_EXPECT_EQ(test,
@@ -1801,7 +1801,7 @@ index 0d7a9802e..740d47d8c 100644
 +	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_EQ(test, desc.action.type, MMAP_MAP_KERNEL_PAGES);
-+	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages, pages);
++	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages, &pages[0]);
 +	KUNIT_EXPECT_EQ(test, desc.action.map_kernel.nr_pages, 2UL);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
@@ -1820,7 +1820,7 @@ index 0d7a9802e..740d47d8c 100644
 +	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
-+			    pdata.int_pages);
++			    &pdata.int_pages[0]);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(PAGE_SHARED));
 +
@@ -1831,7 +1831,7 @@ index 0d7a9802e..740d47d8c 100644
 +	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
-+			    pdata.monitor_pages);
++			    &pdata.monitor_pages[0]);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
 +
