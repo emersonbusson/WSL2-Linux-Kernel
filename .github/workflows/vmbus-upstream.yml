@@ -276,9 +276,13 @@ jobs:
             --build_dir="$GITHUB_WORKSPACE/kunit-out" \
             --arch=x86_64 --kunitconfig=drivers/hv/.kunitconfig) \
             2>&1 | tee -a vmbus-artifacts/kunit.log
-          grep -Eq '^# hyperv-vmbus-buffer: pass:16 fail:0 skip:0 total:16$' \
+          grep -Eq 'hyperv-vmbus-buffer \(16 subtests\)' \
             vmbus-artifacts/kunit.log
-          grep -Eq '^# hyperv-uio-mmap: pass:4 fail:0 skip:0 total:4$' \
+          grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
+            vmbus-artifacts/kunit.log
+          grep -Eq 'hyperv-uio-mmap \(4 subtests\)' \
+            vmbus-artifacts/kunit.log
+          grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_size_rounding_test \
@@ -301,7 +305,7 @@ jobs:
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \
             hv_uio_mmap_prepare_test; do
-            grep -Eq "^[[:space:]]*ok [0-9]+( -)? ${case_name}([[:space:]]|$)" \
+            grep -Eq "\\[PASSED\\] ${case_name}([[:space:]]|$)" \
               vmbus-artifacts/kunit.log
           done
       - name: Upload evidence

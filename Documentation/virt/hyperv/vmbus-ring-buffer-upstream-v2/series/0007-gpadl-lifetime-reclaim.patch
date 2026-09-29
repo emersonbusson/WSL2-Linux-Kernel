@@ -1530,7 +1530,7 @@ index 0d7a9802e..740d47d8c 100644
  
  	struct vmbus_buffer recv_buffer;
  	char	recv_name[32];	/* "recv_4294967295" */
-@@ -148,22 +152,348 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
+@@ -148,22 +152,350 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
  	vmbus_device_unregister(channel->device_obj);
  }
  
@@ -1665,8 +1665,8 @@ index 0d7a9802e..740d47d8c 100644
 +			.page_cnt = 8,
 +		},
 +	};
-+	struct page *pages[8];
-+	struct page *chunks[1];
++	struct page *pages[8] = {};
++	struct page *chunks[1] = {};
 +	struct vm_area_desc desc = {
 +		.start = PAGE_SIZE,
 +		.end = 5 * PAGE_SIZE,
@@ -1711,10 +1711,10 @@ index 0d7a9802e..740d47d8c 100644
 +		.channel = &channel,
 +	};
 +	struct hv_uio_mmap_region region;
-+	struct page *ring_pages[4];
-+	struct page *recv_pages[3];
-+	struct page *send_pages[2];
-+	struct page *chunks[1];
++	struct page *ring_pages[4] = {};
++	struct page *recv_pages[3] = {};
++	struct page *send_pages[2] = {};
++	struct page *chunks[1] = {};
 +	int ret;
 +
 +	pdata.device = &dev;
@@ -1773,15 +1773,15 @@ index 0d7a9802e..740d47d8c 100644
 +
 +static void hv_uio_mmap_prepare_test(struct kunit *test)
 +{
-+	struct hv_uio_private_data pdata = {};
++	struct hv_uio_private_data *pdata;
 +	struct vmbus_channel channel = {
 +		.state = CHANNEL_OPENED_STATE,
 +	};
 +	struct hv_device dev = {
 +		.channel = &channel,
 +	};
-+	struct page *pages[4];
-+	struct page *chunks[1];
++	struct page *pages[4] = {};
++	struct page *chunks[1] = {};
 +	struct vm_area_desc desc = {
 +		.start = PAGE_SIZE,
 +		.end = 3 * PAGE_SIZE,
@@ -1790,15 +1790,17 @@ index 0d7a9802e..740d47d8c 100644
 +	};
 +	int ret;
 +
++	pdata = kunit_kzalloc(test, sizeof(*pdata), GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, pdata);
 +	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
-+	pdata.device = &dev;
-+	pdata.info.priv = &pdata;
-+	pdata.info.mem[RECV_BUF_MAP].size = ARRAY_SIZE(pages) * PAGE_SIZE;
-+	pdata.recv_buffer.pages = pages;
-+	pdata.recv_buffer.page_cnt = ARRAY_SIZE(pages);
-+	pdata.recv_buffer.chunks = chunks;
++	pdata->device = &dev;
++	pdata->info.priv = pdata;
++	pdata->info.mem[RECV_BUF_MAP].size = ARRAY_SIZE(pages) * PAGE_SIZE;
++	pdata->recv_buffer.pages = pages;
++	pdata->recv_buffer.page_cnt = ARRAY_SIZE(pages);
++	pdata->recv_buffer.chunks = chunks;
 +
-+	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_EQ(test, desc.action.type, MMAP_MAP_KERNEL_PAGES);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages, &pages[0]);
@@ -1809,39 +1811,39 @@ index 0d7a9802e..740d47d8c 100644
 +	KUNIT_EXPECT_TRUE(test, vma_desc_test(&desc, VMA_DONTDUMP_BIT));
 +
 +	desc.vma_flags = EMPTY_VMA_FLAGS;
-+	KUNIT_EXPECT_EQ(test, hv_uio_mmap_prepare(&pdata.info, &desc), -EINVAL);
++	KUNIT_EXPECT_EQ(test, hv_uio_mmap_prepare(&pdata->info, &desc), -EINVAL);
 +
 +	desc.pgoff = INT_PAGE_MAP;
-+	pdata.info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
-+	pdata.int_pages[0] = pages[0];
++	pdata->info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
++	pdata->int_pages[0] = pages[0];
 +	desc.end = 2 * PAGE_SIZE;
 +	desc.page_prot = PAGE_SHARED;
 +	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
-+	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
-+			    &pdata.int_pages[0]);
++			    &pdata->int_pages[0]);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(PAGE_SHARED));
 +
 +	desc.pgoff = MON_PAGE_MAP;
-+	pdata.info.mem[MON_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
-+	pdata.monitor_pages[0] = pages[1];
++	pdata->info.mem[MON_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
++	pdata->monitor_pages[0] = pages[1];
 +	desc.page_prot = PAGE_SHARED;
-+	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
-+			    &pdata.monitor_pages[0]);
++			    &pdata->monitor_pages[0]);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
 +
 +	desc.pgoff = SEND_BUF_MAP;
-+	pdata.info.mem[SEND_BUF_MAP].size = PAGE_SIZE;
-+	pdata.send_buffer.pages = pages;
-+	pdata.send_buffer.page_cnt = ARRAY_SIZE(pages);
++	pdata->info.mem[SEND_BUF_MAP].size = PAGE_SIZE;
++	pdata->send_buffer.pages = pages;
++	pdata->send_buffer.page_cnt = ARRAY_SIZE(pages);
 +	desc.page_prot = PAGE_SHARED;
 +	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
-+	ret = hv_uio_mmap_prepare(&pdata.info, &desc);
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(PAGE_SHARED));
@@ -1887,7 +1889,7 @@ index 0d7a9802e..740d47d8c 100644
  }
  
  /* Callback from VMBUS subsystem when new channel created. */
-@@ -196,11 +526,11 @@ static void
+@@ -196,11 +528,11 @@ static void
  hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
  {
  	if (pdata->send_buffer.gpadl.gpadl_handle)
@@ -1901,7 +1903,7 @@ index 0d7a9802e..740d47d8c 100644
  	vmbus_release_buffer(&pdata->recv_buffer);
  }
  
-@@ -272,6 +602,7 @@ hv_uio_probe(struct hv_device *dev,
+@@ -272,6 +604,7 @@ hv_uio_probe(struct hv_device *dev,
  	pdata->info.name = "uio_hv_generic";
  	pdata->info.version = DRIVER_VERSION;
  	pdata->info.irqcontrol = hv_uio_irqcontrol;
@@ -1909,7 +1911,7 @@ index 0d7a9802e..740d47d8c 100644
  	pdata->info.open = hv_uio_open;
  	pdata->info.release = hv_uio_release;
  	pdata->info.irq = UIO_IRQ_CUSTOM;
-@@ -290,28 +621,25 @@ hv_uio_probe(struct hv_device *dev,
+@@ -290,28 +623,25 @@ hv_uio_probe(struct hv_device *dev,
  		= (uintptr_t)vmbus_connection.int_page;
  	pdata->info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
  	pdata->info.mem[INT_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
@@ -1945,7 +1947,7 @@ index 0d7a9802e..740d47d8c 100644
  		if (ret)
  			goto fail_close;
  
-@@ -324,20 +652,14 @@ hv_uio_probe(struct hv_device *dev,
+@@ -324,20 +654,14 @@ hv_uio_probe(struct hv_device *dev,
  		pdata->info.mem[RECV_BUF_MAP].size = RECV_BUFFER_SIZE;
  		pdata->info.mem[RECV_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
  
