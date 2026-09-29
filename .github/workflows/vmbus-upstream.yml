@@ -11,7 +11,9 @@ on:
       - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/**
       - drivers/hv/channel.c
       - drivers/hv/channel_mgmt.c
+      - drivers/hv/dxgkrnl/**
       - drivers/hv/hyperv_vmbus.h
+      - drivers/hv/ring_buffer.c
       - drivers/hv/vmbus_drv.c
       - drivers/net/hyperv/netvsc.c
       - drivers/uio/uio_hv_generic.c
