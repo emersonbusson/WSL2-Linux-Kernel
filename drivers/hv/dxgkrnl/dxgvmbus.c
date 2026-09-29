@@ -1571,8 +1571,11 @@ int create_existing_sysmem(struct dxgdevice *device,
 	}
 
 cleanup:
-	if (kmem)
+	if (kmem) {
+		/* Local vmap for GPADL PFNs only; destroy must not unmap it */
 		vunmap(kmem);
+		dxgalloc->gpadl.addr = NULL;
+	}
 	free_message(&msg);
 	if (ret)
 		DXG_TRACE("err: %d", ret);
