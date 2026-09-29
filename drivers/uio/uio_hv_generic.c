@@ -62,7 +62,7 @@ struct hv_uio_private_data {
 	atomic_t refcnt;
 
 	struct vmbus_buffer recv_buf;
-	char	recv_name[32];	/* "recv_4294967295" */
+	char	recv_name[32];	/* "recv:%u" */
 
 	struct vmbus_buffer send_buf;
 	char	send_name[32];

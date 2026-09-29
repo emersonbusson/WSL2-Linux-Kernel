@@ -303,7 +303,8 @@ static void netvsc_teardown_recv_gpadl(struct hv_device *device,
 	/*
 	 * Must run in process context: vmbus_free_buffer() can sleep while
 	 * re-encrypting CoCo chunks. free_netvsc_device() may run in RCU.
-	 * A failed teardown sets buffer->leak and this becomes a no-op.
+	 * A failed teardown leaves the GPADL state set, so
+	 * vmbus_free_buffer() retains the pages instead of freeing them.
 	 */
 	vmbus_free_buffer(&net_device->recv_buf);
 }
