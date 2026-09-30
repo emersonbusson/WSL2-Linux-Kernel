@@ -1,0 +1,187 @@
+name: Hyper-V runtime drill
+
+# Boots the exact six-patch candidate as a disposable Gen2 Hyper-V guest and
+# runs the GPADL/UIO lifecycle and order-zero fallback drills against those
+# bytes.
+#
+# This is the runtime evidence the KUnit gates cannot produce. KUnit proves the
+# logic; only a real Hyper-V guest proves the ring lifecycle under a real
+# host rescind and a real fragmented buddy. EVD-0131 and EVD-0132 measured that
+# a hosted runner can boot both a WSL2 guest and an arbitrary Gen2 Hyper-V VM,
+# so this is no longer a hardware gap: it is ordinary build work.
+#
+# EVIDENCE SCOPE: every result is ordinary x86_64 Hyper-V evidence for the
+# exact mainline bytes. No hosted runner is a confidential guest, so COCO-1..5
+# remain open regardless of what this job reports. This job must never be cited
+# as a CoCo gate.
+#
+# HOST SAFETY: the drills rebind the synthetic NIC and apply memory pressure.
+# They run only inside the disposable guest this job creates, never on a daily
+# WSL2 host. new-drill-vm.ps1 refuses to run outside CI or an explicitly
+# acknowledged lab machine, and the drills themselves refuse on a WSL2 kernel.
+#
+# FAIL SEMANTICS: unlike the capability probes, a drill that reports FAIL is a
+# real candidate failure and reddens the job. A harness failure (cannot define
+# the VM, cannot boot, no console) also reddens: we failed to measure. An
+# INCONCLUSIVE drill (order-7 never failed) is green but recorded as PARTIAL.
+
+on:
+  # workflow_dispatch only resolves when this file is on the repository
+  # default branch. That branch is microsoft's WSL line and must not carry
+  # our CI, so the push trigger below is what actually runs this job.
+  workflow_dispatch:
+  push:
+    branches:
+      - vmbus-ring-buffer-upstream-v2
+    paths:
+      - .github/workflows/hyperv-runtime-drill.yml
+      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series/**
+      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/**
+  schedule:
+    - cron: '29 4 1 * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperv-runtime-drill
+  cancel-in-progress: true
+
+jobs:
+  drill-kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          mkdir -p drill-artifacts
+          touch drill-artifacts/job-started.txt
+          git rev-parse HEAD > drill-artifacts/source-sha.txt
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev \
+            busybox-static cpio gzip python3
+          command -v /bin/busybox
+          /bin/busybox | head -1 || true
+
+      - name: Fetch fixed mainline base
+        env:
+          BASE: 93f51579e7df248780214094418f205253383cc5
+        run: |
+          set -euo pipefail
+          git init linux
+          git -C linux remote add origin https://github.com/torvalds/linux.git
+          git -C linux fetch --depth=1 origin "$BASE"
+          git -C linux checkout --detach FETCH_HEAD
+          test "$(git -C linux rev-parse HEAD)" = "$BASE"
+          printf '%s\n' "$BASE" > drill-artifacts/base-sha.txt
+          make -C linux -s ARCH=x86_64 kernelversion \
+            | tee drill-artifacts/kernel-version.txt
+
+      - name: Pin and apply the exact series bytes
+        run: |
+          set -euo pipefail
+          PATCH_DIR=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series
+          # A drill result on different bytes is not evidence about the
+          # sendable series. Bind the run to the pinned SHA256SUMS first.
+          (cd "$PATCH_DIR" && sha256sum -c SHA256SUMS) \
+            | tee drill-artifacts/series-byte-pin.log
+          sha256sum "$PATCH_DIR"/*.patch > drill-artifacts/series-sha256.txt
+          printf '%s\n' "$GITHUB_SHA" > drill-artifacts/series-commit-sha.txt
+          for patch in "$PATCH_DIR"/*.patch; do
+            git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
+            git -C linux apply "$GITHUB_WORKSPACE/$patch"
+          done
+          git -C linux diff --check
+          test "$(git -C linux status --porcelain | wc -l)" -eq 6
+
+      - name: Build the self-booting drill kernel
+        run: |
+          set -euo pipefail
+          DRILL=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill
+          bash "$DRILL/build-drill-kernel.sh" \
+            "$GITHUB_WORKSPACE/linux" \
+            "$GITHUB_WORKSPACE/drill-out" \
+            2>&1 | tee drill-artifacts/build-drill-kernel.log
+          test -f drill-out/BOOTX64.EFI
+          # Stage the whole evidence set flat in one directory. upload-artifact
+          # preserves the path layout it is given, so mixing directories would
+          # make the Windows job search for the image under nested paths.
+          cp drill-out/BOOTX64.EFI drill-artifacts/
+          cp drill-out/bzImage.sha256 drill-artifacts/
+          cp drill-out/image-audit.txt drill-artifacts/
+          cp drill-out/config-drill-resolved drill-artifacts/
+          cp drill-out/helper-file.txt drill-artifacts/
+          # The guest has no CPython. If a drill script still calls python3
+          # the whole job would fail only at boot time, minutes later.
+          if grep -R "python3" "$DRILL"/*.sh; then
+            echo "ERROR: a drill script still calls python3" >&2
+            exit 1
+          fi
+          ls -la drill-artifacts/
+
+      - name: Upload drill kernel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hyperv-drill-kernel
+          path: drill-artifacts/
+          retention-days: 90
+
+  drill-runtime:
+    needs: drill-kernel
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download drill kernel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hyperv-drill-kernel
+          path: drill-kernel
+
+      - name: Boot the candidate and run the runtime drills
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $DRILL = 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill'
+          $image = Join-Path 'drill-kernel' 'BOOTX64.EFI'
+          if (-not (Test-Path $image)) {
+            Write-Host "ERROR: drill kernel artifact missing at $image"
+            Get-ChildItem -Recurse drill-kernel | Select-Object FullName, Length | Format-Table | Out-String | Write-Host
+            exit 1
+          }
+          Write-Host "DRILL-RUNTIME image=$( (Get-Item $image).Length ) bytes"
+
+          & (Join-Path $DRILL 'new-drill-vm.ps1') `
+            -BzImage $image `
+            -WorkDir (Join-Path $PWD 'drill-vm-work') `
+            -VmName "vmbus-drill-$env:RUNNER_OS" `
+            -TimeoutSec 420 `
+            -MemoryMB 2048 `
+            -CpuCount 2
+          $code = $LASTEXITCODE
+          Write-Host "DRILL-RUNTIME harness_exit=$code"
+
+          # Surface the guest console in the job log even on failure: the
+          # verdict is only evidence if the reader can see the numbers.
+          $log = Join-Path 'drill-vm-work' 'drill-console.log'
+          if (Test-Path $log) {
+            Write-Host '======== GUEST CONSOLE (artifact copy) ========'
+            Get-Content $log | Write-Host
+          }
+          exit $code
+
+      - name: Upload drill evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hyperv-drill-${{ matrix.runner }}
+          path: drill-vm-work/
+          retention-days: 90
