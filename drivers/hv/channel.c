@@ -520,10 +520,19 @@ void vmbus_free_ring(struct vmbus_channel *channel)
 {
 	struct vmbus_buffer *buffer = &channel->ringbuffer;
 
+	/*
+	 * Hide the ring sysfs attribute first so kernfs drains any in-flight
+	 * mmap of the ring pages. Subchannel teardown frees rings without a
+	 * matching hv_remove_ring_sysfs() call, so the drain must live on
+	 * every free path rather than only in the primary UIO remove.
+	 */
+	hv_remove_ring_sysfs(channel);
+
 	hv_ringbuffer_cleanup(&channel->outbound);
 	hv_ringbuffer_cleanup(&channel->inbound);
 
 	vmbus_free_buffer(buffer);
+	channel->ringbuffer_pagecount = 0;
 }
 EXPORT_SYMBOL_GPL(vmbus_free_ring);
 
