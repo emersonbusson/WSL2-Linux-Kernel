@@ -90,7 +90,8 @@ jobs:
             vmbus-wsl-artifacts/config-kunit-requested
           for case_name in \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
-            vmbus_vmalloc_mapping_ref_defers_free_test; do
+            vmbus_vmalloc_mapping_ref_defers_free_test \
+            vmbus_reclaim_busy_ref_defers_free_test; do
             grep -q "KUNIT_CASE($case_name)" drivers/hv/channel.c
           done
           for case_name in \
@@ -104,7 +105,7 @@ jobs:
             --arch=x86_64 --kunitconfig="$RUNNER_TEMP/wsl-kunitconfig" \
             2>&1 | tee vmbus-wsl-artifacts/kunit.log
           cp wsl-kunit-out/.config vmbus-wsl-artifacts/config-kunit-resolved
-          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(11 subtests\)' \
+          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(12 subtests\)' \
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-gpadl-lifetime' \
             vmbus-wsl-artifacts/kunit.log
@@ -112,11 +113,12 @@ jobs:
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 14 tests: passed: 14$' \
+          grep -Eq 'Testing complete\. Ran 15 tests: passed: 15$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
-            vmbus_vmalloc_mapping_ref_defers_free_test; do
+            vmbus_vmalloc_mapping_ref_defers_free_test \
+            vmbus_reclaim_busy_ref_defers_free_test; do
             grep -Eq "\\[PASSED\\] ${case_name}([[:space:]]|$)" \
               vmbus-wsl-artifacts/kunit.log
           done
