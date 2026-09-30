@@ -1,0 +1,305 @@
+name: Hyper-V role feasibility probe
+
+# Companion to wsl-runtime-probe.yml.
+#
+# That probe proved a hosted Windows runner can boot a real Hyper-V guest via
+# WSL2 and expose VMBus. That is enough for WSL-backport runtime evidence. It
+# is NOT enough for the six-patch mainline series: those patches apply to a
+# mainline base, and the runtime drills must run on that exact mainline kernel
+# inside a Hyper-V guest.
+#
+# This probe answers the remaining question: can a hosted runner define an
+# arbitrary Gen2 Hyper-V VM and boot a kernel of our choosing? If yes, the
+# mainline candidate can be runtime-drilled in Actions. If no, mainline runtime
+# drills stay on real Hyper-V hardware or an Azure Confidential VM.
+#
+# PROBE SEMANTICS: a probe whose answer is "no" is a SUCCESSFUL probe. Every
+# step exits 0 once its measurement is recorded. The finding lives in
+# VERDICT= and the uploaded artifact. A red job means the probe broke.
+#
+# Read-only guarantees: no kernel is installed anywhere, no swap is touched,
+# no memory pressure is applied, and no RamShared lifecycle state is changed.
+# The only mutation is enabling Windows optional features and, if that
+# succeeds, creating a probe VM that is deleted before the job ends.
+
+on:
+  # workflow_dispatch only resolves when this file is on the repository
+  # default branch. That branch is microsoft's WSL line and must not carry
+  # our CI, so the push trigger below is what actually runs this probe.
+  workflow_dispatch:
+  push:
+    branches:
+      - vmbus-ring-buffer-upstream-v2
+    paths:
+      - .github/workflows/hyper-v-role-probe.yml
+  schedule:
+    - cron: '23 4 1 * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyper-v-role-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enumerate Hyper-V related optional features
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path probe-out | Out-Null
+          $report = 'probe-out/capability.txt'
+          function Note($k, $v) {
+            "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
+            Write-Host "PROBE $k=$v"
+          }
+
+          Note runner_label '${{ matrix.runner }}'
+          $cs = Get-CimInstance Win32_ComputerSystem
+          Note hypervisor_present $cs.HypervisorPresent
+          Note total_physical_memory_gb ([math]::Round($cs.TotalPhysicalMemory/1GB,1))
+
+          # The hypervisor WSL2 uses is the Hyper-V hypervisor. What may be
+          # missing is the management stack that lets us define arbitrary VMs.
+          Note hypervisor_type (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
+          try {
+            $p = Get-CimInstance Win32_Processor
+            Note virtualization_firmware_enabled $p.VirtualizationFirmwareEnabled
+            Note second_level_address_translation_reported $p.SecondLevelAddressTranslationExtensions
+          } catch {}
+
+          $candidates = @(
+            'Microsoft-Hyper-V-All',
+            'Microsoft-Hyper-V',
+            'Microsoft-Hyper-V-Hypervisor',
+            'Microsoft-Hyper-V-Services',
+            'Microsoft-Hyper-V-Management-PowerShell',
+            'Microsoft-Hyper-V-Management-Clients',
+            'Microsoft-Hyper-V-Tools-All',
+            'HypervisorPlatform',
+            'VirtualMachinePlatform',
+            'Microsoft-Windows-Subsystem-Linux',
+            'Containers'
+          )
+          foreach ($f in $candidates) {
+            $feat = Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction SilentlyContinue
+            if ($feat) {
+              Note ("feature_" + $f) $feat.State
+            } else {
+              Note ("feature_" + $f) 'not_in_this_sku'
+            }
+          }
+
+          # Also catch anything we did not name explicitly.
+          try {
+            $all = Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue |
+              Where-Object { $_.FeatureName -match 'Hyper-V|Hypervisor|VirtualMachine' } |
+              ForEach-Object { "{0}={1}" -f $_.FeatureName, $_.State }
+            Note matching_features (($all | Sort-Object) -join '; ')
+          } catch {
+            Note matching_features ('failed: ' + $_.Exception.Message)
+          }
+
+          Note probe_complete true
+          exit 0
+
+      - name: Attempt Hyper-V management stack enable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $report = 'probe-out/capability.txt'
+          function Note($k, $v) {
+            "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
+            Write-Host "PROBE $k=$v"
+          }
+
+          $restartRequired = $false
+          foreach ($f in 'Microsoft-Hyper-V-All','Microsoft-Hyper-V','HypervisorPlatform','Microsoft-Hyper-V-Management-PowerShell') {
+            try {
+              $r = Enable-WindowsOptionalFeature -Online -FeatureName $f -All -NoRestart -ErrorAction Stop
+              Note ("enable_" + $f) ("ok restart_required=" + $r.RestartNeeded)
+              if ($r.RestartNeeded) { $restartRequired = $true }
+            } catch {
+              Note ("enable_" + $f) ("failed: " + $_.Exception.Message)
+            }
+          }
+          Note any_restart_required $restartRequired
+
+          # A hosted runner cannot reboot and continue the job. If the
+          # management stack needs a restart it is not usable here, and that
+          # is itself the answer.
+          Note probe_step2_complete true
+          exit 0
+
+      - name: Attempt to define and boot a probe VM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $report = 'probe-out/capability.txt'
+          function Note($k, $v) {
+            "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
+            Write-Host "PROBE $k=$v"
+          }
+
+          $vmName = 'vmbus-hyperv-probe'
+          $attempted = $false
+          $booted = $false
+
+          # 1. Are the Hyper-V cmdlets present at all?
+          $cmd = Get-Command New-VM -ErrorAction SilentlyContinue
+          if ($cmd) {
+            Note new_vm_cmdlet present
+          } else {
+            Note new_vm_cmdlet unavailable
+            try { Import-Module Hyper-V -ErrorAction Stop; Note hyperv_module imported }
+            catch { Note hyperv_module ('failed: ' + $_.Exception.Message) }
+            $cmd = Get-Command New-VM -ErrorAction SilentlyContinue
+            if ($cmd) { Note new_vm_cmdlet after_import } else { Note new_vm_cmdlet still_unavailable }
+          }
+
+          if (-not (Get-Command New-VM -ErrorAction SilentlyContinue)) {
+            Note probe_vm 'NO_CMDLET'
+            Note probe_boot_attempted false
+            exit 0
+          }
+
+          # 2. Define a Gen2 VM. No disk, no media: we only need to know
+          #    whether the definition is accepted and whether the VM can reach
+          #    a powered-on state. This is a capability probe, not a boot test
+          #    of our candidate kernel.
+          $attempted = $true
+          try {
+            $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes 1GB -ErrorAction Stop
+            Note probe_vm_create ok
+            try {
+              Set-VM -Name $vmName -AutomaticCheckpointsEnabled $false -ErrorAction SilentlyContinue
+              Set-VMFirmware -VMName $vmName -EnableSecureBoot Off -ErrorAction SilentlyContinue
+              Note probe_vm_firmware configured
+            } catch {
+              Note probe_vm_firmware ('failed: ' + $_.Exception.Message)
+            }
+
+            try {
+              Start-VM -Name $vmName -ErrorAction Stop
+              Start-Sleep -Seconds 3
+              $state = (Get-VM -Name $vmName).State
+              Note probe_vm_state $state
+              $booted = ($state -eq 'Running')
+              if ($booted) { Note probe_vm_boot reached_running }
+              else { Note probe_vm_boot ("not_running state=" + $state) }
+            } catch {
+              Note probe_vm_boot ('failed: ' + $_.Exception.Message)
+            }
+          } catch {
+            Note probe_vm_create ('failed: ' + $_.Exception.Message)
+          }
+
+          # 3. Tear down so the runner is left as found.
+          try {
+            if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) {
+              Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
+              Remove-VM -Name $vmName -Force -ErrorAction SilentlyContinue
+              Note probe_vm_remove ok
+            } else {
+              Note probe_vm_remove nothing_to_remove
+            }
+          } catch {
+            Note probe_vm_remove ('failed: ' + $_.Exception.Message)
+          }
+
+          Note probe_boot_attempted $attempted
+          Note probe_vm_running_observed $booted
+          exit 0
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          $report = 'probe-out/capability.txt'
+          $text = ''
+          if (Test-Path $report) { $text = Get-Content $report -Raw }
+          $clean = ($text -replace "`0", '')
+
+          $cmdlet   = ($clean -match 'new_vm_cmdlet=(present|after_import)')
+          $createOk = ($clean -match 'probe_vm_create=ok')
+          $running  = ($clean -match 'probe_vm_running_observed=True')
+          $restart  = ($clean -match 'any_restart_required=True')
+          $hyperv   = ($clean -match 'hypervisor_present=True')
+
+          # Verdict is decided by a VM we defined reaching Running, never by a
+          # feature merely being listed as present.
+          $verdict = 'HYPERV_MANAGEMENT_UNAVAILABLE'
+          if ($createOk -and $running) {
+            $verdict = 'HYPERV_MANAGEMENT_AVAILABLE'
+          } elseif ($cmdlet -and -not $createOk) {
+            $verdict = 'HYPERV_CMDLET_PRESENT_CREATE_FAILED'
+          } elseif ($restart) {
+            $verdict = 'HYPERV_ROLE_NEEDS_RESTART'
+          } elseif ($hyperv) {
+            $verdict = 'HYPERV_HYPERVISOR_ONLY'
+          }
+
+          $lines = @()
+          $lines += '======== FEASIBILITY VERDICT ========'
+          $lines += "VERDICT=$verdict"
+          switch ($verdict) {
+            'HYPERV_MANAGEMENT_AVAILABLE' {
+              $lines += 'This hosted runner can define an arbitrary Gen2 Hyper-V VM and reach'
+              $lines += 'Running. The mainline six-patch candidate can be booted here as a'
+              $lines += 'Hyper-V guest, and the GPADL/UIO lifecycle and order-zero fallback'
+              $lines += 'drills can run against those exact mainline bytes. Every result must'
+              $lines += 'still be labelled ordinary x86_64 Hyper-V evidence only: no hosted'
+              $lines += 'runner is a confidential guest, so COCO-1..5 remain open.'
+            }
+            'HYPERV_CMDLET_PRESENT_CREATE_FAILED' {
+              $lines += 'The Hyper-V cmdlets are present but defining a probe VM failed. Mainline'
+              $lines += 'runtime drills cannot go into Actions as-is; inspect the reported error'
+              $lines += 'before concluding the role is unusable.'
+            }
+            'HYPERV_ROLE_NEEDS_RESTART' {
+              $lines += 'Enabling the Hyper-V management stack wants a reboot, and a hosted'
+              $lines += 'runner cannot reboot and continue the job. Mainline runtime drills must'
+              $lines += 'run on real Hyper-V hardware or an Azure Confidential VM.'
+            }
+            'HYPERV_HYPERVISOR_ONLY' {
+              $lines += 'The Hyper-V hypervisor is present (WSL2 runs on it) but the management'
+              $lines += 'stack that defines arbitrary VMs is not available. WSL2-backed runtime'
+              $lines += 'evidence is still reachable; mainline evidence is not.'
+            }
+            default {
+              $lines += 'No Hyper-V management capability was observed. Mainline runtime drills'
+              $lines += 'require real Hyper-V hardware or an Azure Confidential VM.'
+            }
+          }
+          $lines += 'This run is a capability probe. It is not qualification evidence and'
+          $lines += 'must never be cited as a build, KUnit or CoCo gate.'
+          $lines += '===================================='
+
+          foreach ($l in $lines) { Write-Host $l }
+          $lines | Set-Content -Path 'probe-out/verdict.txt'
+
+          Write-Host '---- capability report ----'
+          if (Test-Path $report) { Get-Content $report | Write-Host }
+
+          if ($verdict -eq 'HYPERV_MANAGEMENT_UNAVAILABLE' -and -not ($clean -match 'hypervisor_present=')) {
+            Write-Host 'PROBE_ERROR: no capability data was recorded.'
+            exit 1
+          }
+          exit 0
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hyper-v-role-probe-${{ matrix.runner }}
+          path: probe-out/
+          retention-days: 90
