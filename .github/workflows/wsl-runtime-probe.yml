@@ -17,7 +17,16 @@ name: WSL runtime feasibility probe
 # hardware instead.
 
 on:
+  # workflow_dispatch is listed first, but GitHub only resolves it when the
+  # workflow file exists on the repository default branch. The default branch
+  # is microsoft's WSL line and must not carry our CI, so the push trigger on
+  # the contribution branch is the one that actually runs this probe.
   workflow_dispatch:
+  push:
+    branches:
+      - vmbus-ring-buffer-upstream-v2
+    paths:
+      - .github/workflows/wsl-runtime-probe.yml
   schedule:
     - cron: '17 4 1 * *'
 
