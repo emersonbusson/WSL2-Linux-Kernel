@@ -208,6 +208,11 @@ jobs:
         run: |
           set -euo pipefail
           PATCH_DIR=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series
+          # Bind this run's evidence to the exact bytes that would be sent.
+          # A build/checkpatch/KUnit PASS on different bytes is not evidence
+          # about the sendable series.
+          (cd "$PATCH_DIR" && sha256sum -c SHA256SUMS) \
+            | tee vmbus-artifacts/series-byte-pin.log
           sha256sum "$PATCH_DIR"/*.patch > vmbus-artifacts/series-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > vmbus-artifacts/series-commit-sha.txt
           stage=0
