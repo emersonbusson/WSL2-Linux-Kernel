@@ -1,13 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From cc0910d7e7aec7f316227a6450826513ead7e971 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH v2 1/7] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 1/6] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy
 allocator fragmentation, high-order allocations in vmbus_alloc_ring()
 can fail. While an initial fallback to vzalloc() was proposed, that
-breaks Confidential Computing (CoCo) guests (such as ARM64 CCA and
+breaks Confidential Computing (CoCo) guests (such as arm64 CCA and
 Intel TDX without a paravisor), because set_memory_decrypted() only
 supports physically contiguous, direct-mapped memory ranges.
 
@@ -18,15 +18,24 @@ into a virtually contiguous range via vmap().
 
 Convert vmbus_alloc_ring() and vmbus_free_ring() to use
 vmbus_alloc_buffer() and encapsulate the buffer address, page pointers,
-chunks and GPADL state in struct vmbus_buffer. This reduces high-order
-allocation failures and retains chunk-based CoCo handling. Platform support
-still requires hardware validation.
+chunks and GPADL state in struct vmbus_buffer. This lets a ring still be
+created when one high-order block is unavailable, and retains chunk-based
+CoCo handling. Platform support still requires hardware validation.
 
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c            | 151 +++++++++++++++++++++-----------
+ drivers/hv/hyperv_vmbus.h       |   4 +-
+ drivers/hv/ring_buffer.c        |   9 +-
+ drivers/net/hyperv/hyperv_net.h |  10 +--
+ drivers/net/hyperv/netvsc.c     |  60 ++++++++-----
+ drivers/uio/uio_hv_generic.c    |  37 ++++----
+ include/linux/hyperv.h          |  20 +++--
+ 7 files changed, 180 insertions(+), 111 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f55237a8945d51696a6520b2ecc31b805e..87b806a4846d8c9b803c7d51ccc7427c5ae9d148 100644
+index 7e4cc6f..87b806a 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,7 @@
@@ -386,7 +395,7 @@ index 7e4cc6f55237a8945d51696a6520b2ecc31b805e..87b806a4846d8c9b803c7d51ccc7427c
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 33923621a5a3f2646f13b9eb281fa69b56d2502d..20d023c9735e9e3e4d32196619ff50131befd5e2 100644
+index 3392362..20d023c 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -204,8 +204,8 @@ extern int hv_synic_cleanup(unsigned int cpu);
@@ -401,7 +410,7 @@ index 33923621a5a3f2646f13b9eb281fa69b56d2502d..20d023c9735e9e3e4d32196619ff5013
  void hv_ringbuffer_cleanup(struct hv_ring_buffer_info *ring_info);
  
 diff --git a/drivers/hv/ring_buffer.c b/drivers/hv/ring_buffer.c
-index 592a9601faaafa082198fee593581f8702f97503..16b1c291078908c41b82b5a482fa84a8a1f379a3 100644
+index 592a960..16b1c29 100644
 --- a/drivers/hv/ring_buffer.c
 +++ b/drivers/hv/ring_buffer.c
 @@ -184,8 +184,8 @@ void hv_ringbuffer_pre_init(struct vmbus_channel *channel)
@@ -430,7 +439,7 @@ index 592a9601faaafa082198fee593581f8702f97503..16b1c291078908c41b82b5a482fa84a8
  	ring_info->ring_buffer = (struct hv_ring_buffer *)
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-index 4841367fdab2fccc8dd974cce754bc71f25a9ea3..a15cb2460344f4b96c4d21d60922002488020438 100644
+index 4841367..a15cb24 100644
 --- a/drivers/net/hyperv/hyperv_net.h
 +++ b/drivers/net/hyperv/hyperv_net.h
 @@ -1158,21 +1158,15 @@ struct netvsc_device {
@@ -458,7 +467,7 @@ index 4841367fdab2fccc8dd974cce754bc71f25a9ea3..a15cb2460344f4b96c4d21d609220024
  	u32 send_section_size;
  	unsigned long *send_section_map;
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 5cd084e5696cd1683694ba1c8b5d0362b0428887..29ccd77fb177e455ead4f1b1eda2165ba5fdb678 100644
+index 5cd084e..29ccd77 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -134,10 +134,8 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
@@ -629,7 +638,7 @@ index 5cd084e5696cd1683694ba1c8b5d0362b0428887..29ccd77fb177e455ead4f1b1eda2165b
  	int i;
  	int count = 0;
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 7b4cc456c453419b64e331f58163b0ee5b5ca98c..b3f41ffc74f81854a7f478dd1c54d6fb235f5987 100644
+index 7b4cc45..b3f41ff 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -150,19 +150,21 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
@@ -718,7 +727,7 @@ index 7b4cc456c453419b64e331f58163b0ee5b5ca98c..b3f41ffc74f81854a7f478dd1c54d6fb
  			goto fail_close;
  		}
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 9e109d91aa1430d83aaf37984f9d484641805873..567679c68da183f883ae32c3fd1a6d0d04a7378e 100644
+index 9e109d9..567679c 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -70,8 +70,7 @@
@@ -784,19 +793,24 @@ index 9e109d91aa1430d83aaf37984f9d484641805873..567679c68da183f883ae32c3fd1a6d0d
 -- 
 2.43.0
 
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/7] hv: vmbus: validate chunk buffer allocation and cleanup
+Subject: [PATCH v2 2/6] hv: vmbus: validate chunk buffer allocation and
+ cleanup
 
 Validate rounded sizes before storing them and preserve allocated
 chunks when cleanup or GPADL teardown has an uncertain outcome. Add focused
-KUnit coverage for buffer sizing and ownership decisions.
+KUnit coverage for buffer sizing, ownership decisions, and the ring
+fallback order descent.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c | 162 +++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 149 insertions(+), 13 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2e94afcb0 100644
+index 87b806a..c47a923 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,8 @@
@@ -847,7 +861,7 @@ index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2
 +{
 +	unsigned int order;
 +
-+	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
++	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
 +	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
 +	while (order)
 +		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
@@ -1041,19 +1055,22 @@ index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2
 -- 
 2.43.0
 
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 574aca54bc6e46a34a86b83cb036c90698eb4c9a Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH v2 3/7] uio: hv_generic: allocate host-visible buffers through
+Subject: [PATCH v2 3/6] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
 Route generic VMBus UIO send and receive buffers through the VMBus
 allocator and release path so page and GPADL ownership stay together.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/uio/uio_hv_generic.c | 74 ++++++++++++++++++------------------
+ 1 file changed, 36 insertions(+), 38 deletions(-)
 
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe71109331859 100644
+index b3f41ff..0d7a980 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -56,12 +56,10 @@ struct hv_uio_private_data {
@@ -1177,36 +1194,11 @@ index b3f41ffc74f81854a7f478dd1c54d6fb235f5987..0d7a9802e9dbb43253f5efbb23afe711
 -- 
 2.43.0
 
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Emerson Busson <emersonbusson@gmail.com>
-Date: Thu, 24 Sep 2026 14:34:41 -0300
-Subject: [PATCH v2 4/7] test(hv): correct VMBus fallback order vector
-
-Use the order that matches the remaining page count in the fallback
-helper test.
-
-Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
-
-diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 091288f8c00c8426480c08a1c91900c2e94afcb0..c47a923306f298291b169c5827c777082ba1b162 100644
---- a/drivers/hv/channel.c
-+++ b/drivers/hv/channel.c
-@@ -64,7 +64,7 @@ static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
- {
- 	unsigned int order;
- 
--	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
-+	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
- 	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
- 	while (order)
- 		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));
--- 
-2.43.0
-
-From b5671d1204dac44ae65f97cf6e0a985fb9c435e6 Mon Sep 17 00:00:00 2001
+From c1bd2b6ebc43932cdad770e1f393f7e6833721b7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 5/7] test(hv): inject VMBus GPADL post failures
+Subject: [PATCH v2 4/6] hv: vmbus: add KUnit tests for GPADL post failure
+ injection
 
 Route GPADL message posting through a private callback so KUnit can inject
 header, each body, and teardown post failures without a live host. Exercise
@@ -1214,8 +1206,6 @@ uncertain host ownership after failed posts, host rejection, and channel
 rescind response handling through the same helpers used by production.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
-
-Rollback trigger: Revert if any injected failure frees a buffer still owned by the host.
 ---
  drivers/hv/channel.c | 334 ++++++++++++++++++++++++++++++++++++-------
  1 file changed, 283 insertions(+), 51 deletions(-)
@@ -1629,18 +1619,17 @@ index c47a923..35bdc94 100644
 -- 
 2.43.0
 
-From 3bbc9bc7c62db3ec0831de9a7ca659990747060f Mon Sep 17 00:00:00 2001
+From 784ba79da9a83642c9b860043a743c15d7cf5443 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
-Subject: [PATCH v2 6/7] test(hv): exercise order-zero allocation fallback
+Subject: [PATCH v2 5/6] hv: vmbus: add KUnit test for order-zero allocation
+ fallback
 
 Factor the order-descent allocation loop so KUnit can inject failures for
 orders above zero while retaining a real order-zero allocation in the test
 path. Also verify clean exhaustion when the order-zero attempt fails.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
-
-Rollback trigger: Revert if an allocation failure skips order zero or underflows the order.
 ---
  drivers/hv/channel.c | 100 ++++++++++++++++++++++++++++++++++++++++---
  1 file changed, 93 insertions(+), 7 deletions(-)
@@ -1801,10 +1790,10 @@ index 35bdc94..6b1e1fd 100644
 -- 
 2.43.0
 
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Tue, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 7/7] hv: vmbus: retain buffer ownership until GPADL and
+Date: Wed, 30 Sep 2026 14:35:00 -0300
+Subject: [PATCH v2 6/6] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator
@@ -1840,8 +1829,18 @@ host-revoke state, mapping references and repeated owner release.
 
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c         | 888 +++++++++++++++++++++++++++--------
+ drivers/hv/channel_mgmt.c    |  36 +-
+ drivers/hv/hyperv_vmbus.h    |   3 +
+ drivers/hv/vmbus_drv.c       |  14 +-
+ drivers/net/hyperv/netvsc.c  |  52 +-
+ drivers/uio/uio_hv_generic.c | 384 +++++++++++++--
+ include/linux/hyperv.h       |  32 +-
+ 7 files changed, 1141 insertions(+), 268 deletions(-)
+
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 6b1e1fdbd..ffb3ead42 100644
+index 6b1e1fd..ffb3ead 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -24,19 +24,70 @@
@@ -3039,7 +3038,7 @@ index 6b1e1fdbd..ffb3ead42 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/channel_mgmt.c b/drivers/hv/channel_mgmt.c
-index a044fd3b3..cdc4c4c27 100644
+index a044fd3..cdc4c4c 100644
 --- a/drivers/hv/channel_mgmt.c
 +++ b/drivers/hv/channel_mgmt.c
 @@ -26,6 +26,8 @@
@@ -3153,7 +3152,7 @@ index a044fd3b3..cdc4c4c27 100644
  }
  
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 20d023c97..6796f378a 100644
+index 20d023c..6796f37 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -354,6 +354,9 @@ struct vmbus_channel_message_table_entry {
@@ -3167,7 +3166,7 @@ index 20d023c97..6796f378a 100644
  /* General vmbus interface */
  
 diff --git a/drivers/hv/vmbus_drv.c b/drivers/hv/vmbus_drv.c
-index 5ebdbe24b..bce835c4a 100644
+index 5ebdbe2..bce835c 100644
 --- a/drivers/hv/vmbus_drv.c
 +++ b/drivers/hv/vmbus_drv.c
 @@ -1022,6 +1022,7 @@ static const struct bus_type  hv_bus = {
@@ -3223,7 +3222,7 @@ index 5ebdbe24b..bce835c4a 100644
  	cpuhp_remove_state(hyperv_cpuhp_online);
  	hv_synic_free();
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 29ccd77fb..8a5d0fe45 100644
+index 29ccd77..8a5d0fe 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -243,7 +243,6 @@ static void netvsc_revoke_recv_buf(struct hv_device *device,
@@ -3347,7 +3346,7 @@ index 29ccd77fb..8a5d0fe45 100644
  		netdev_err(ndev,
  			   "unable to establish send buffer's gpadl\n");
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 0d7a9802e..740d47d8c 100644
+index 0d7a980..d06d5fc 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -25,10 +25,12 @@
@@ -3815,7 +3814,7 @@ index 0d7a9802e..740d47d8c 100644
  			goto fail_close;
  
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 567679c68..0f482ed5c 100644
+index 567679c..0f482ed 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -784,13 +784,18 @@ struct vmbus_gpadl {
@@ -3900,3 +3899,6 @@ index 567679c68..0f482ed5c 100644
  void vmbus_release_buffer(struct vmbus_buffer *buffer);
  
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
+-- 
+2.43.0
+

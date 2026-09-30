@@ -1,16 +1,21 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/7] hv: vmbus: validate chunk buffer allocation and cleanup
+Subject: [PATCH v2 2/6] hv: vmbus: validate chunk buffer allocation and
+ cleanup
 
 Validate rounded sizes before storing them and preserve allocated
 chunks when cleanup or GPADL teardown has an uncertain outcome. Add focused
-KUnit coverage for buffer sizing and ownership decisions.
+KUnit coverage for buffer sizing, ownership decisions, and the ring
+fallback order descent.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c | 162 +++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 149 insertions(+), 13 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2e94afcb0 100644
+index 87b806a..c47a923 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,8 @@
@@ -61,7 +66,7 @@ index 87b806a4846d8c9b803c7d51ccc7427c5ae9d148..091288f8c00c8426480c08a1c91900c2
 +{
 +	unsigned int order;
 +
-+	order = vmbus_buffer_order(128, MAX_PAGE_ORDER);
++	order = vmbus_buffer_order(1UL << MAX_PAGE_ORDER, MAX_PAGE_ORDER);
 +	KUNIT_EXPECT_EQ(test, order, (unsigned int)MAX_PAGE_ORDER);
 +	while (order)
 +		KUNIT_ASSERT_TRUE(test, vmbus_buffer_lower_order(&order));

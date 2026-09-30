@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Tue, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 7/7] hv: vmbus: retain buffer ownership until GPADL and
+Date: Wed, 30 Sep 2026 14:35:00 -0300
+Subject: [PATCH v2 6/6] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator
@@ -37,8 +37,18 @@ host-revoke state, mapping references and repeated owner release.
 
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c         | 888 +++++++++++++++++++++++++++--------
+ drivers/hv/channel_mgmt.c    |  36 +-
+ drivers/hv/hyperv_vmbus.h    |   3 +
+ drivers/hv/vmbus_drv.c       |  14 +-
+ drivers/net/hyperv/netvsc.c  |  52 +-
+ drivers/uio/uio_hv_generic.c | 384 +++++++++++++--
+ include/linux/hyperv.h       |  32 +-
+ 7 files changed, 1141 insertions(+), 268 deletions(-)
+
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 6b1e1fdbd..ffb3ead42 100644
+index 6b1e1fd..ffb3ead 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -24,19 +24,70 @@
@@ -1236,7 +1246,7 @@ index 6b1e1fdbd..ffb3ead42 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/channel_mgmt.c b/drivers/hv/channel_mgmt.c
-index a044fd3b3..cdc4c4c27 100644
+index a044fd3..cdc4c4c 100644
 --- a/drivers/hv/channel_mgmt.c
 +++ b/drivers/hv/channel_mgmt.c
 @@ -26,6 +26,8 @@
@@ -1350,7 +1360,7 @@ index a044fd3b3..cdc4c4c27 100644
  }
  
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 20d023c97..6796f378a 100644
+index 20d023c..6796f37 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -354,6 +354,9 @@ struct vmbus_channel_message_table_entry {
@@ -1364,7 +1374,7 @@ index 20d023c97..6796f378a 100644
  /* General vmbus interface */
  
 diff --git a/drivers/hv/vmbus_drv.c b/drivers/hv/vmbus_drv.c
-index 5ebdbe24b..bce835c4a 100644
+index 5ebdbe2..bce835c 100644
 --- a/drivers/hv/vmbus_drv.c
 +++ b/drivers/hv/vmbus_drv.c
 @@ -1022,6 +1022,7 @@ static const struct bus_type  hv_bus = {
@@ -1420,7 +1430,7 @@ index 5ebdbe24b..bce835c4a 100644
  	cpuhp_remove_state(hyperv_cpuhp_online);
  	hv_synic_free();
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 29ccd77fb..8a5d0fe45 100644
+index 29ccd77..8a5d0fe 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -243,7 +243,6 @@ static void netvsc_revoke_recv_buf(struct hv_device *device,
@@ -1544,7 +1554,7 @@ index 29ccd77fb..8a5d0fe45 100644
  		netdev_err(ndev,
  			   "unable to establish send buffer's gpadl\n");
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 0d7a9802e..740d47d8c 100644
+index 0d7a980..d06d5fc 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -25,10 +25,12 @@
@@ -2012,7 +2022,7 @@ index 0d7a9802e..740d47d8c 100644
  			goto fail_close;
  
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 567679c68..0f482ed5c 100644
+index 567679c..0f482ed 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -784,13 +784,18 @@ struct vmbus_gpadl {
@@ -2097,3 +2107,6 @@ index 567679c68..0f482ed5c 100644
  void vmbus_release_buffer(struct vmbus_buffer *buffer);
  
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
+-- 
+2.43.0
+
