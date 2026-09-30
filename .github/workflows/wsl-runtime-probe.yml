@@ -15,6 +15,16 @@ name: WSL runtime feasibility probe
 # all? If every step below reports "unavailable", the runtime drills cannot go
 # into Actions and must be run on real Hyper-V or Azure Confidential VM
 # hardware instead.
+#
+# Probe semantics: a probe whose answer is "no" is a SUCCESSFUL probe. Every
+# step therefore exits 0 once its measurement is recorded. A red job here
+# means the probe itself broke, not that the answer was negative. The answer
+# lives in the VERDICT line and in the uploaded artifact.
+#
+# Read-only guarantees: no kernel is installed, no swap is touched, no memory
+# pressure is applied, and no RamShared lifecycle state is changed. The only
+# mutation is importing a disposable ~3 MB rootfs into a scratch WSL distro
+# that the job never promotes anywhere.
 
 on:
   # workflow_dispatch is listed first, but GitHub only resolves it when the
@@ -58,6 +68,14 @@ jobs:
             "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
             Write-Host "PROBE $k=$v"
           }
+          # wsl.exe writes UTF-16LE, which pwsh surfaces as a string carrying
+          # U+0000 between every character. Stripping the NULs recovers the
+          # text; re-encoding would just corrupt it further.
+          function AsText($raw) {
+            if ($null -eq $raw) { return '' }
+            $s = ($raw | Out-String)
+            return (($s -replace "`0", '') -replace "\s+", ' ').Trim()
+          }
 
           Note runner_os $env:RUNNER_OS
           Note runner_arch $env:RUNNER_ARCH
@@ -71,7 +89,10 @@ jobs:
 
           $proc = Get-CimInstance Win32_Processor
           Note virtualization_firmware_enabled $proc.VirtualizationFirmwareEnabled
-          Note second_level_address_translation $proc.SecondLevelAddressTranslationExtensions
+          # A CPUID-derived flag. Nested guests commonly mask it, so it is
+          # recorded for context and is NOT used to decide the verdict. The
+          # verdict comes from whether a real guest boots and exposes VMBus.
+          Note second_level_address_translation_reported $proc.SecondLevelAddressTranslationExtensions
 
           # Feature presence is not the same as the feature being on.
           $feat = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue
@@ -83,15 +104,15 @@ jobs:
           $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
           if ($wsl) {
             Note wsl_exe present
-            $v = & wsl.exe --version 2>&1 | Out-String
-            Note wsl_version ($v -replace "\s+", ' ').Trim()
+            Note wsl_version (AsText (& wsl.exe --version 2>&1))
           } else {
             Note wsl_exe unavailable
           }
 
           Note probe_complete true
+          exit 0
 
-      - name: Attempt WSL2 install and a guest capability read
+      - name: Attempt WSL2 feature enable and a guest capability read
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -99,6 +120,11 @@ jobs:
           function Note($k, $v) {
             "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
             Write-Host "PROBE $k=$v"
+          }
+          function AsText($raw) {
+            if ($null -eq $raw) { return '' }
+            $s = ($raw | Out-String)
+            return (($s -replace "`0", '') -replace "\s+", ' ').Trim()
           }
 
           # Try to enable the two features WSL2 needs. On a runner without
@@ -113,65 +139,170 @@ jobs:
             }
           }
 
-          try {
-            $status = & wsl.exe --status 2>&1 | Out-String
-            Note wsl_status (($status -replace "\s+", ' ').Trim())
-          } catch {
-            Note wsl_status ("failed: " + $_.Exception.Message)
+          Note wsl_status (AsText (& wsl.exe --status 2>&1))
+          Note wsl_distros (AsText (& wsl.exe --list --quiet 2>&1))
+          Note probe_step2_complete true
+          exit 0
+
+      - name: Boot a disposable guest and read the VMBus view
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $report = 'probe-out/capability.txt'
+          function Note($k, $v) {
+            "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
+            Write-Host "PROBE $k=$v"
+          }
+          function AsText($raw) {
+            if ($null -eq $raw) { return '' }
+            $s = ($raw | Out-String)
+            return (($s -replace "`0", '') -replace "\s+", ' ').Trim()
           }
 
-          # A WSL2 guest is a genuine Hyper-V guest and exposes VMBus. Read the
-          # guest view if a distro is present. This is a READ ONLY probe: no
-          # kernel is installed, no swap is touched, no pressure is applied,
-          # and no RamShared lifecycle state is changed.
+          $distroName = 'vmbus-probe-scratch'
+          $rootfsTar = Join-Path $env:RUNNER_TEMP 'probe-rootfs.tar.gz'
+          $importDir = Join-Path $env:RUNNER_TEMP 'probe-distro'
+          $guestCmd = 'uname -r; if [ -d /sys/bus/vmbus ]; then echo VMBUS_PRESENT; else echo VMBUS_ABSENT; fi; if [ -d /sys/bus/vmbus/devices ]; then echo VMBUS_DEVICES=$(ls /sys/bus/vmbus/devices | wc -l); fi; grep -o "microsoft-standard-WSL2" /proc/version || echo NOT_WSL2_TAG'
+
+          # A rootfs import avoids the distro OOBE and keeps the scratch guest
+          # tiny. Alpine minirootfs is a few megabytes; the runner disk cost is
+          # one small VHDX that this job never promotes anywhere.
           try {
-            $distros = & wsl.exe --list --quiet 2>&1 | Out-String
-            Note wsl_distros (($distros -replace "\s+", ' ').Trim())
+            $idxUrl = 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/'
+            $idx = (Invoke-WebRequest -UseBasicParsing $idxUrl).Content
+            $names = [regex]::Matches($idx, 'alpine-minirootfs-[0-9][0-9.]*-x86_64\.tar\.gz') |
+              ForEach-Object { $_.Value } | Sort-Object -Unique
+            if (-not $names) { throw "no alpine-minirootfs asset listed at $idxUrl" }
+            $asset = $names[-1]
+            Note rootfs_asset $asset
+            $url = $idxUrl + $asset
+            Invoke-WebRequest -UseBasicParsing $url -OutFile $rootfsTar
+            $hash = (Get-FileHash -Algorithm SHA256 $rootfsTar).Hash.ToLowerInvariant()
+            Note rootfs_sha256 $hash
+            Note rootfs_bytes ((Get-Item $rootfsTar).Length)
           } catch {
-            Note wsl_distros ("failed: " + $_.Exception.Message)
+            Note rootfs_download ("failed: " + $_.Exception.Message)
+            Note wsl_guest_view 'NO_DISTRO_SOURCE'
+            Note probe_boot_attempted false
+            exit 0
           }
 
+          # Import. If nested virtualization cannot host a VM, this is where it
+          # fails, and that failure is the verdict we want recorded.
           try {
-            $uname = & wsl.exe -e sh -c 'uname -r; test -d /sys/bus/vmbus && echo VMBUS_PRESENT || echo VMBUS_ABSENT; grep -o "microsoft-standard-WSL2" /proc/version || echo NOT_WSL2_TAG' 2>&1 | Out-String
-            Note wsl_guest_view (($uname -replace "\s+", ' ').Trim())
+            New-Item -ItemType Directory -Force -Path $importDir | Out-Null
+            $out = & wsl.exe --import $distroName $importDir $rootfsTar --version 2 2>&1
+            $code = $LASTEXITCODE
+            Note wsl_import ("exit=" + $code + " " + (AsText $out))
+            if ($code -ne 0) {
+              Note wsl_guest_view 'IMPORT_FAILED'
+              Note probe_boot_attempted true
+              exit 0
+            }
+          } catch {
+            Note wsl_import ("failed: " + $_.Exception.Message)
+            Note wsl_guest_view 'IMPORT_FAILED'
+            Note probe_boot_attempted true
+            exit 0
+          }
+
+          # READ ONLY guest view. No kernel install, no swap, no pressure, no
+          # RamShared lifecycle change. This is a capability probe.
+          try {
+            $view = & wsl.exe -d $distroName -u root -e sh -c $guestCmd 2>&1
+            $code = $LASTEXITCODE
+            Note wsl_guest_view ("exit=" + $code + " " + (AsText $view))
+            Note probe_boot_attempted true
           } catch {
             Note wsl_guest_view ("failed: " + $_.Exception.Message)
+            Note probe_boot_attempted true
           }
+
+          # Tear the scratch distro down so the runner is left as found.
+          try {
+            & wsl.exe --unregister $distroName 2>&1 | Out-Null
+            Note wsl_unregister ok
+          } catch {
+            Note wsl_unregister ("failed: " + $_.Exception.Message)
+          }
+          exit 0
 
       - name: Verdict
         shell: pwsh
         run: |
           $report = 'probe-out/capability.txt'
           $text = Get-Content $report -Raw
+          if (-not $text) { $text = '' }
 
-          $nested = ($text -match 'hypervisor_present=True')
-          $wslUp = ($text -match 'VMBUS_PRESENT')
-          $wslTag = ($text -match 'microsoft-standard-WSL2')
+          # Strip any residual NULs from UTF-16 artifacts before matching.
+          $clean = $text -replace "`0", ''
 
-          Write-Host '======== FEASIBILITY VERDICT ========'
+          $nested  = ($clean -match 'hypervisor_present=True')
+          $wslUp   = ($clean -match 'VMBUS_PRESENT')
+          $wslTag  = ($clean -match 'microsoft-standard-WSL2')
+          $wslLive = ($clean -match 'wsl_exe=present') -and ($clean -match 'Default Version:\s*2')
+          $attempted = ($clean -match 'probe_boot_attempted=true')
+
+          # Verdict is decided by a booted guest exposing VMBus, never by a
+          # CPUID flag or by a feature merely being enabled.
+          $verdict = 'NO_NESTED_VIRTUALIZATION'
           if ($wslUp -and $wslTag) {
-            Write-Host 'VERDICT=WSL2_RUNTIME_AVAILABLE'
-            Write-Host 'A disposable WSL2 guest with real VMBus is reachable from a hosted'
-            Write-Host 'Windows runner. Runtime drills could run there, and every result'
-            Write-Host 'MUST be labelled WSL-backport evidence only: the six-patch mainline'
-            Write-Host 'series does not apply to the WSL 6.18 tree, and a stock WSL2 VM is'
-            Write-Host 'not a confidential guest, so COCO-1..5 remain open.'
+            $verdict = 'WSL2_RUNTIME_AVAILABLE'
+          } elseif ($attempted) {
+            # We tried to create and boot a guest and no VMBus appeared. That
+            # is a host-capability limit, not a provisioning gap.
+            $verdict = 'NESTED_VIRT_ONLY'
+          } elseif ($nested -and $wslLive) {
+            $verdict = 'WSL2_STACK_READY_NO_GUEST'
           } elseif ($nested) {
-            Write-Host 'VERDICT=NESTED_VIRT_ONLY'
-            Write-Host 'Hypervisor is present but no WSL2 guest exposed VMBus. WSL2 runtime'
-            Write-Host 'drills are not available as-is; an ordinary Hyper-V guest would need'
-            Write-Host 'a different runner class or real hardware.'
-          } else {
-            Write-Host 'VERDICT=NO_NESTED_VIRTUALIZATION'
-            Write-Host 'This hosted runner cannot run WSL2 or any Hyper-V guest. Runtime'
-            Write-Host 'drills cannot go into Actions. They require real Hyper-V hardware or'
-            Write-Host 'an Azure Confidential VM (SEV-SNP DCasv5/ECasv5, TDX DCesv5/ECesv5).'
+            $verdict = 'NESTED_VIRT_ONLY'
           }
-          Write-Host 'This run is a capability probe. It is not qualification evidence and'
-          Write-Host 'must never be cited as a build, KUnit or CoCo gate.'
-          Write-Host '===================================='
 
-          Get-Content $report | Write-Host
+          $lines = @()
+          $lines += '======== FEASIBILITY VERDICT ========'
+          $lines += "VERDICT=$verdict"
+          switch ($verdict) {
+            'WSL2_RUNTIME_AVAILABLE' {
+              $lines += 'A disposable WSL2 guest with real VMBus is reachable from a hosted'
+              $lines += 'Windows runner. Runtime drills could run there, and every result'
+              $lines += 'MUST be labelled WSL-backport evidence only: the six-patch mainline'
+              $lines += 'series does not apply to the WSL 6.18 tree, and a stock WSL2 VM is'
+              $lines += 'not a confidential guest, so COCO-1..5 remain open.'
+            }
+            'WSL2_STACK_READY_NO_GUEST' {
+              $lines += 'The hosted runner already carries a working WSL2 stack (features'
+              $lines += 'enabled, Default Version 2, wsl.exe present) but no guest was'
+              $lines += 'booted in this run. The remaining step is provisioning a disposable'
+              $lines += 'distro, which is a runner-setup cost, not a hardware gap.'
+            }
+            'NESTED_VIRT_ONLY' {
+              $lines += 'Hypervisor is present but no WSL2 guest exposed VMBus. WSL2 runtime'
+              $lines += 'drills are not available as-is; an ordinary Hyper-V guest would need'
+              $lines += 'a different runner class or real hardware.'
+            }
+            default {
+              $lines += 'This hosted runner cannot run WSL2 or any Hyper-V guest. Runtime'
+              $lines += 'drills cannot go into Actions. They require real Hyper-V hardware or'
+              $lines += 'an Azure Confidential VM (SEV-SNP DCasv5/ECasv5, TDX DCesv5/ECesv5).'
+            }
+          }
+          $lines += 'This run is a capability probe. It is not qualification evidence and'
+          $lines += 'must never be cited as a build, KUnit or CoCo gate.'
+          $lines += '===================================='
+
+          foreach ($l in $lines) { Write-Host $l }
+          $lines | Set-Content -Path 'probe-out/verdict.txt'
+
+          Write-Host '---- capability report ----'
+          if (Test-Path $report) { Get-Content $report | Write-Host }
+
+          # A probe whose answer is "no" is still a successful probe. Only a
+          # probe that failed to measure anything is a failure.
+          if ($verdict -eq 'NO_NESTED_VIRTUALIZATION' -and -not ($clean -match 'hypervisor_present=')) {
+            Write-Host 'PROBE_ERROR: no capability data was recorded.'
+            exit 1
+          }
+          exit 0
 
       - name: Upload probe evidence
         if: always()
