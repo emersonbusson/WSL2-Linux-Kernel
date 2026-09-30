@@ -23,7 +23,17 @@ name: Hyper-V runtime drill
 # FAIL SEMANTICS: unlike the capability probes, a drill that reports FAIL is a
 # real candidate failure and reddens the job. A harness failure (cannot define
 # the VM, cannot boot, no console) also reddens: we failed to measure. An
-# INCONCLUSIVE drill (order-7 never failed) is green but recorded as PARTIAL.
+# INCONCLUSIVE drill -- insufficient pressure, order-7 supply still present --
+# is green for the job and recorded PARTIAL for the gate.
+#
+# EVIDENCE SCOPE (re-stated because it is easy to over-read a green job):
+# vmbus_alloc_buffer() only takes its chunked order-N -> order-0 path for
+# host-visible buffers in an isolated VM or on ARM64. A hosted x86_64 runner
+# is neither, so every ring here is vzalloc() and the CoCo chunked fallback is
+# not exercised no matter how green this job is. What this job does prove is
+# the GPADL/UIO ring lifecycle and that ring allocation survives real buddy
+# fragmentation. The chunked fallback stays with KUnit fault injection plus
+# COCO-1..5.
 
 on:
   # workflow_dispatch only resolves when this file is on the repository
