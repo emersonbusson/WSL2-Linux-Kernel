@@ -102,9 +102,14 @@ jobs:
           printf '%s\n' "$GITHUB_SHA" > drill-artifacts/series-commit-sha.txt
           # Count the patches applied, not the files they touch: the six
           # patches span nine source files, so a file-count assertion is a
-          # false negative on a perfectly good apply.
+          # false negative on a perfectly good apply. The 0000- cover letter
+          # ships in the same directory for git send-email, but it is mail
+          # prose, not a diff, and git apply would reject it.
           stage=0
           for patch in "$PATCH_DIR"/*.patch; do
+            case "$(basename "$patch")" in
+            0000-*) continue ;;
+            esac
             stage=$((stage + 1))
             git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
             git -C linux apply "$GITHUB_WORKSPACE/$patch"

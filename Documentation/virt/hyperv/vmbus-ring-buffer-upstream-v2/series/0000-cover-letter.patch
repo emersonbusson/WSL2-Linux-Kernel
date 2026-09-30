@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Wed, 30 Sep 2026 20:00:00 -0300
+Subject: [PATCH v2 0/6] hv: vmbus: make rings and host-visible buffers
+ survive fragmentation without breaking CoCo
+
+This is v2 of the VMBus ring-allocation series. v1 was posted unversioned
+on 2026-09-17/18 as a two-patch series and proposed a plain vzalloc()
+fallback for vmbus_alloc_ring(). Michael Kelley reviewed that approach on
+2026-09-22 and pointed out the problem it creates: set_memory_decrypted()
+only works on physically contiguous direct-mapped memory, so a vmalloc
+ring in an arm64 CCA or TDX guest without a paravisor cannot be re-
+encrypted. The fallback would fix ordinary guests and break confidential
+ones.
+
+He asked for the opposite structure: build on Kameron Carr's
+vmbus_alloc_buffer() (already upstream) rather than adding a second
+allocator path next to it. This series is that rewrite.
+
+Problem
+-------
+
+vmbus_alloc_ring() still allocates both ring halves with one order-7
+(512 KiB) alloc_pages() call. Under buddy fragmentation that fails with
+-ENOMEM while plenty of virtual memory is free. On WSL2 the visible
+symptom is userspace control-plane failures such as "accept4 failed 110:
+Connection timed out" on vsock channels. A dynamically instantiated
+sub-channel cannot open, and the channel is dead for the life of the
+fragmentation.
+
+The failure is not exotic. Any long-running guest that allocates and
+frees large objects - build workloads, in-memory databases, swap-heavy
+tiering - will fragment the buddy to the point where no order-7 block
+remains while thousands of order-0 pages are free.
+
+Why not just vzalloc()
+----------------------
+
+The obvious fix is to fall back to vmalloc when the high-order
+allocation fails. That is what v1 did, and it is wrong for Confidential
+Computing. Ring memory must be host-visible, and a CoCo guest's private
+memory has to be explicitly decrypted before the host can read it.
+set_memory_decrypted() operates on the direct map and therefore needs
+physically contiguous pages. A vmalloc range is not direct-mapped, so
+decrypting it is not possible. arm64 CCA and Intel TDX guests without a
+paravisor would break.
+
+Kameron Carr's vmbus_alloc_buffer() already solves this: it allocates
+the buffer as a series of physically contiguous chunks, descending from
+a high order to order 0 as needed, decrypts each chunk with
+set_memory_decrypted() where the platform requires it, and vmap()s the
+chunks into one virtually contiguous range. v1 proposed a second
+allocator. v2 removes the second allocator and routes everything through
+the first.
+
+What changed
+------------
+
+- vmbus_alloc_ring() and vmbus_free_ring() now use vmbus_alloc_buffer().
+  The three related fields - buffer address, page array, and GPADL state
+  - are grouped into struct vmbus_buffer, and struct vmbus_gpadl is
+  folded into it so ownership cannot be split across two lifetimes.
+
+- The generic VMBus UIO driver allocates its send and receive buffers
+  the same way. Page and GPADL ownership travel together, which closes
+  the window where a UIO mmap holds pages whose GPADL is still being
+  established.
+
+- Size rounding is validated before it is stored, and a cleanup with an
+  uncertain outcome preserves the allocated chunks instead of freeing
+  them. A buffer whose GPADL or encryption state cannot be proven is
+  marked leaked and retained rather than handed back to the allocator
+  while the host may still map it.
+
+- GPADL message posting goes through a private callback so KUnit can
+  inject header, body, and teardown post failures without a live host.
+  The same helpers run in production, so the tested path is the shipped
+  path.
+
+- The order-descent loop is factored so KUnit can fail every order above
+  zero and still exercise a real order-zero allocation, plus clean
+  exhaustion when order zero also fails.
+
+- The previously exported allocator, free, GPADL establish, caller-
+  decrypted establish and teardown signatures are preserved through
+  adapters. External consumers of those symbols are unaffected.
+
+- HV_GPADL_BUFFER_DECRYPTED is gone. Once every caller goes through
+  vmbus_alloc_buffer(), the distinction it carried is redundant.
+
+Testing
+-------
+
+KUnit (hosted, no Hyper-V required):
+
+  20/20 named cases on x86_64 against the six-patch bytes, covering
+  size rounding, ownership decisions, partial-allocation cleanup,
+  GPADL post-failure injection at header/body/teardown, response-state
+  mapping including host rejection and rescind, the order-descent
+  fallback with injected order >0 failures, and clean exhaustion. The
+  separate WSL 6.18.40.1 backport build passes 15/15 of the same
+  named cases. CoCo gate self-tests are green.
+
+Runtime on ordinary x86_64 Hyper-V (not CoCo):
+
+  The exact pinned bytes boot as a Gen2 guest with the candidate symbols
+  present. Across 30 hv_netvsc rebind cycles the vmbus_alloc_buffer map
+  set returns to its exact baseline (12 maps / 20 279 296 bytes / 4 939
+  pages before and after), with zero splats and zero faults. Ring
+  allocation also survives an artificially fragmented buddy. Details
+  and the limits of that evidence travel with the run record; a green
+  drill job is not by itself a gate closure.
+
+What is not proven here
+-----------------------
+
+CoCo page-state transitions. SEV-SNP, TDX, and Arm CCA memory-state
+behaviour has not been observed on real confidential hardware. The
+per-chunk decrypt design is what those platforms need, and the static
+invariants are machine-checked in CI, but that is a negative proof about
+this patch set, not platform evidence. Platform validation is follow-up
+work and this series should be read with that gap open.
+
+Note also that the chunked order-N -> order-0 degrade only runs when
+vmbus_uses_shared_page_chunks() is true - host-visible buffer and
+(Hyper-V isolation or CONFIG_ARM64). An ordinary x86_64 guest always
+takes the single vzalloc() path inside vmbus_alloc_buffer(), so the
+runtime numbers above speak to ring lifecycle and fragmentation
+resilience, not to the confidential fallback. That fallback is covered
+by the KUnit injection tests and awaits platform validation.
+
+The design follows Michael Kelley's review of the v1 series. Comments
+welcome.
+
+Emerson Busson (6):
+  hv: vmbus: convert ring buffer allocation to vmbus_alloc_buffer()
+  hv: vmbus: validate chunk buffer allocation and cleanup
+  uio: hv_generic: allocate host-visible buffers through VMBus
+  hv: vmbus: add KUnit tests for GPADL post failure injection
+  hv: vmbus: add KUnit test for order-zero allocation fallback
+  hv: vmbus: retain buffer ownership until GPADL and page state are
+    resolved
+
+ drivers/hv/channel.c            | 888 +++++++++++++++++++++++++++--------
+ drivers/hv/channel_mgmt.c       |  36 +-
+ drivers/hv/hyperv_vmbus.h       |   7 +-
+ drivers/hv/ring_buffer.c        |   9 +-
+ drivers/hv/vmbus_drv.c          |  14 +-
+ drivers/net/hyperv/hyperv_net.h |  10 +-
+ drivers/net/hyperv/netvsc.c     | 112 ++++++---
+ drivers/uio/uio_hv_generic.c    | 458 ++++++++++++++++----
+ include/linux/hyperv.h          |  52 +-
+ 9 files changed, 1882 insertions(+), 488 deletions(-)
+
+--
+2.43.0
