@@ -238,6 +238,64 @@ jobs:
             grep -q "EXPORT_SYMBOL_GPL($symbol)" linux/drivers/hv/channel.c
             grep -q "$symbol" linux/include/linux/hyperv.h
           done
+      - name: Enforce CoCo static invariants
+        run: |
+          set -euo pipefail
+          # Static negative proof of COCO-STATIC-PROOF.md: the guest-fatal
+          # pattern Michael Kelley named (set_memory_decrypted() on a
+          # vmalloc()/vmap() range) has no code path in any allocation this
+          # series introduces. Machine-checked so it cannot regress silently.
+          CHECKER=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/coco-static-invariants.py
+          test -f "$CHECKER"
+          python3 "$CHECKER" --tree linux | tee vmbus-artifacts/coco-static-invariants.log
+          grep -q 'COCO-STATIC-PROOF: all invariants hold.' \
+            vmbus-artifacts/coco-static-invariants.log
+
+          # Gate self-test: a checker that only ever passes is not a checker.
+          # Inject the exact rejected pattern and require the gate to reject it.
+          cp linux/drivers/hv/channel.c "$RUNNER_TEMP/channel.c.bak"
+          cp linux/drivers/uio/uio_hv_generic.c "$RUNNER_TEMP/uio_hv_generic.c.bak"
+          restore_sources() {
+            cp "$RUNNER_TEMP/channel.c.bak" linux/drivers/hv/channel.c
+            cp "$RUNNER_TEMP/uio_hv_generic.c.bak" linux/drivers/uio/uio_hv_generic.c
+          }
+          trap restore_sources EXIT
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("linux/drivers/hv/channel.c")
+          s = p.read_text()
+          needle = "\t\tret = set_memory_decrypted((unsigned long)page_address(page),\n\t\t\t\t\t   1U << order);"
+          assert needle in s, "allocator decrypt site not found"
+          p.write_text(s.replace(needle,
+              "\t\tret = set_memory_decrypted((unsigned long)buffer->addr,\n\t\t\t\t\t   1U << order);", 1))
+          PY
+          if python3 "$CHECKER" --tree linux; then
+            echo "gate self-test FAILED: vmalloc decryption was not rejected" >&2
+            exit 1
+          fi
+          echo "gate self-test OK: vmalloc decryption rejected"
+
+          restore_sources
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("linux/drivers/uio/uio_hv_generic.c")
+          s = p.read_text()
+          needle = "hv_uio_probe(struct hv_device *dev,"
+          assert needle in s
+          p.write_text(s.replace(needle,
+              "\tset_memory_decrypted((unsigned long)addr, n);\n" + needle, 1))
+          PY
+          if python3 "$CHECKER" --tree linux; then
+            echo "gate self-test FAILED: UIO encryption transition was not rejected" >&2
+            exit 1
+          fi
+          echo "gate self-test OK: UIO encryption transition rejected"
+
+          restore_sources
+          trap - EXIT
+          python3 "$CHECKER" --tree linux | tee -a vmbus-artifacts/coco-static-invariants.log
       - name: Require and run VMBus KUnit cases
         if: matrix.arch == 'x86_64'
         run: |
