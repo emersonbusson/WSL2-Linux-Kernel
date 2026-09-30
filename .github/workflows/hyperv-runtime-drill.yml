@@ -90,12 +90,18 @@ jobs:
             | tee drill-artifacts/series-byte-pin.log
           sha256sum "$PATCH_DIR"/*.patch > drill-artifacts/series-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > drill-artifacts/series-commit-sha.txt
+          # Count the patches applied, not the files they touch: the six
+          # patches span nine source files, so a file-count assertion is a
+          # false negative on a perfectly good apply.
+          stage=0
           for patch in "$PATCH_DIR"/*.patch; do
+            stage=$((stage + 1))
             git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
             git -C linux apply "$GITHUB_WORKSPACE/$patch"
           done
           git -C linux diff --check
-          test "$(git -C linux status --porcelain | wc -l)" -eq 6
+          printf 'applied_stages=%s\n' "$stage" | tee drill-artifacts/applied-stages.txt
+          test "$stage" -eq 6
 
       - name: Build the self-booting drill kernel
         run: |
@@ -114,12 +120,18 @@ jobs:
           cp drill-out/image-audit.txt drill-artifacts/
           cp drill-out/config-drill-resolved drill-artifacts/
           cp drill-out/helper-file.txt drill-artifacts/
-          # The guest has no CPython. If a drill script still calls python3
-          # the whole job would fail only at boot time, minutes later.
-          if grep -R "python3" "$DRILL"/*.sh; then
-            echo "ERROR: a drill script still calls python3" >&2
-            exit 1
-          fi
+          # The guest has no CPython. If a script that ships inside the
+          # initramfs still calls python3 the whole job would fail only at
+          # boot time, minutes later. Scope the check to the guest drills:
+          # build-drill-kernel.sh runs on the host and legitimately uses
+          # python3 for the image audit.
+          for g in vmbus-lifecycle-drill.sh vmbus-fragmentation-drill.sh \
+                   uio-ring-exercise.sh init; do
+            if grep -n "python3" "$DRILL/$g"; then
+              echo "ERROR: $g still calls python3; the drill guest has none" >&2
+              exit 1
+            fi
+          done
           ls -la drill-artifacts/
 
       - name: Upload drill kernel
