@@ -35,14 +35,14 @@ completed successfully for exactly the audited source SHA.
 | ID | Revalidated finding | Result and reproduction boundary |
 | --- | --- | --- |
 | BUG-1 | DXG existing-system-memory mapping is unmapped twice. | **Source-confirmed defect.** create_existing_sysmem stores the vmap pointer in dxgalloc->gpadl.addr, then unconditionally vunmaps the local pointer at cleanup without clearing the field. dxgallocation_destroy later vunmaps the stale field on the normal teardown path. No runtime warning or reused-address corruption was reproduced. The warning and impact on a later mapping remain unmeasured consequences. |
-| BUG-2 | Reclaimer page-ref check races a new mmap. | **Static lifetime hazard; runtime UAF not reproduced.** The reclaimer checks page refcounts under its retained-owner lock, but mmap does not take that lock. A mapping that has not yet acquired page references can race after the check. Existing mappings are protected by their references. |
-| BUG-3 | UIO sysfs ring mmap can race ring release and pages-array free. | **Static race window confirmed; runtime UAF not reproduced.** hv_uio_ring_mmap checks channel state and reads ringbuffer.pages without a lock. The normal primary-device remove path removes the sysfs attribute before freeing, which drains active kernfs operations. The subchannel path creates the same attribute, but vmbus_disconnect_ring can close and free a subchannel ring without first removing that attribute. A callback that passed the state check can therefore overlap pages-array release. |
+| BUG-2 | Reclaimer page-ref check races a new mmap. | **Static lifetime hazard; runtime UAF not reproduced. Source fix `a8042f978bc0`.** The reclaimer checked page refcounts under its retained-owner lock, then dropped the lock before the free. The free now stays under the lock, `buffer->pages` is cleared under the lock before the array is freed, and a KUnit case covers a busy page ref across a reclaim pass (`15c26f95a702` updates the WSL suite counts). A racing mmap that already loaded the pages pointer is still excluded only by the BUG-3 sysfs drain. Runtime interleaving of a new mmap against reclaim is not reproduced. |
+| BUG-3 | UIO sysfs ring mmap can race ring release and pages-array free. | **Static race window confirmed; runtime UAF not reproduced. Source fix `b64d516de5fc`.** `vmbus_free_ring()` now calls `hv_remove_ring_sysfs()` before `vmbus_free_buffer()` so kernfs drains active mmap ops on every free path, including subchannel teardown, then clears `ringbuffer_pagecount`. Deterministic hold-in-mmap-while-close reproduction is still open. |
 | BUG-4 | Close failure bypasses retained-owner reclamation. | **Not confirmed as a correctness bug.** The close path explicitly chooses to leak when posting close or tearing down GPADL fails. It leaves the ring ownership record attached to the channel instead of transferring it to the retained list. Reclaim and eventual channel-object cleanup are not proven, so this is a boundedness/observability concern; freeing on that failure would be unsafe. |
 | BUG-5 | UIO probe error can lose the chance to resolve a live GPADL. | **Source-confirmed lifecycle gap.** On establish failure, hv_uio_probe calls vmbus_free_buffer before fail_close calls hv_uio_cleanup. Freeing clears the descriptor, so cleanup no longer sees the handle. A host-rescind result can leave the buffer LIVE; a partial post can leave it UNCERTAIN. The former can be safely resolved after confirmed host rescind, but the current ordering retains a copied state with no channel teardown attempt. UNCERTAIN retention is a separate fail-safe case. No Hyper-V integration reproduction was available. |
 | BUG-6 | Mainline patch series differs from WSL branch source. | **Not a defect.** The repository intentionally contains a mainline series and a separate WSL 6.18 backport. Hosted CI applies/builds the series against pinned mainline and separately builds the WSL source. They are not byte-identical implementations. Any documentation claiming byte-for-byte parity is unsupported and must be removed. |
 | BUG-7 | UNCERTAIN ownership can retain pages indefinitely. | **Intentional fail-safe behavior, not an unsafe-free bug.** The code cannot prove whether a partial create reached the host; tests require retention. No expiry or later proof mechanism exists, so memory can remain retained indefinitely. This is a real boundedness and diagnostics gap. |
 | BUG-8 | DXG allocation size narrows from u64 to the u32 GPADL size field. | **Source-confirmed truncation boundary; runtime reachability not reproduced.** alloc_size is u64 and is assigned to vmbus_buffer.size (u32) without a bound check. Requests above U32_MAX can describe a shorter GPADL than the DXG allocation. No greater-than-4-GiB allocation was attempted. |
-| BUG-9 | PFN-backed DXG pages are unpinned before host allocation destroy. | **Source-confirmed ordering; host-use-after-unpin is not reproduced.** dxgallocation_destroy calls dxgallocation_stop before sending destroy-allocation. On the PFN path, stop can unpin user pages because no GPADL handle exists, even though PFNs were sent to the host. Whether the host still accesses them at that point needs an exact protocol/runtime trace. Treat as a serious ownership-ordering risk. |
+| BUG-9 | PFN-backed DXG pages are unpinned before host allocation destroy. | **Source-confirmed ordering; host-use-after-unpin is not reproduced. Source fix `0dcd3ad5d996`.** `dxgallocation_stop()` no longer unpins PFN pages; `dxgallocation_release_pins()` runs only after `dxgvmb_send_destroy_allocation()` and any GPADL teardown, and `gpadl.leak` still keeps the pins. Whether the host accesses the PFNs after a destroy send needs an exact protocol/runtime trace. |
 | BUG-10 | vmbus_free_buffer may sleep from a NetVSC RCU callback. | **No current violation established.** Normal NetVSC teardown calls the buffer cleanup in process context before call_rcu; the later callback sees cleared descriptors. Probe-error cleanup calls the callback function directly in process context. The invariant is documented, though not asserted. |
 | BUG-11 | NetVSC says failed teardown sets buffer->leak. | **Confirmed comment defect.** Teardown does not set leak; safety currently follows from retained GPADL state/handle. This does not change runtime behavior. |
 | BUG-12 | UIO computes but does not apply page_offset. | **No current misaligned caller found.** All current UIO regions are page-aligned. The generic callback would mishandle a future unaligned region, but the audit did not reproduce a present failure. |
@@ -50,9 +50,10 @@ completed successfully for exactly the audited source SHA.
 ### Confirmed items that need source fixes
 
 BUG-1, BUG-5, BUG-8, and BUG-11 are the source-confirmed fix candidates.
-BUG-2/BUG-3 and BUG-9 require a designed synchronization/ownership fix and a
-targeted runtime or KUnit reproducer before claiming resolution. No source edit
-or host installation is represented by this audit document.
+BUG-2/BUG-3 and BUG-9 now have designed synchronization/ownership source
+fixes listed below. They still need the targeted runtime or KUnit
+reproducers above before claiming resolution. No host installation or
+CoCo qualification is represented by this audit document.
 
 ## Recheck of GAP-1 through GAP-18
 
@@ -134,11 +135,19 @@ They are not runtime, host, or CoCo qualification.
 | BUG-5 | `4ea7c35d2cd8` | `hv_uio_probe()` no longer frees buffers before `fail_close`; `hv_uio_cleanup()` tears down a live GPADL and retains uncertain pages. |
 | BUG-11 | `68700eb5aa8a` | NetVSC teardown comment matches retained-GPADL safety; UIO `recv_name` comment matches the `recv:%u` format. |
 | G2 | `805418bd7021` | PR path filter now includes `drivers/hv/dxgkrnl/**` and `drivers/hv/ring_buffer.c`. |
+| BUG-3 | `b64d516de5fc` | `vmbus_free_ring()` calls `hv_remove_ring_sysfs()` before `vmbus_free_buffer()` and clears `ringbuffer_pagecount` after the free. |
+| BUG-2 | `a8042f978bc0` | Reclaim free runs under `vmbus_retained_buffers_lock`; `buffer->pages` is cleared under that lock before the array is freed; KUnit `vmbus_reclaim_busy_ref_defers_free_test` holds a busy page ref across a reclaim pass. |
+| BUG-2 CI | `15c26f95a702` | WSL KUnit gates count the new reclaim case (12 subtests, 15 total). |
+| BUG-9 | `0dcd3ad5d996` | `dxgallocation_release_pins()` unpins PFN pages only after the host destroy send and GPADL teardown; `dxgallocation_stop()` is IO-space quiesce only. |
 
 G3 (DXG KUnit) was not landed: `create_existing_sysmem()` is static and
 needs a device/host fixture, so a focused test would require speculative
-refactoring. Verification of the commits above is checkpatch clean and a
-targeted `W=1` rebuild of the three touched objects only. BUG-2, BUG-3,
-BUG-9, the gaps in the tables above, and every runtime/CoCo item remain
-open exactly as listed.
+refactoring. BUG-9 therefore documents the unpin-after-host-destroy
+invariant in `dxgadapter.c` instead of adding a mock ordering flag.
+Verification of the commits above is checkpatch clean and a targeted
+`W=1` rebuild of the touched objects (`channel.o`, `dxgadapter.o`);
+the new KUnit case is compile-checked with `CONFIG_KUNIT=y` but not
+executed in this environment. BUG-2/BUG-3/BUG-9 runtime interleaving,
+every runtime/CoCo item, and the gaps in the tables above remain open
+exactly as listed.
 
