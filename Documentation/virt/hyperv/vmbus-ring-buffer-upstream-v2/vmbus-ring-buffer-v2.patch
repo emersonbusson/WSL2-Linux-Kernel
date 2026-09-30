@@ -1801,6 +1801,45 @@ index 35bdc94..6b1e1fd 100644
 -- 
 2.43.0
 
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Tue, 30 Sep 2026 14:35:00 -0300
+Subject: [PATCH v2 7/7] hv: vmbus: retain buffer ownership until GPADL and
+ page state are resolved
+
+Converting rings and host-visible buffers to the chunked allocator
+introduces a lifetime window that the previous contiguous allocation
+never had. A buffer can now be mapped into userspace through UIO while
+its GPADL is still being established, and a channel can be rescinded
+while a create or teardown message is in flight. Freeing the backing
+pages at the wrong point either leaks them to the host or hands pages
+back to the allocator that are still host-visible or still decrypted.
+
+Track each buffer with a channel-keyed retained owner that records the
+allocation address, its chunk and page arrays, and the encryption state
+that was actually reached. Owners move to a delayed reclaimer only after
+three gates clear: the GPADL is resolved, the page state is known, and
+the per-page references taken by UIO mappings have returned to their
+baseline. A create or teardown with an uncertain outcome retains the
+owner rather than freeing, so a partial post can never release pages the
+host may still map.
+
+Distinguish host rescind from local unload, since both previously set
+the same channel flag and a rescind-based free could drop pages after a
+successful-looking teardown that left its GPADL handle set. Revocation
+now goes through an explicit channel-keyed entry point, and the
+disconnected VMBus message path frees its allocated context.
+
+In-tree migrated callers use descriptor-aware _owned entry points. The
+previously exported allocator, free, GPADL establish, caller-decrypted
+establish and teardown signatures are preserved through adapters, so
+external consumers are unaffected.
+
+KUnit coverage exercises the reclaim gate, the reclaim schedule gate,
+host-revoke state, mapping references and repeated owner release.
+
+Suggested-by: Michael Kelley <mhklinux@outlook.com>
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index 6b1e1fdbd..ffb3ead42 100644
 --- a/drivers/hv/channel.c
