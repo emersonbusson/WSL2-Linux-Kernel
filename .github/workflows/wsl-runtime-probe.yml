@@ -1,0 +1,173 @@
+name: WSL runtime feasibility probe
+
+# Determines, empirically, whether a GitHub-hosted Windows runner can host a
+# real VMBus runtime for the ring-buffer work. This is a CAPABILITY PROBE, not
+# qualification evidence: it never claims a test passed and it never runs a
+# pressure drill.
+#
+# Background: hosted Linux runners already cover every source-level gate
+# (apply, checkpatch, W=1+Sparse, KUnit, CoCo static invariants). The
+# remaining send-gate items need a live Hyper-V guest. QEMU cannot provide
+# VMBus, so a QEMU boot-smoke is forbidden evidence theatre. The nearest
+# runtime without new hardware is a disposable WSL2 guest on a Windows runner.
+#
+# This workflow answers one question: is that available on a hosted runner at
+# all? If every step below reports "unavailable", the runtime drills cannot go
+# into Actions and must be run on real Hyper-V or Azure Confidential VM
+# hardware instead.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 1 * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wsl-runtime-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Probe runner virtualization capability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path probe-out | Out-Null
+          $report = 'probe-out/capability.txt'
+          function Note($k, $v) {
+            "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
+            Write-Host "PROBE $k=$v"
+          }
+
+          Note runner_os $env:RUNNER_OS
+          Note runner_arch $env:RUNNER_ARCH
+          Note runner_name $env:RUNNER_NAME
+          Note runner_label '${{ matrix.runner }}'
+
+          # Nested virtualization is what WSL2 and any Hyper-V guest need.
+          $cs = Get-CimInstance Win32_ComputerSystem
+          Note hypervisor_present $cs.HypervisorPresent
+          Note total_physical_memory_gb ([math]::Round($cs.TotalPhysicalMemory/1GB,1))
+
+          $proc = Get-CimInstance Win32_Processor
+          Note virtualization_firmware_enabled $proc.VirtualizationFirmwareEnabled
+          Note second_level_address_translation $proc.SecondLevelAddressTranslationExtensions
+
+          # Feature presence is not the same as the feature being on.
+          $feat = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue
+          if ($feat) { Note hyperv_feature_state $feat.State } else { Note hyperv_feature_state unavailable }
+          $vmp = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue
+          if ($vmp) { Note virtual_machine_platform_state $vmp.State } else { Note virtual_machine_platform_state unavailable }
+
+          # WSL presence and version.
+          $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+          if ($wsl) {
+            Note wsl_exe present
+            $v = & wsl.exe --version 2>&1 | Out-String
+            Note wsl_version ($v -replace "\s+", ' ').Trim()
+          } else {
+            Note wsl_exe unavailable
+          }
+
+          Note probe_complete true
+
+      - name: Attempt WSL2 install and a guest capability read
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $report = 'probe-out/capability.txt'
+          function Note($k, $v) {
+            "{0}={1}" -f $k, $v | Tee-Object -FilePath $report -Append
+            Write-Host "PROBE $k=$v"
+          }
+
+          # Try to enable the two features WSL2 needs. On a runner without
+          # nested virtualization this either fails or the VM will not start;
+          # either answer is the answer.
+          foreach ($f in 'VirtualMachinePlatform','Microsoft-Windows-Subsystem-Linux') {
+            try {
+              $r = Enable-WindowsOptionalFeature -Online -FeatureName $f -All -NoRestart -ErrorAction Stop
+              Note ("enable_" + $f) ("ok restart_required=" + $r.RestartNeeded)
+            } catch {
+              Note ("enable_" + $f) ("failed: " + $_.Exception.Message)
+            }
+          }
+
+          try {
+            $status = & wsl.exe --status 2>&1 | Out-String
+            Note wsl_status (($status -replace "\s+", ' ').Trim())
+          } catch {
+            Note wsl_status ("failed: " + $_.Exception.Message)
+          }
+
+          # A WSL2 guest is a genuine Hyper-V guest and exposes VMBus. Read the
+          # guest view if a distro is present. This is a READ ONLY probe: no
+          # kernel is installed, no swap is touched, no pressure is applied,
+          # and no RamShared lifecycle state is changed.
+          try {
+            $distros = & wsl.exe --list --quiet 2>&1 | Out-String
+            Note wsl_distros (($distros -replace "\s+", ' ').Trim())
+          } catch {
+            Note wsl_distros ("failed: " + $_.Exception.Message)
+          }
+
+          try {
+            $uname = & wsl.exe -e sh -c 'uname -r; test -d /sys/bus/vmbus && echo VMBUS_PRESENT || echo VMBUS_ABSENT; grep -o "microsoft-standard-WSL2" /proc/version || echo NOT_WSL2_TAG' 2>&1 | Out-String
+            Note wsl_guest_view (($uname -replace "\s+", ' ').Trim())
+          } catch {
+            Note wsl_guest_view ("failed: " + $_.Exception.Message)
+          }
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          $report = 'probe-out/capability.txt'
+          $text = Get-Content $report -Raw
+
+          $nested = ($text -match 'hypervisor_present=True')
+          $wslUp = ($text -match 'VMBUS_PRESENT')
+          $wslTag = ($text -match 'microsoft-standard-WSL2')
+
+          Write-Host '======== FEASIBILITY VERDICT ========'
+          if ($wslUp -and $wslTag) {
+            Write-Host 'VERDICT=WSL2_RUNTIME_AVAILABLE'
+            Write-Host 'A disposable WSL2 guest with real VMBus is reachable from a hosted'
+            Write-Host 'Windows runner. Runtime drills could run there, and every result'
+            Write-Host 'MUST be labelled WSL-backport evidence only: the six-patch mainline'
+            Write-Host 'series does not apply to the WSL 6.18 tree, and a stock WSL2 VM is'
+            Write-Host 'not a confidential guest, so COCO-1..5 remain open.'
+          } elseif ($nested) {
+            Write-Host 'VERDICT=NESTED_VIRT_ONLY'
+            Write-Host 'Hypervisor is present but no WSL2 guest exposed VMBus. WSL2 runtime'
+            Write-Host 'drills are not available as-is; an ordinary Hyper-V guest would need'
+            Write-Host 'a different runner class or real hardware.'
+          } else {
+            Write-Host 'VERDICT=NO_NESTED_VIRTUALIZATION'
+            Write-Host 'This hosted runner cannot run WSL2 or any Hyper-V guest. Runtime'
+            Write-Host 'drills cannot go into Actions. They require real Hyper-V hardware or'
+            Write-Host 'an Azure Confidential VM (SEV-SNP DCasv5/ECasv5, TDX DCesv5/ECesv5).'
+          }
+          Write-Host 'This run is a capability probe. It is not qualification evidence and'
+          Write-Host 'must never be cited as a build, KUnit or CoCo gate.'
+          Write-Host '===================================='
+
+          Get-Content $report | Write-Host
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wsl-runtime-probe-${{ matrix.runner }}
+          path: probe-out/
+          retention-days: 90
