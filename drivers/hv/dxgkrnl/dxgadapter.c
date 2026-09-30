@@ -880,15 +880,32 @@ struct dxgallocation *dxgallocation_create(struct dxgprocess *process)
 	return alloc;
 }
 
-void dxgallocation_stop(struct dxgallocation *alloc)
+/*
+ * dxgallocation_release_pins - drop the pin on PFN-backed user pages
+ *
+ * Call only after the host has been told to drop the allocation
+ * (dxgvmb_send_destroy_allocation) or after GPADL teardown has proven
+ * the host no longer maps the pages. Fail-safe: do not release pins
+ * while ownership is uncertain (gpadl.leak).
+ */
+static void dxgallocation_release_pins(struct dxgallocation *alloc)
 {
-	/* Keep GPADL backing pages pinned until the host releases the mapping. */
-	if (alloc->pages && !alloc->gpadl.gpadl_handle &&
-	    !alloc->gpadl.leak) {
+	if (alloc->pages) {
 		unpin_user_pages(alloc->pages, alloc->num_pages);
 		vfree(alloc->pages);
 		alloc->pages = NULL;
 	}
+}
+
+void dxgallocation_stop(struct dxgallocation *alloc)
+{
+	/*
+	 * Quiesce IO-space mappings only. PFN-backed pages stay pinned
+	 * because the host may still reference them until destroy-allocation
+	 * is delivered; dxgallocation_destroy() releases the pins after that
+	 * send. A stop without a later destroy is a quiesce, so the pins are
+	 * kept on purpose.
+	 */
 	dxgprocess_ht_lock_exclusive_down(alloc->process);
 	if (alloc->cpu_address_mapped) {
 		dxg_unmap_iospace(alloc->cpu_address,
@@ -942,12 +959,18 @@ void dxgallocation_destroy(struct dxgallocation *alloc)
 			DXG_ERR("Unable to release GPADL backing pages: %d", ret);
 		}
 	}
+	/*
+	 * Release the GPADL vmap and the PFN pins only after the host destroy
+	 * send (and GPADL teardown when present). The host may still touch
+	 * the PFNs until destroy-allocation is delivered. Uncertain ownership
+	 * keeps the pages pinned.
+	 */
 	if (!preserve_gpadl_pages) {
 		if (alloc->gpadl.addr) {
 			vunmap(alloc->gpadl.addr);
 			alloc->gpadl.addr = NULL;
 		}
-		dxgallocation_stop(alloc);
+		dxgallocation_release_pins(alloc);
 	} else {
 		DXG_ERR("Leaking GPADL mapping and pinned pages after uncertain teardown");
 	}
