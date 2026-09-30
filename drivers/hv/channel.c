@@ -55,6 +55,11 @@ static int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
 				  vmbus_gpadl_info_alloc_fn alloc_info);
 static bool vmbus_buffer_pages_busy(struct vmbus_buffer_retained *owner);
 static void vmbus_buffer_reclaim_work(struct work_struct *work);
+/*
+ * Free the backing memory of a retained owner. The caller must hold
+ * vmbus_retained_buffers_lock so the page-busy check and the free cannot
+ * interleave with a concurrent reclaimer pass.
+ */
 static bool __vmbus_free_buffer_mem(struct vmbus_buffer_retained *owner,
 				    void *addr, struct page **chunks,
 				    u32 chunk_cnt, struct page *unknown_page,
@@ -260,15 +265,22 @@ err_unlock:
 	return NULL;
 }
 
-static void vmbus_buffer_retain_owner(struct vmbus_buffer_retained *owner)
+/* Caller must hold vmbus_retained_buffers_lock. */
+static void
+vmbus_buffer_retain_owner_locked(struct vmbus_buffer_retained *owner)
 {
-	mutex_lock(&vmbus_retained_buffers_lock);
 	if (list_empty(&owner->list))
 		list_add_tail(&owner->list, &vmbus_retained_buffers);
 	if (!vmbus_buffer_reclaimer_stopping && vmbus_buffer_reclaim_wq &&
 	    vmbus_buffer_owner_can_reclaim(owner))
 		mod_delayed_work(vmbus_buffer_reclaim_wq,
 				 &owner->reclaim_work, 1);
+}
+
+static void vmbus_buffer_retain_owner(struct vmbus_buffer_retained *owner)
+{
+	mutex_lock(&vmbus_retained_buffers_lock);
+	vmbus_buffer_retain_owner_locked(owner);
 	mutex_unlock(&vmbus_retained_buffers_lock);
 }
 
@@ -330,14 +342,16 @@ static void vmbus_buffer_reclaim_work(struct work_struct *work)
 		return;
 	}
 
+	/*
+	 * Keep the lock across the free so a new mapping cannot take page
+	 * references between the busy check and the release. The barrier
+	 * orders that check against the stores inside the free.
+	 */
 	owner->reclaiming = true;
-	mutex_unlock(&vmbus_retained_buffers_lock);
-
+	smp_mb(); /* pairs with mmap page-ref takes */
 	retained = __vmbus_free_buffer_mem(owner, owner->addr, owner->chunks,
 					   owner->chunk_cnt, NULL,
 					   set_memory_encrypted);
-
-	mutex_lock(&vmbus_retained_buffers_lock);
 	owner->reclaiming = false;
 	if (retained) {
 		if (!vmbus_buffer_reclaimer_stopping &&
@@ -937,6 +951,8 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
  * @chunk_cnt: number of entries in @chunks
  * @unknown_page: chunk whose encryption transition failed and is unknown
  *
+ * Caller must hold vmbus_retained_buffers_lock.
+ *
  * When @chunks is NULL the buffer is a plain vzalloc() allocation.
  *
  * Otherwise tear down the vmap, and for each chunk re-encrypt and free
@@ -960,7 +976,7 @@ static bool __vmbus_free_buffer_mem(struct vmbus_buffer_retained *owner,
 		if (vmbus_buffer_pages_busy(owner)) {
 			owner->gpadl_handle = 0;
 			owner->gpadl_state = VMBUS_GPADL_NONE;
-			vmbus_buffer_retain_owner(owner);
+			vmbus_buffer_retain_owner_locked(owner);
 			return true;
 		}
 
@@ -977,7 +993,7 @@ static bool __vmbus_free_buffer_mem(struct vmbus_buffer_retained *owner,
 	if (!unknown_page && chunk_cnt && vmbus_buffer_pages_busy(owner)) {
 		owner->gpadl_handle = 0;
 		owner->gpadl_state = VMBUS_GPADL_NONE;
-		vmbus_buffer_retain_owner(owner);
+		vmbus_buffer_retain_owner_locked(owner);
 		return true;
 	}
 
@@ -1003,7 +1019,7 @@ static bool __vmbus_free_buffer_mem(struct vmbus_buffer_retained *owner,
 		owner->leak = true;
 		owner->encryption_unknown = true;
 		owner->released = true;
-		vmbus_buffer_retain_owner(owner);
+		vmbus_buffer_retain_owner_locked(owner);
 		return true;
 	}
 
@@ -1027,6 +1043,7 @@ static void __vmbus_free_buffer(struct vmbus_buffer *buffer,
 {
 	struct vmbus_buffer_retained *owner = buffer->owner;
 	bool keep_pages = !vmbus_buffer_should_free(buffer);
+	struct page **pages;
 	bool retained;
 
 	if (!owner) {
@@ -1037,25 +1054,44 @@ static void __vmbus_free_buffer(struct vmbus_buffer *buffer,
 		return;
 	}
 
-	/* pages[] is just the ring page-pointer array, not the ring itself */
-	kvfree(buffer->pages);
+	/*
+	 * pages[] is just the ring page-pointer array, not the ring itself.
+	 * Drop the pointer under the retained-buffer lock before the array
+	 * is freed so a racing mmap that has not loaded it yet sees NULL
+	 * instead of a freed array. A reader that already loaded the pointer
+	 * is excluded by the ring-sysfs drain in vmbus_free_ring().
+	 */
+	pages = buffer->pages;
+	mutex_lock(&vmbus_retained_buffers_lock);
+	buffer->pages = NULL;
+	mutex_unlock(&vmbus_retained_buffers_lock);
 
 	if (keep_pages) {
-		if (!vmbus_buffer_retain(buffer))
+		if (!vmbus_buffer_retain(buffer)) {
+			kvfree(pages);
 			return;
-		memset(buffer, 0, sizeof(*buffer));
+		}
+		kvfree(pages);
 		return;
 	}
 
+	mutex_lock(&vmbus_retained_buffers_lock);
+	/*
+	 * Pair with the reclaimer busy check: the free must not interleave
+	 * with a new mapping taking page references after that check.
+	 */
+	smp_mb(); /* pairs with mmap page-ref takes */
 	owner->released = true;
 	retained = __vmbus_free_buffer_mem(owner, buffer->addr,
 					   buffer->chunks,
 					   buffer->chunk_cnt, NULL,
 					   reencrypt);
+	mutex_unlock(&vmbus_retained_buffers_lock);
 	if (!retained)
 		kfree(owner);
 
 	memset(buffer, 0, sizeof(*buffer));
+	kvfree(pages);
 }
 
 void vmbus_free_buffer(struct vmbus_buffer *buffer)
@@ -1339,8 +1375,10 @@ static void vmbus_buffer_reencrypt_failure_retains_test(struct kunit *test)
 	page = alloc_page(GFP_KERNEL | __GFP_COMP);
 	KUNIT_ASSERT_NOT_NULL(test, page);
 	chunks[0] = page;
+	mutex_lock(&vmbus_retained_buffers_lock);
 	retained = __vmbus_free_buffer_mem(owner, NULL, chunks, 1, NULL,
 					   vmbus_test_reencrypt_fail);
+	mutex_unlock(&vmbus_retained_buffers_lock);
 
 	KUNIT_EXPECT_TRUE(test, retained);
 	KUNIT_EXPECT_TRUE(test, owner->encryption_unknown);
@@ -1368,8 +1406,10 @@ static void vmbus_buffer_mapping_ref_defers_reencrypt_test(struct kunit *test)
 	get_page(page);
 
 	vmbus_test_reencrypt_calls = 0;
+	mutex_lock(&vmbus_retained_buffers_lock);
 	retained = __vmbus_free_buffer_mem(owner, NULL, chunks, 1, NULL,
 					   vmbus_test_reencrypt_ok);
+	mutex_unlock(&vmbus_retained_buffers_lock);
 	KUNIT_EXPECT_TRUE(test, retained);
 	KUNIT_EXPECT_EQ(test, vmbus_test_reencrypt_calls, 0U);
 
@@ -1377,9 +1417,11 @@ static void vmbus_buffer_mapping_ref_defers_reencrypt_test(struct kunit *test)
 		KUNIT_EXPECT_PTR_EQ(test, owner->chunks[0], page);
 		KUNIT_EXPECT_EQ(test, owner->chunk_cnt, 1U);
 		put_page(page);
+		mutex_lock(&vmbus_retained_buffers_lock);
 		retained = __vmbus_free_buffer_mem(owner, NULL, owner->chunks,
 						   owner->chunk_cnt, NULL,
 						   vmbus_test_reencrypt_ok);
+		mutex_unlock(&vmbus_retained_buffers_lock);
 		KUNIT_EXPECT_FALSE(test, retained);
 		KUNIT_EXPECT_EQ(test, vmbus_test_reencrypt_calls, 1U);
 		owner->chunks = NULL;
@@ -1406,17 +1448,61 @@ static void vmbus_vmalloc_mapping_ref_defers_free_test(struct kunit *test)
 	get_page(page);
 	owner->size = PAGE_SIZE;
 
+	mutex_lock(&vmbus_retained_buffers_lock);
 	retained = __vmbus_free_buffer_mem(owner, addr, NULL, 0, NULL,
 					   vmbus_test_reencrypt_ok);
+	mutex_unlock(&vmbus_retained_buffers_lock);
 	KUNIT_ASSERT_TRUE(test, retained);
 	KUNIT_EXPECT_PTR_EQ(test, owner->addr, addr);
 	put_page(page);
 
+	mutex_lock(&vmbus_retained_buffers_lock);
 	retained = __vmbus_free_buffer_mem(owner, owner->addr, NULL, 0, NULL,
 					   vmbus_test_reencrypt_ok);
+	mutex_unlock(&vmbus_retained_buffers_lock);
 	KUNIT_EXPECT_FALSE(test, retained);
 	owner->addr = NULL;
 	vmbus_test_drop_retained(owner);
+}
+
+static void vmbus_reclaim_busy_ref_defers_free_test(struct kunit *test)
+{
+	struct vmbus_buffer_retained *owner;
+	struct page *page;
+	void *addr;
+	unsigned int before;
+
+	owner = vmbus_buffer_owner_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, owner);
+	addr = vzalloc(PAGE_SIZE);
+	KUNIT_ASSERT_NOT_NULL(test, addr);
+	page = vmalloc_to_page(addr);
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	get_page(page);
+	owner->addr = addr;
+	owner->size = PAGE_SIZE;
+	owner->released = true;
+
+	before = vmbus_test_retained_count();
+	vmbus_buffer_retain_owner(owner);
+	cancel_delayed_work_sync(&owner->reclaim_work);
+	KUNIT_EXPECT_EQ(test, vmbus_test_retained_count(), before + 1);
+
+	*(char *)addr = 0x5a;
+	vmbus_buffer_reclaim_work(&owner->reclaim_work.work);
+	KUNIT_EXPECT_PTR_EQ(test, owner->addr, addr);
+	KUNIT_EXPECT_EQ(test, *(char *)addr, 0x5a);
+	KUNIT_EXPECT_EQ(test, vmbus_test_retained_count(), before + 1);
+
+	cancel_delayed_work_sync(&owner->reclaim_work);
+	put_page(page);
+
+	/*
+	 * With the mapping-style ref gone the reclaimer frees the pages and
+	 * drops the owner. Do not touch owner after this call.
+	 */
+	vmbus_buffer_reclaim_work(&owner->reclaim_work.work);
+	KUNIT_EXPECT_EQ(test, vmbus_test_retained_count(), before);
 }
 
 static void vmbus_buffer_cleanup_repeated_test(struct kunit *test)
@@ -1474,6 +1560,7 @@ static struct kunit_case vmbus_gpadl_lifetime_test_cases[] = {
 	KUNIT_CASE(vmbus_buffer_reencrypt_failure_retains_test),
 	KUNIT_CASE(vmbus_buffer_mapping_ref_defers_reencrypt_test),
 	KUNIT_CASE(vmbus_vmalloc_mapping_ref_defers_free_test),
+	KUNIT_CASE(vmbus_reclaim_busy_ref_defers_free_test),
 	KUNIT_CASE(vmbus_buffer_cleanup_repeated_test),
 	{}
 };
@@ -1619,10 +1706,12 @@ int vmbus_alloc_buffer(struct vmbus_channel *channel,
 
 err:
 	kvfree(pages);
+	mutex_lock(&vmbus_retained_buffers_lock);
 	owner->released = true;
 	if (!__vmbus_free_buffer_mem(owner, NULL, chunks, chunk_cnt,
 				     unknown_page, set_memory_encrypted))
 		kfree(owner);
+	mutex_unlock(&vmbus_retained_buffers_lock);
 	memset(buffer, 0, sizeof(*buffer));
 	return -ENOMEM;
 }
