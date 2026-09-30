@@ -4,7 +4,7 @@
 Static negative proof: the guest-fatal pattern Michael Kelley named
 (set_memory_decrypted() on a vmalloc()/vmap() virtual range) has no code path
 in any allocation this series introduces. Run against the candidate tree after
-all seven patches are applied.
+all six patches are applied.
 
   python3 coco-static-invariants.py --tree <linux-tree>
 
@@ -418,7 +418,7 @@ def main() -> int:
     parser.add_argument(
         "--tree",
         required=True,
-        help="candidate kernel tree with all seven patches applied",
+        help="candidate kernel tree with all six patches applied",
     )
     args = parser.parse_args()
     tree = Path(args.tree)
