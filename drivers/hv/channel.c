@@ -1071,6 +1071,13 @@ static void __vmbus_free_buffer(struct vmbus_buffer *buffer,
 			kvfree(pages);
 			return;
 		}
+		/*
+		 * vmbus_buffer_retain() copied the record and dropped
+		 * buffer->owner, but addr/chunks/chunk_cnt are still set.
+		 * Clear them so a repeated free takes the !owner no-op
+		 * instead of WARN_ON_ONCE().
+		 */
+		memset(buffer, 0, sizeof(*buffer));
 		kvfree(pages);
 		return;
 	}
