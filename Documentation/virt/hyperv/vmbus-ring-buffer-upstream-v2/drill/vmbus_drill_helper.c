@@ -438,7 +438,7 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_PCP_SOAK_CHUNKS 4
 #define FRAG_RESERVE_CHUNK (2L * 1024 * 1024)
 #define FRAG_RESERVE_CHUNKS 8
-#define FRAG_ORDER2_GROUPS 32
+#define FRAG_ORDER2_GROUPS 512
 
 /*
  * Punching one hole per freed page needs one VMA per surviving run, which is
@@ -1386,11 +1386,17 @@ static int do_fragment_buddy(int argc, char **argv)
 				off += 4 * FRAG_PAGE;
 				continue;
 			}
-			for (j = 0; j < 4; j++) {
-				if (munmap(m + off + j * FRAG_PAGE,
-					   (size_t)FRAG_PAGE) == 0)
-					order2_pages++;
-			}
+			/*
+			 * One munmap of the whole 16 KiB run, not four of one page.
+			 * Four single-page frees land on the per-cpu list as order-0
+			 * and never reach the buddy as an order-2 block, so the
+			 * shell's next fork -- copy_process wants THREAD_SIZE_ORDER,
+			 * an order-2 page -- found 0*16kB free with 12.6 MB of
+			 * order-0 crumbs and panicked the guest on "System is
+			 * deadlocked on memory" (run 36934739215, both guests).
+			 */
+			if (munmap(m + off, (size_t)(4 * FRAG_PAGE)) == 0)
+				order2_pages += 4;
 			order2_groups++;
 			off += 8 * FRAG_PAGE;
 		}
@@ -1404,11 +1410,11 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * order 7 or above. It is not "the loop stopped", which is true of
 	 * every floor and every refusal as well.
 	 */
-	printf("FRAGMENT_BUDDY ready=1 chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 stop=%s high_order_7plus=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld\n",
+	printf("FRAGMENT_BUDDY ready=1 chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 stacks=%ld stop=%s high_order_7plus=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld\n",
 	       got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages, freed_pages,
 	       locked, pairs, want, FRAG_HOLE_CAP, chase, chase_holes,
 	       chase_pairs, unsplit_at_stop, high_after == 0 ? 1L : 0L,
-	       stop_reason, high_before, high_locked, high_after,
+	       order2_groups, stop_reason, high_before, high_locked, high_after,
 	       floor_kb, wmark_kb, free_kb);
 	fflush(stdout);
 

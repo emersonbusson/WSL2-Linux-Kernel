@@ -68,7 +68,16 @@ guard() {
 }
 guard
 
-say() { echo "$@" | tee -a "$LOG"; }
+# Builtins only. After the pattern is built the buddy has no order-2 block
+# left for a shell stack -- copy_process wants THREAD_SIZE_ORDER=2 on this
+# x86_64 drill kernel -- and a `echo | tee` here is exactly the fork that
+# panicked the guest on run 36934739215 ("System is deadlocked on memory").
+# ash's echo is a builtin, so this writes the log and the console with zero
+# forks.
+say() {
+	printf '%s\n' "$*" >>"$LOG"
+	printf '%s\n' "$*"
+}
 
 hog_mib() {
 	local total
@@ -88,7 +97,18 @@ say "kernel=$(uname -r)"
 say "MemTotal=$(awk '/MemTotal/{print $2}' /proc/meminfo)kB MemAvailable=$(awk '/MemAvailable/{print $2}' /proc/meminfo)kB"
 
 # --- buddy state before ------------------------------------------------------
-buddy() { cat /proc/buddyinfo 2>/dev/null | tee -a "$LOG" || say "buddyinfo unavailable"; }
+buddy() {
+	# Same rule as say(): cat|tee forks at the one moment the shell can
+	# least afford it. read is a builtin.
+	if [ -r /proc/buddyinfo ]; then
+		while read -r _bline; do
+			printf '%s\n' "$_bline" >>"$LOG"
+			printf '%s\n' "$_bline"
+		done < /proc/buddyinfo
+	else
+		say "buddyinfo unavailable"
+	fi
+}
 
 say "--- BUDDY BEFORE ---"
 buddy
@@ -146,14 +166,26 @@ while [ "$FRAG_READY" = no ] && [ "$_ticks" -lt 180 ]; do
 	read -t 1 _junk 2>/dev/null || true
 	_ticks=$((_ticks + 1))
 done
-# The helper writes both the ready and the refusal lines to the log; echo the
-# decisive one to the console so the uploaded artifact carries it.
-# tail -8: the helper emits min_free_kbytes, start, allocated, chase and
-# ready=1, and every one of them is evidence. tail -3 dropped the
-# min_free read-back, which is exactly the line that shows whether the
-# watermark lever was actually pulled.
-grep 'FRAGMENT_BUDDY ' "$LOG" | tail -8 | tee -a "$LOG" || true
-FRAG_LINE="$(grep 'FRAGMENT_BUDDY ready=1' "$LOG" | tail -1 || true)"
+# The helper already wrote its lines to $LOG. Replay every FRAGMENT_BUDDY line
+# to the console so the uploaded artifact carries them, and capture the
+# decisive ready=1 line, with one builtin read pass. The old `grep | tail | tee`
+# was three forks in the window where the buddy holds no order-2 block: that
+# is what panicked run 36934739215. Replaying all of them (not just tail -8)
+# is a superset of the old evidence -- min_free_kbytes, start, allocated,
+# chase, order2_reserve and ready=1 all come through.
+FRAG_LINE=
+while read -r _line; do
+	case "$_line" in
+	*"FRAGMENT_BUDDY "*)
+		printf '%s\n' "$_line"
+		;;
+	esac
+	case "$_line" in
+	*"FRAGMENT_BUDDY ready="*)
+		FRAG_LINE="$_line"
+		;;
+	esac
+done < "$LOG" 2>/dev/null || true
 if [ "$FRAG_READY" != yes ]; then
 	say "FRAGMENT did not reach a ready state"
 elif [ -z "$FRAG_LINE" ]; then
