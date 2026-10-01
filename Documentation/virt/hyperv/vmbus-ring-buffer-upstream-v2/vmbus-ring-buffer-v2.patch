@@ -3902,9 +3902,9 @@ index 567679c..0f482ed 100644
 -- 
 2.43.0
 
-From 454a7302e9f32da6e4c088cad2b06943e727cc3b Mon Sep 17 00:00:00 2001
+From 987df48adae536caa87142e2f5e10e7b525fd41f Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Thu, 1 Oct 2026 17:07:19 -0300
+Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 7/7] hv: vmbus: allocate the requestor array with
  kvcalloc()
 
@@ -3954,10 +3954,10 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  1 file changed, 11 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7bb67c1f7812..cae7b9c3c690 100644
+index ffb3ead..b53e2ae 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -1729,6 +1729,14 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
+@@ -1738,6 +1738,14 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
   * keeps track of the next available slot in the array. Initially, each
   * slot points to the next one (as in a Linked List). The last slot
   * does not point to anything, so its value is U64_MAX by default.
@@ -3969,10 +3969,10 @@ index 7bb67c1f7812..cae7b9c3c690 100644
 + * is guest-private request bookkeeping -- the host never sees the slot
 + * values -- so a vmalloc-backed mapping carries no Confidential
 + * Computing implication and needs no set_memory_decrypted().
-  * @size The size of the array
+  * @size: The size of the array
   */
  static u64 *request_arr_init(u32 size)
-@@ -1736,7 +1744,7 @@ static u64 *request_arr_init(u32 size)
+@@ -1745,7 +1753,7 @@ static u64 *request_arr_init(u32 size)
  	int i;
  	u64 *req_arr;
  
@@ -3981,7 +3981,7 @@ index 7bb67c1f7812..cae7b9c3c690 100644
  	if (!req_arr)
  		return NULL;
  
-@@ -1765,7 +1773,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1774,7 +1782,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  
  	bitmap = bitmap_zalloc(size, GFP_KERNEL);
  	if (!bitmap) {
@@ -3990,7 +3990,7 @@ index 7bb67c1f7812..cae7b9c3c690 100644
  		return -ENOMEM;
  	}
  
-@@ -1784,7 +1792,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1793,7 +1801,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
   */
  static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
  {
