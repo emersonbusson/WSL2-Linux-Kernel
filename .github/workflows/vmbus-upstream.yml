@@ -220,7 +220,7 @@ jobs:
           # The 0000- cover letter ships in the same directory for git
           # send-email, but it is mail prose, not a diff, and git apply
           # rejects it with "No valid patches in input". SHA256SUMS pins only
-          # 0001-0006, so the byte-pin above passes and the glob still reaches
+          # 0001-0007, so the byte-pin above passes and the glob still reaches
           # it. Count the patches applied, not the files in the directory.
           stage=0
           for patch in "$PATCH_DIR"/*.patch; do
@@ -243,7 +243,7 @@ jobs:
           ! grep -q 'C=2 specified, but sparse is not available or not up to date' \
             "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
           done
-          test "$stage" -eq 6
+          test "$stage" -eq 7
           for symbol in \
             vmbus_alloc_buffer \
             vmbus_free_buffer \

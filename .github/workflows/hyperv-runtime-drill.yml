@@ -1,6 +1,6 @@
 name: Hyper-V runtime drill
 
-# Boots the exact six-patch candidate as a disposable Gen2 Hyper-V guest and
+# Boots the exact seven-patch candidate as a disposable Gen2 Hyper-V guest and
 # runs the GPADL/UIO lifecycle and order-zero fallback drills against those
 # bytes.
 #
@@ -100,7 +100,7 @@ jobs:
             | tee drill-artifacts/series-byte-pin.log
           sha256sum "$PATCH_DIR"/*.patch > drill-artifacts/series-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > drill-artifacts/series-commit-sha.txt
-          # Count the patches applied, not the files they touch: the six
+          # Count the patches applied, not the files they touch: the seven
           # patches span nine source files, so a file-count assertion is a
           # false negative on a perfectly good apply. The 0000- cover letter
           # ships in the same directory for git send-email, but it is mail
@@ -116,7 +116,7 @@ jobs:
           done
           git -C linux diff --check
           printf 'applied_stages=%s\n' "$stage" | tee drill-artifacts/applied-stages.txt
-          test "$stage" -eq 6
+          test "$stage" -eq 7
 
       - name: Build the self-booting drill kernel
         run: |

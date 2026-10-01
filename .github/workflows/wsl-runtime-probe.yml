@@ -265,7 +265,7 @@ jobs:
             'WSL2_RUNTIME_AVAILABLE' {
               $lines += 'A disposable WSL2 guest with real VMBus is reachable from a hosted'
               $lines += 'Windows runner. Runtime drills could run there, and every result'
-              $lines += 'MUST be labelled WSL-backport evidence only: the six-patch mainline'
+              $lines += 'MUST be labelled WSL-backport evidence only: the seven-patch mainline'
               $lines += 'series does not apply to the WSL 6.18 tree, and a stock WSL2 VM is'
               $lines += 'not a confidential guest, so COCO-1..5 remain open.'
             }
