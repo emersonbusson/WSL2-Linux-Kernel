@@ -126,16 +126,22 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   vmbus_alloc_buffer map set still returns to its exact baseline. No
   splat, fault, or accept4 failure appears on either guest.
 
-  Fragmentation resilience is not yet claimed. A buddy-fragmentation
-  drill on the same guest allocates until /proc/buddyinfo holds no free
+  Fragmentation resilience is measured on the same guest. The
+  buddy-fragmentation drill allocates until /proc/buddyinfo holds no free
   block of order 7 or above, then punches physical buddy holes whose
-  partners it keeps pinned, so nothing above order-0 can coalesce. It has
-  driven order-7 supply down to a single remaining block, but has not yet
-  produced a depleted buddy on a hosted guest, so ring allocation under a
-  fragmented allocator is still unmeasured here. Read the numbers above
-  as lifecycle, map-balance and hold-in-mmap evidence only. Details and
-  the limits of the evidence travel with the run record; a green drill
-  job is not by itself a gate closure.
+  partners it keeps pinned, so nothing above order-0 can coalesce. Both
+  hosted guests now reach a depleted buddy: exhausted=1 with
+  high_order_7plus_blocks=0 (windows-latest 500->26->0, windows-2025
+  497->26->0), pagemap=1, and order-2 reserve groups=32 pages=128 held
+  for the shell. Channel open under that pattern survives on both --
+  rebind yes, zero accept4 failures, zero oops -- and the ring-allocation
+  verdict is PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the
+  historical one, that channel open does not die under buddy
+  fragmentation. On an ordinary x86_64 guest vmbus_alloc_buffer() always
+  takes vzalloc(), so the chunked order-N -> order-0 degrade is not what
+  ran here; that path is covered by fault injection and stays open on CoCo
+  hardware. A green drill job is not by itself a gate closure -- the gate
+  is the RESULT, VERDICT and MMAP_HOLD lines in the guest console.
 
 What is not proven here
 -----------------------
