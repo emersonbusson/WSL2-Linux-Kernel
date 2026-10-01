@@ -148,12 +148,13 @@ fi
 if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	export NIC
 	echo "HYPERV_DRILL_PHASE name=fragmentation"
-	# MemTotal, not a share of MemAvailable: the helper treats this as a
-	# ceiling the allocation loop must never reach, and stops only when the
-	# kernel refuses. A 75% share stopped the loop with the untouched
-	# remainder still holding order-10 blocks, so order-7 never failed and
-	# the drill reported INCONCLUSIVE every run. MemTotal is above what the
-	# guest can allocate, so exhausted=1 and the high-order supply is real.
+	# MemTotal, not a share of what looks free: the helper treats this as a
+	# ceiling the allocation loop must never reach, and stops on the
+	# measured condition instead. A 75% share stopped the loop with the
+	# untouched remainder still holding order-10 blocks, so order-7 never
+	# failed and the drill reported INCONCLUSIVE every run. MemTotal is
+	# above what the guest can allocate, so the helper's own margin decides
+	# when to stop and its high-order count is the real one.
 	FRAG_HOG=$(awk '/MemTotal/{print int($2 / 1024)}' /proc/meminfo)
 	echo "HYPERV_DRILL_FRAGMENT hog_mib=${FRAG_HOG:-0}"
 	sh /scripts/vmbus-fragmentation-drill.sh "${FRAG_HOG:-512}" /var/tmp/fragment.log
