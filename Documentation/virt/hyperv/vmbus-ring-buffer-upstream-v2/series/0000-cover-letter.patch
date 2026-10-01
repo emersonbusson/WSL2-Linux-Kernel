@@ -106,10 +106,18 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   The exact pinned bytes boot as a Gen2 guest with the candidate symbols
   present. Across 30 hv_netvsc rebind cycles the vmbus_alloc_buffer map
   set returns to its exact baseline (12 maps / 20 279 296 bytes / 4 939
-  pages before and after), with zero splats and zero faults. Ring
-  allocation also survives an artificially fragmented buddy. Details
-  and the limits of that evidence travel with the run record; a green
-  drill job is not by itself a gate closure.
+  pages before and after), with zero splats and zero faults. A UIO device
+  mapping and the 2 MiB subchannel ring mapping both succeed and are held
+  alive while the channel is torn down, which is the mmap-versus-release
+  window.
+
+  The fragmentation-resilience claim is not yet made. The first two drills
+  left the buddy with order-7 supply still present (the pressure cap
+  stopped the allocation before order-7 was depleted), so ring allocation
+  under a genuinely depleted buddy has not been observed on these bytes.
+  That measurement is the remaining ordinary-guest gate. Details and the
+  limits of the evidence travel with the run record; a green drill job is
+  not by itself a gate closure.
 
 What is not proven here
 -----------------------
@@ -141,16 +149,16 @@ Emerson Busson (6):
   hv: vmbus: retain buffer ownership until GPADL and page state are
     resolved
 
- drivers/hv/channel.c            | 888 +++++++++++++++++++++++++++--------
- drivers/hv/channel_mgmt.c       |  36 +-
- drivers/hv/hyperv_vmbus.h       |   7 +-
- drivers/hv/ring_buffer.c        |   9 +-
- drivers/hv/vmbus_drv.c          |  14 +-
- drivers/net/hyperv/hyperv_net.h |  10 +-
- drivers/net/hyperv/netvsc.c     | 112 ++++++---
- drivers/uio/uio_hv_generic.c    | 458 ++++++++++++++++----
- include/linux/hyperv.h          |  52 +-
- 9 files changed, 1882 insertions(+), 488 deletions(-)
+ drivers/hv/channel.c            | 1463 +++++++++++++++++++++++++++++++++------
+ drivers/hv/channel_mgmt.c       |   36 +-
+ drivers/hv/hyperv_vmbus.h       |    7 +-
+ drivers/hv/ring_buffer.c        |    9 +-
+ drivers/hv/vmbus_drv.c          |   14 +-
+ drivers/net/hyperv/hyperv_net.h |   10 +-
+ drivers/net/hyperv/netvsc.c     |   56 +-
+ drivers/uio/uio_hv_generic.c    |  419 +++++++++--
+ include/linux/hyperv.h          |   48 +-
+ 9 files changed, 1728 insertions(+), 334 deletions(-)
 
 --
 2.43.0
