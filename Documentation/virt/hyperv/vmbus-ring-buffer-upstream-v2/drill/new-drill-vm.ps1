@@ -349,10 +349,68 @@ Write-Host '======== GUEST CONSOLE ========'
 Write-Host $console
 Write-Host '==============================='
 
-$resultLine = ($console -split "`n" | Where-Object { $_ -match 'HYPERV_DRILL_RESULT status=' } | Select-Object -Last 1)
+# Verdict parse. A serial write of the verdict can be split by printk on the
+# same port: run 36808657969 (windows-latest) captured
+#   HYPERV_DRILL_RESULT[17.508] sysrq: Power Off
+#    status=PARTIAL[17.512] ACPI: PM: Preparing to enter system sleep state S5
+# so no single line carried both tokens and a per-line match reported
+# NO_RESULT on a guest that had actually printed PARTIAL. The guest now emits
+# the status line three times and drains the UART before poweroff; this side
+# still prefers an intact line and only then rebuilds the verdict by stripping
+# printk insertions. The captured value is constrained to the verdict
+# vocabulary so a torn line can never be read as a status.
 $verdict = 'NO_RESULT'
-if ($resultLine -match 'HYPERV_DRILL_RESULT status=(\S+)') { $verdict = $Matches[1] }
+$verdict_source = 'intact_line'
+$resultLine = ($console -split "`n" |
+  Where-Object { $_ -match 'HYPERV_DRILL_RESULT status=' } |
+  Select-Object -Last 1)
+if ($resultLine -match 'HYPERV_DRILL_RESULT status=(PASS|PARTIAL|FAIL)') {
+  $verdict = $Matches[1]
+}
+else {
+  # Rebuild a verdict that printk split on the wire. Two kinds of insertion
+  # land mid-line: a timestamped chunk (`[17.508] sysrq: Power Off` plus its
+  # message up to end of line) and a bare poweroff printk with no timestamp
+  # (`reboot: Power down` in run 36808657969). Strip both from the middle of
+  # the stream -- the whole printk text, not just its timestamp -- then rejoin
+  # a token printk tore in half (`HYPERV_DRIL` + `L_RESULT`) and collapse the
+  # remaining whitespace so a verdict torn across two writes matches again.
+  # The capture is anchored on HYPERV_DRILL_RESULT and constrained to the
+  # verdict vocabulary, so the status= on the FRAGMENT and LIFECYCLE lines
+  # can never be read as the result. No trailing boundary on the value: the
+  # token rejoin above can leave the verdict glued to the next token
+  # (`PARTIALHYPERV_DRILL_DONE`), and nothing in this output ever uses a
+  # longer word that starts with PASS, PARTIAL or FAIL.
+  $flat = $console -replace '\[\s*\d+\.\d+\][^\r\n]*', ''
+  $flat = $flat -replace '(?:sysrq: Power[^\r\n]*|reboot: Power down[^\r\n]*|ACPI: PM:[^\r\n]*)', ''
+  $flat = $flat -replace '(?<=[A-Z_])\s+(?=[A-Z_])', ''
+  $flat = $flat -replace '\s+', ' '
+  $flatMatches = [regex]::Matches(
+    $flat, 'HYPERV_DRILL_RESULT\s+status=\s*(PASS|PARTIAL|FAIL)')
+  if ($flatMatches.Count -gt 0) {
+    $verdict = $flatMatches[$flatMatches.Count - 1].Groups[1].Value
+    $verdict_source = 'printk_stripped'
+    Note verdict_reconstructed printk_interleave
+  }
+}
+if ($verdict -eq 'NO_RESULT') {
+  $idx = $console.LastIndexOf('HYPERV_DRILL_RESULT')
+  if ($idx -ge 0) {
+    $tail = $console.Substring($idx, [Math]::Min(400, $console.Length - $idx))
+    if ($tail -match 'status=(PASS|PARTIAL|FAIL)') {
+      $verdict = $Matches[1]
+      $verdict_source = 'status_token_window'
+      Note verdict_reconstructed status_token_window
+    }
+    elseif ($tail -match '\b(PASS|PARTIAL|FAIL)\b') {
+      $verdict = $Matches[1]
+      $verdict_source = 'bare_token_window'
+      Note verdict_reconstructed bare_token_window
+    }
+  }
+}
 Note drill_result $verdict
+Note verdict_source $verdict_source
 Note console_bytes $console.Length
 
 # --- teardown ----------------------------------------------------------------

@@ -54,6 +54,33 @@ if [ -c /dev/ttyS0 ]; then
 	exec >/dev/ttyS0 2>/dev/ttyS0
 fi
 
+# Power off only after the serial port has drained what we already wrote.
+# echo's write(2) returns when the tty layer accepts the bytes, not when the
+# UART has shifted them out, and printk reaches the same port through a
+# different path. Triggering sysrq while verdict bytes are still in the FIFO
+# lets `sysrq: Power Off` land mid-line and split the one line the host
+# harness matches on: run 36808657969 (windows-latest) reported NO_RESULT
+# from a guest that had printed `HYPERV_DRILL_RESULT ... status=PARTIAL`.
+# Closing the userspace writer first means only printk can emit afterwards,
+# and the verdict is already complete and on the wire.
+drain_and_poweroff() {
+	exec >/dev/null 2>/dev/null
+	sleep 2
+	sync
+	echo o >/proc/sysrq-trigger 2>/dev/null
+	poweroff -f 2>/dev/null
+	reboot -f 2>/dev/null
+	exit 0
+}
+
+# The status line is short and repeated three times so a single printk
+# split cannot take every copy of the token the host greps for.
+emit_status() {
+	printf '%s\n' "HYPERV_DRILL_RESULT status=$1"
+	printf '%s\n' "HYPERV_DRILL_RESULT status=$1"
+	printf '%s\n' "HYPERV_DRILL_RESULT status=$1"
+}
+
 echo "HYPERV_DRILL_BOOT kernel=$(uname -r)"
 echo "HYPERV_DRILL_BOOT cmdline=$(tr -d '\n' </proc/cmdline)"
 
@@ -82,12 +109,10 @@ SYMS=$(grep -cE 'vmbus_(alloc|free|release)_buffer' /proc/kallsyms 2>/dev/null)
 echo "HYPERV_DRILL_SYMBOLS alloc=${SYMS:-0}"
 
 if [ "$VMBUS_PRESENT" != yes ] || [ "${VMBUS_DEVICES:-0}" -eq 0 ]; then
-	echo "HYPERV_DRILL_RESULT status=FAIL reason=no_vmbus"
+	emit_status FAIL
+	echo "HYPERV_DRILL_RESULT reason=no_vmbus"
 	echo "HYPERV_DRILL_DONE"
-	sync
-	echo o >/proc/sysrq-trigger 2>/dev/null
-	poweroff -f 2>/dev/null
-	exit 0
+	drain_and_poweroff
 fi
 
 # --- synthetic NIC discovery -------------------------------------------------
@@ -224,14 +249,10 @@ if [ "$LIFECYCLE_STATUS" = 1 ] || [ "$FRAG_STATUS" = 1 ]; then
 	SCOPE=drill-failed
 fi
 
-echo "HYPERV_DRILL_RESULT status=$RESULT"
+emit_status "$RESULT"
 echo "HYPERV_DRILL_RESULT lifecycle=$LIFECYCLE_STATUS fragment=$FRAG_STATUS splats=${SPLATS:-0} faults=${FAULTS:-0}"
 echo "HYPERV_DRILL_RESULT scope=$SCOPE"
 echo "HYPERV_DRILL_SCOPE note=no-co-co-hardware; co-co-chunked-fallback-not-exercised"
 echo "HYPERV_DRILL_DONE"
 
-sync
-echo o >/proc/sysrq-trigger 2>/dev/null
-poweroff -f 2>/dev/null
-reboot -f 2>/dev/null
-exit 0
+drain_and_poweroff
