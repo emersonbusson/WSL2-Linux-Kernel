@@ -217,8 +217,16 @@ jobs:
             | tee vmbus-artifacts/series-byte-pin.log
           sha256sum "$PATCH_DIR"/*.patch > vmbus-artifacts/series-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > vmbus-artifacts/series-commit-sha.txt
+          # The 0000- cover letter ships in the same directory for git
+          # send-email, but it is mail prose, not a diff, and git apply
+          # rejects it with "No valid patches in input". SHA256SUMS pins only
+          # 0001-0006, so the byte-pin above passes and the glob still reaches
+          # it. Count the patches applied, not the files in the directory.
           stage=0
           for patch in "$PATCH_DIR"/*.patch; do
+            case "$(basename "$patch")" in
+            0000-*) continue ;;
+            esac
             stage=$((stage + 1))
             git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
             git -C linux apply "$GITHUB_WORKSPACE/$patch"
