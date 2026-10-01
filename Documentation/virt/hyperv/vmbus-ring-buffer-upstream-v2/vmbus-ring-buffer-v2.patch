@@ -1,7 +1,7 @@
 From cc0910d7e7aec7f316227a6450826513ead7e971 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH v2 1/6] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 1/7] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy
@@ -796,7 +796,7 @@ index 9e109d9..567679c 100644
 From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/6] hv: vmbus: validate chunk buffer allocation and
+Subject: [PATCH v2 2/7] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated
@@ -1058,7 +1058,7 @@ index 87b806a..c47a923 100644
 From 574aca54bc6e46a34a86b83cb036c90698eb4c9a Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH v2 3/6] uio: hv_generic: allocate host-visible buffers through
+Subject: [PATCH v2 3/7] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
 Route generic VMBus UIO send and receive buffers through the VMBus
@@ -1197,7 +1197,7 @@ index b3f41ff..0d7a980 100644
 From c1bd2b6ebc43932cdad770e1f393f7e6833721b7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 4/6] hv: vmbus: add KUnit tests for GPADL post failure
+Subject: [PATCH v2 4/7] hv: vmbus: add KUnit tests for GPADL post failure
  injection
 
 Route GPADL message posting through a private callback so KUnit can inject
@@ -1622,7 +1622,7 @@ index c47a923..35bdc94 100644
 From 784ba79da9a83642c9b860043a743c15d7cf5443 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
-Subject: [PATCH v2 5/6] hv: vmbus: add KUnit test for order-zero allocation
+Subject: [PATCH v2 5/7] hv: vmbus: add KUnit test for order-zero allocation
  fallback
 
 Factor the order-descent allocation loop so KUnit can inject failures for
@@ -1793,7 +1793,7 @@ index 35bdc94..6b1e1fd 100644
 From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 6/6] hv: vmbus: retain buffer ownership until GPADL and
+Subject: [PATCH v2 6/7] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator
@@ -3902,3 +3902,100 @@ index 567679c..0f482ed 100644
 -- 
 2.43.0
 
+From 454a7302e9f32da6e4c088cad2b06943e727cc3b Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Thu, 1 Oct 2026 17:07:19 -0300
+Subject: [PATCH v2 7/7] hv: vmbus: allocate the requestor array with
+ kvcalloc()
+
+__vmbus_open() sizes the per-channel requestor array from the ring
+bytes. On netvsc that is netvsc_rqstor_size(), which at the default
+ring_size of 128 pages returns enough u64 slots for an array larger
+than 256 KiB. kcalloc() then hands the request to get_order(), which
+asks for an order-7 compound page.
+
+Under buddy fragmentation that allocation fails while plenty of
+virtual memory is free. The visible symptom is exactly the one this
+series is about: a dynamically instantiated sub-channel cannot open
+and the channel is dead for the life of the fragmentation. On a WSL2
+guest the failure prints as
+
+  kworker/...: page allocation failure: order:7, mode:0x40dc0(GFP_KERNEL|__GFP_ZERO|__GFP_COMP)
+  Workqueue: hv_sub_chan vmbus_add_channel_work
+  ? ___kmalloc_large_node
+  ? __kmalloc_noprof
+  ? __vmbus_open
+  hv_netvsc ... eth0: sub channel open failed: -12
+
+The rings themselves already come from vmbus_alloc_buffer() (patch
+1/7), so this is the remaining high-order allocation on the open
+path.
+
+The requestor array is guest-private bookkeeping: it stores request
+ids the guest hands out and never reaches the host, so it is not
+host-visible memory and needs no set_memory_decrypted(). A
+vmalloc-backed mapping therefore carries no Confidential Computing
+implication, unlike the rings. kvcalloc() is the zeroing counterpart
+of kcalloc() and kvcalloc/kvfree are already the pattern this tree
+uses for the chunk arrays in vmbus_alloc_buffer().
+
+Free side is kfree(rqstor->req_arr) and the error path in
+vmbus_alloc_requestor(); both must become kvfree() because the
+allocation may now come from vmalloc.
+
+Rollback trigger: revert this patch if a channel open under buddy
+fragmentation starts reporting -ENOMEM from vmbus_alloc_requestor()
+again, or if any path begins to treat req_arr as host-visible or
+direct-mapped memory.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 7bb67c1f7812..cae7b9c3c690 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -1729,6 +1729,14 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
+  * keeps track of the next available slot in the array. Initially, each
+  * slot points to the next one (as in a Linked List). The last slot
+  * does not point to anything, so its value is U64_MAX by default.
++ *
++ * Allocated with kvcalloc() rather than kcalloc(). @size is derived from
++ * the ring size (netvsc_rqstor_size()) and at the default ring_size of
++ * 128 pages the array exceeds 256 KiB, so kcalloc() asks for an order-7
++ * compound page and fails outright under buddy fragmentation. The array
++ * is guest-private request bookkeeping -- the host never sees the slot
++ * values -- so a vmalloc-backed mapping carries no Confidential
++ * Computing implication and needs no set_memory_decrypted().
+  * @size The size of the array
+  */
+ static u64 *request_arr_init(u32 size)
+@@ -1736,7 +1744,7 @@ static u64 *request_arr_init(u32 size)
+ 	int i;
+ 	u64 *req_arr;
+ 
+-	req_arr = kcalloc(size, sizeof(u64), GFP_KERNEL);
++	req_arr = kvcalloc(size, sizeof(u64), GFP_KERNEL);
+ 	if (!req_arr)
+ 		return NULL;
+ 
+@@ -1765,7 +1773,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+ 
+ 	bitmap = bitmap_zalloc(size, GFP_KERNEL);
+ 	if (!bitmap) {
+-		kfree(rqst_arr);
++		kvfree(rqst_arr);
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -1784,7 +1792,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+  */
+ static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
+ {
+-	kfree(rqstor->req_arr);
++	kvfree(rqstor->req_arr);
+ 	bitmap_free(rqstor->req_bitmap);
+ }
+ 

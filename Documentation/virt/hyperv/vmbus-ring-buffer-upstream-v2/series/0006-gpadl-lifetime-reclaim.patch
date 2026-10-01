@@ -1,7 +1,7 @@
 From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 6/6] hv: vmbus: retain buffer ownership until GPADL and
+Subject: [PATCH v2 6/7] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator

@@ -1,7 +1,7 @@
 From 784ba79da9a83642c9b860043a743c15d7cf5443 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
-Subject: [PATCH v2 5/6] hv: vmbus: add KUnit test for order-zero allocation
+Subject: [PATCH v2 5/7] hv: vmbus: add KUnit test for order-zero allocation
  fallback
 
 Factor the order-descent allocation loop so KUnit can inject failures for
