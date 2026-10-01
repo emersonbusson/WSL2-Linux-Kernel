@@ -1729,6 +1729,14 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
  * keeps track of the next available slot in the array. Initially, each
  * slot points to the next one (as in a Linked List). The last slot
  * does not point to anything, so its value is U64_MAX by default.
+ *
+ * Allocated with kvcalloc() rather than kcalloc(). @size is derived from
+ * the ring size (netvsc_rqstor_size()) and at the default ring_size of
+ * 128 pages the array exceeds 256 KiB, so kcalloc() asks for an order-7
+ * compound page and fails outright under buddy fragmentation. The array
+ * is guest-private request bookkeeping -- the host never sees the slot
+ * values -- so a vmalloc-backed mapping carries no Confidential
+ * Computing implication and needs no set_memory_decrypted().
  * @size The size of the array
  */
 static u64 *request_arr_init(u32 size)
@@ -1736,7 +1744,7 @@ static u64 *request_arr_init(u32 size)
 	int i;
 	u64 *req_arr;
 
-	req_arr = kcalloc(size, sizeof(u64), GFP_KERNEL);
+	req_arr = kvcalloc(size, sizeof(u64), GFP_KERNEL);
 	if (!req_arr)
 		return NULL;
 
@@ -1765,7 +1773,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
 
 	bitmap = bitmap_zalloc(size, GFP_KERNEL);
 	if (!bitmap) {
-		kfree(rqst_arr);
+		kvfree(rqst_arr);
 		return -ENOMEM;
 	}
 
@@ -1784,7 +1792,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  */
 static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
 {
-	kfree(rqstor->req_arr);
+	kvfree(rqstor->req_arr);
 	bitmap_free(rqstor->req_bitmap);
 }
 
