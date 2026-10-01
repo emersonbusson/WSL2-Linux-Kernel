@@ -109,16 +109,24 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   pages before and after), with zero splats and zero faults. That is the
   measured ordinary-guest evidence on these bytes.
 
-  Two further runtime claims are not yet made. The mmap-versus-release
-  window (a userspace mapping held open while the ring is freed) has been
-  prepared but not measured: the first hold-in-mmap attempt released the
-  mapping before teardown began. Fragmentation resilience has likewise
-  not been observed: the pressure cap left order-7 supply in place, so
-  ring allocation under a depleted buddy was never exercised. Both are
-  cheap on a real Hyper-V guest and are being measured now; until they
-  land, read the numbers above as lifecycle and map-balance evidence
-  only. Details and the limits of the evidence travel with the run
-  record; a green drill job is not by itself a gate closure.
+  The mmap-versus-release window is now measured. With a userspace
+  mapping held open across the teardown, the UIO device maps and the
+  2 MiB subchannel ring both stay alive while the ring is freed
+  (/dev/uio0 maps=5, sysfs ring maps=1, PHASE2 hold-in-mmap window
+  OPEN), 30 bind/unbind cycles complete with zero bind failures, and the
+  vmbus_alloc_buffer map set still returns to its exact baseline. No
+  splat, fault, or accept4 failure appears on either guest.
+
+  Fragmentation resilience is not yet claimed. A buddy-fragmentation
+  drill on the same guest allocates until /proc/buddyinfo holds no free
+  block of order 7 or above, then punches physical buddy holes whose
+  partners it keeps pinned, so nothing above order-0 can coalesce. It has
+  driven order-7 supply down to a single remaining block, but has not yet
+  produced a depleted buddy on a hosted guest, so ring allocation under a
+  fragmented allocator is still unmeasured here. Read the numbers above
+  as lifecycle, map-balance and hold-in-mmap evidence only. Details and
+  the limits of the evidence travel with the run record; a green drill
+  job is not by itself a gate closure.
 
 What is not proven here
 -----------------------
