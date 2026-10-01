@@ -132,8 +132,11 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   partners it keeps pinned, so nothing above order-0 can coalesce. Both
   hosted guests now reach a depleted buddy: exhausted=1 with
   high_order_7plus_blocks=0 (windows-latest 500->26->0, windows-2025
-  497->26->0), pagemap=1, and order-2 reserve groups=32 pages=128 held
-  for the shell. Channel open under that pattern survives on both --
+  502->26->0), pagemap=1, and an order-2 stack reserve the shell can
+  still fork from -- 512 groups / 2048 pages on windows-latest and 504
+  / 2016 on windows-2025, each group released as a single 16 KiB munmap
+  so it coalesces into a real order-2 buddy block rather than four
+  order-0 crumbs. Channel open under that pattern survives on both --
   rebind yes, zero accept4 failures, zero oops -- and the ring-allocation
   verdict is PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the
   historical one, that channel open does not die under buddy
