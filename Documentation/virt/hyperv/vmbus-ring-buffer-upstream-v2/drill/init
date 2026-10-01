@@ -194,7 +194,11 @@ fi
 if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	export NIC
 	echo "HYPERV_DRILL_PHASE name=lifecycle"
-	sh /scripts/vmbus-lifecycle-drill.sh 30 /var/tmp/lifecycle.log
+	# 100 cycles is the SPEC count (vmbus_channel_lifecycle_buffer_balance)
+	# and the PRD acceptance criterion: "100 normal channel open/close
+	# cycles leave no unexplained mapping growth". 30 measured that for a
+	# third of the required sample and cannot close the gate.
+	sh /scripts/vmbus-lifecycle-drill.sh 100 /var/tmp/lifecycle.log
 	LIFECYCLE_STATUS=$?
 	echo "HYPERV_DRILL_LIFECYCLE status=$LIFECYCLE_STATUS"
 	echo "HYPERV_DRILL_MAPS after_lifecycle $(vmbus_maps)"
