@@ -130,20 +130,21 @@ splat_count() {
 }
 
 # --- drills ------------------------------------------------------------------
+# Fragmentation runs FIRST. The BUG-3 hold-in-mmap in the lifecycle drill
+# leaves the synthetic NIC's channel in CHANNEL_OPENED_STATE: uio_hv_generic
+# disconnects the channel on the last close of /dev/uio0, but its .remove does
+# not, so unbinding the driver while a helper still holds that fd never calls
+# vmbus_disconnect_ring and __vmbus_open() then rejects the rebind with
+# -EINVAL. That is pre-existing upstream behaviour (drivers/uio/uio_hv_generic.c
+# is unchanged from the base at hv_uio_remove), and it is not a fragmentation
+# result -- run 36803317912 reproduced it on a healthy buddy at t=5.2s. Running
+# the channel-open exercise afterwards would therefore be measuring the UIO
+# lifecycle, not the ring allocation, and PASS_RING_ALLOCATION_UNDER_FRAGMENTATION
+# would be unreachable. Give the fragmentation drill a boot-clean NIC and let
+# the lifecycle drill consume the channel afterwards.
 HELPER=/bin/vmbus_drill_helper
 LIFECYCLE_STATUS=skipped
 FRAG_STATUS=skipped
-
-if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
-	export NIC
-	echo "HYPERV_DRILL_PHASE name=lifecycle"
-	sh /scripts/vmbus-lifecycle-drill.sh 30 /var/tmp/lifecycle.log
-	LIFECYCLE_STATUS=$?
-	echo "HYPERV_DRILL_LIFECYCLE status=$LIFECYCLE_STATUS"
-	echo "HYPERV_DRILL_MAPS after_lifecycle $(vmbus_maps)"
-else
-	echo "HYPERV_DRILL_LIFECYCLE status=skipped reason=${NIC:+no_helper}${NIC:-no_nic}"
-fi
 
 if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	export NIC
@@ -163,6 +164,17 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	echo "HYPERV_DRILL_MAPS after_fragment $(vmbus_maps)"
 else
 	echo "HYPERV_DRILL_FRAGMENT status=skipped reason=${NIC:+no_helper}${NIC:-no_nic}"
+fi
+
+if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
+	export NIC
+	echo "HYPERV_DRILL_PHASE name=lifecycle"
+	sh /scripts/vmbus-lifecycle-drill.sh 30 /var/tmp/lifecycle.log
+	LIFECYCLE_STATUS=$?
+	echo "HYPERV_DRILL_LIFECYCLE status=$LIFECYCLE_STATUS"
+	echo "HYPERV_DRILL_MAPS after_lifecycle $(vmbus_maps)"
+else
+	echo "HYPERV_DRILL_LIFECYCLE status=skipped reason=${NIC:+no_helper}${NIC:-no_nic}"
 fi
 
 # --- final scan --------------------------------------------------------------
