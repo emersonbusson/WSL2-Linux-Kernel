@@ -106,18 +106,19 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   The exact pinned bytes boot as a Gen2 guest with the candidate symbols
   present. Across 30 hv_netvsc rebind cycles the vmbus_alloc_buffer map
   set returns to its exact baseline (12 maps / 20 279 296 bytes / 4 939
-  pages before and after), with zero splats and zero faults. A UIO device
-  mapping and the 2 MiB subchannel ring mapping both succeed and are held
-  alive while the channel is torn down, which is the mmap-versus-release
-  window.
+  pages before and after), with zero splats and zero faults. That is the
+  measured ordinary-guest evidence on these bytes.
 
-  The fragmentation-resilience claim is not yet made. The first two drills
-  left the buddy with order-7 supply still present (the pressure cap
-  stopped the allocation before order-7 was depleted), so ring allocation
-  under a genuinely depleted buddy has not been observed on these bytes.
-  That measurement is the remaining ordinary-guest gate. Details and the
-  limits of the evidence travel with the run record; a green drill job is
-  not by itself a gate closure.
+  Two further runtime claims are not yet made. The mmap-versus-release
+  window (a userspace mapping held open while the ring is freed) has been
+  prepared but not measured: the first hold-in-mmap attempt released the
+  mapping before teardown began. Fragmentation resilience has likewise
+  not been observed: the pressure cap left order-7 supply in place, so
+  ring allocation under a depleted buddy was never exercised. Both are
+  cheap on a real Hyper-V guest and are being measured now; until they
+  land, read the numbers above as lifecycle and map-balance evidence
+  only. Details and the limits of the evidence travel with the run
+  record; a green drill job is not by itself a gate closure.
 
 What is not proven here
 -----------------------
