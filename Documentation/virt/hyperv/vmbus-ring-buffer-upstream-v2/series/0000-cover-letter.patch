@@ -277,11 +277,11 @@ vmbus_alloc_pages_with_fallback() and discloses the invariant in
 its commit message. 0001-0004 and 0006-0009 are byte-identical to
 what that pair executed.
 
-37022258445, 37022259049, 37025110180 and 37025110735 are the
-byte-exact pin for this revision. All four ran the nine patch
-files as they now read against series/SHA256SUMS on the pinned
-base. 37022258445 and 37025110180 applied all nine stages and
-passed 24 of 24 KUnit cases, including
+37022258445, 37022259049, 37025110180 and 37025110735 were the
+byte-exact pin for the previous revision of this series. All four
+ran the nine patch files as those files then read against
+series/SHA256SUMS on the pinned base. 37022258445 and 37025110180
+applied all nine stages and passed 24 of 24 KUnit cases, including
 vmbus_ring_fallback_order_zero_test and the four gpadl
 fault-injection cases. 37022259049 and 37025110735 booted those
 same bytes as a Gen2 guest on both hosted guests, and all four
@@ -290,8 +290,24 @@ scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation.
 Every leg exhausted order-7-plus supply to zero and then reopened
 the channel with order7_dmesg=0, accept4_failures=0, oops=0 and
 rebind=yes. Lifecycle ran 100 cycles with phase2=yes on all.
-Splats and faults are 0 on all. series/SHA256SUMS records the
-5/9 those four runs executed.
+Splats and faults are 0 on all.
+
+Those four runs are not a pin for the bytes posted here. After
+them, 6/9 through 9/9 changed and series/SHA256SUMS was
+regenerated. 6/9 restores the synchronous re-encryption in the
+compat vmbus_teardown_gpadl() the previous 6/9 had dropped, adds
+the vmbus_buffer_pin_pages() / vmbus_buffer_unpin_pages() pair
+and both hv_uio mmap call sites, drains owners that are ready to
+reclaim at shutdown instead of stranding them, frees an owner-less
+chunked buffer whose vmbus_buffer_should_free() is true, stops
+overwriting the real errno with -ENOMEM at the four
+vmbus_alloc_buffer_owned() failure sites, and names the reclaim
+schedule, retry and workqueue constants. The two KUnit tests that
+fed a NULL page array now allocate real pages, because pin
+dereferences the array. 1/9 through 5/9 are byte-identical to
+what those four runs executed. A fresh build + KUnit +
+both-drill-legs pair on the posted bytes is required before any
+measurement below is cited for them.
 
 One diff changed after the seven early drill runs named further
 below. 6/9 used to reformat the allocation-failure path in
@@ -310,13 +326,13 @@ drill runs on the same hosted guests -- 36949824155, 36951361583,
 36965808247 -- plus 36970357645, 36972315260 and 36975012655 on
 the corrected 6/9 bytes, and 36978224340 on the same diff hunks
 with the revised commit messages. 37022259049 and 37025110735
-are the drill runs that carried the current nine bytes, and
-37022258445 and 37025110180 the matching build and KUnit halves.
-The claims below are drawn from the eleven drill runs tabulated
-below -- twenty-two guest-runs -- and are what repeated across
-them, not what one run happened to show. The two drill runs that
-carried the current nine bytes, 37022259049 and 37025110735, are
-described with the pin above. One further passing drill run sits
+carried the previous nine bytes, and 37022258445 and 37025110180
+their matching build and KUnit halves; 6/9 through 9/9 have
+changed since. The claims below are drawn from the eleven drill
+runs tabulated below -- twenty-two guest-runs -- and are what
+repeated across them, not what one run happened to show. They are
+claims about the design those runs exercised, not measurements of
+the bytes posted here; see the pin note above. One further passing drill run sits
 outside both sets: 36967341916, which shares its bytes with
 36965808247. Two earlier runs on superseded byte snapshots are
 not passes and are not counted: 36956881309 stopped short on
