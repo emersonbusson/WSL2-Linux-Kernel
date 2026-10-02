@@ -101,15 +101,22 @@ What changed
   exhaustion when order zero also fails.
 
 - The previously exported allocator, free, GPADL establish, caller-
-  decrypted establish and teardown signatures are preserved. 0006
-  routes them to the descriptor-aware _owned entry points and keeps
-  the old prototypes as the external surface, so external consumers of
-  those symbols are unaffected. vmbus_alloc_buffer_owned(),
-  vmbus_establish_gpadl_owned() and vmbus_teardown_gpadl_owned() are
-  new, take a struct vmbus_buffer, and are what the in-tree migrated
-  callers use. vmbus_onmessage() gains a host_generated argument so
-  the message path can tell host revocation from local unload; it is
-  not an exported symbol.
+  decrypted establish and teardown signatures are preserved in the
+  merged tree, so external consumers of those symbols are unaffected.
+  There is one intermediate shape worth naming: 1/8 gives
+  vmbus_alloc_buffer() a bool confidential argument, because ring
+  buffers must be host-visible from channel->co_ring_buffer while
+  other buffers follow channel->co_external_memory, and the current
+  mainline function decides that internally. 6/8 folds that decision
+  into vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer()
+  to the exact four-argument prototype mainline has today.
+  vmbus_alloc_buffer_owned(), vmbus_establish_gpadl_owned(),
+  vmbus_teardown_gpadl_owned() and vmbus_release_buffer() are new
+  EXPORT_SYMBOL_GPL symbols and are what the in-tree migrated callers
+  use; they have to be exported because hv_netvsc and uio_hv_generic
+  are separate modules from hv_vmbus. vmbus_onmessage() gains a
+  host_generated argument so the message path can tell host
+  revocation from local unload; it is not an exported symbol.
 
 - The per-channel requestor array is allocated with kvcalloc() instead
   of kcalloc(). Its size follows the ring size, so at the default
@@ -186,10 +193,10 @@ Testing
 -------
 
 Every measurement below is from the eight-patch bytes. Build, apply and
-KUnit are run 36949824209. Runtime is three Hyper-V drill runs on the
-same hosted guests -- 36949824155, 36951361583 and 36952899809 -- so the
-claims below are what repeated across them, not what one run happened to
-show.
+KUnit are runs 36949824209 and 36954234370. Runtime is four Hyper-V
+drill runs on the same hosted guests -- 36949824155, 36951361583,
+36952899809 and 36954234419 -- so the claims below are what repeated
+across them, not what one run happened to show.
 
 Build and apply:
 
@@ -217,7 +224,7 @@ KUnit (hosted, no Hyper-V required):
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
   The exact pinned bytes boot as a Gen2 guest with the candidate symbols
-  present. The lifecycle half is what repeated. On all three runs, on
+  present. The lifecycle half is what repeated. On all four runs, on
   both guests, the vmbus_alloc_buffer map set returns to its exact
   baseline across 100 hv_netvsc rebind cycles: PHASE1-BEFORE and
   PHASE1-AFTER both read MAPS count=12 bytes=20279296 pages=4939, with
@@ -233,7 +240,7 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   OPEN) on every run and both guests, 100 bind/unbind cycles complete
   with zero bind failures (400 steps, cycle_fails=0), and the
   vmbus_alloc_buffer map set still returns to its exact baseline. No
-  splat, fault, or accept4 failure appears on any of the six
+  splat, fault, or accept4 failure appears on any of the eight
   guest-runs.
 
   Fragmentation depth is the part that does not repeat, and the letter
@@ -255,13 +262,17 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
                                       exhausted=1
                       windows-2025    high_order_7plus=499->26->1
                                       exhausted=0
+    run 36954234419   windows-latest  high_order_7plus=500->26->0
+                                      exhausted=1
+                      windows-2025    high_order_7plus=501->26->0
+                                      exhausted=1
 
-  So full order-7 depletion is reached in four of six guest-runs. The
+  So full order-7 depletion is reached in six of eight guest-runs. The
   drill reports INCONCLUSIVE_CAP_REACHED on the two that stop short,
   rather than claiming an exhaustion it did not measure.
 
   What does repeat is the claim the series is about: channel open
-  survives. On all six guest-runs the hv_netvsc rebind comes back
+  survives. On all eight guest-runs the hv_netvsc rebind comes back
   (nic_rebound=yes), with zero accept4 failures and zero oops, at every
   measured depth -- including the two that stopped with a single
   order-7 block still free. Where depletion was reached the verdict is
@@ -283,8 +294,8 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   console to a clone at exactly that moment. So the helper's
   groups=504 pages=2016 are a munmap tally, not forkable stacks, and
   buddy_order2= is reported from the buddy's own order-2-and-above
-  count for information -- it is 0, 5 or 286 depending on the run and
-  is not what the post-ready path trusts.
+  count for information -- it is 0, 5, 286 or 466 depending on the run
+  and is not what the post-ready path trusts.
 
   A green drill job is not by itself a gate closure -- the gate is the
   RESULT, VERDICT and MMAP_HOLD lines in the guest console.
