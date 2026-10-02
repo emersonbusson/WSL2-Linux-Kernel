@@ -7,6 +7,17 @@ Subject: [PATCH v2 3/8] uio: hv_generic: allocate host-visible buffers through
 Route generic VMBus UIO send and receive buffers through the VMBus
 allocator and release path so page and GPADL ownership stay together.
 
+The driver allocated the send and receive buffers itself and then
+established a GPADL over them. The pages and the GPADL had separate
+lifetimes, so a UIO mmap could hold pages whose GPADL was still being
+established, or whose GPADL had already been torn down. Both windows are
+host-visible: the host maps that GPADL.
+
+vmbus_alloc_buffer() and vmbus_establish_gpadl_caller_decrypted() keep
+the pages, the GPADL and the leak flags in one struct vmbus_buffer, and
+teardown takes that whole descriptor. A buffer whose GPADL outcome
+cannot be proven is retained rather than freed.
+
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/uio/uio_hv_generic.c | 74 ++++++++++++++++++------------------

@@ -53,10 +53,10 @@ tail would be an information leak.
 Free side is kfree(req) in put_rndis_request(); it must become kvfree()
 because the allocation may now come from vmalloc.
 
-Rollback trigger: revert this patch if rndis_set_subchannel() or
-netvsc_subchan_work() reports -ENOMEM from get_rndis_request() again,
-if a page-allocation-failure call trace reaches get_rndis_request, or
-if any path begins to treat the request descriptor as host-visible or
+Revert this patch if rndis_set_subchannel() or netvsc_subchan_work()
+reports -ENOMEM from get_rndis_request() again, if a
+page-allocation-failure call trace reaches get_rndis_request(), or if
+any path begins to treat the request descriptor as host-visible or
 direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>

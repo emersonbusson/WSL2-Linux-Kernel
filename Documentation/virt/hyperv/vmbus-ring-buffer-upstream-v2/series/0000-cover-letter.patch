@@ -17,6 +17,20 @@ He asked for the opposite structure: build on Kameron Carr's
 vmbus_alloc_buffer() (already upstream) rather than adding a second
 allocator path next to it. This series is that rewrite.
 
+References
+----------
+
+  Unversioned v1, sent 2026-09-17/18, Message-ID stem
+  20260918014017.2536753 (cover -1, patch 2/2 -3):
+    https://lists.openwall.net/linux-kernel/2026/09/18/276
+    https://lists.openwall.net/linux-kernel/2026/09/18/265
+
+  Kameron Carr's vmbus_alloc_buffer(), the allocator this series builds
+  on, Message-ID stem 2026081160447.2529876-1.
+
+  Michael Kelley's review of v1, 2026-09-22. It is the source of the
+  five points mapped below and of Suggested-by on 1/8 and 6/8.
+
 Problem
 -------
 
@@ -215,38 +229,52 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   Fragmentation resilience is measured on the same guests. The
   buddy-fragmentation drill allocates until /proc/buddyinfo holds no free
   block of order 7 or above, then punches physical buddy holes whose
-  partners it keeps pinned, so nothing above order-0 can coalesce. Both
-  hosted guests reach a depleted buddy: exhausted=1, pagemap=1, with
-  high_order_7plus=497->26->0 on windows-latest and 500->26->0 on
-  windows-2025. The drill's post-ready path is fork-free: after ready=1
-  every parse, every buddy and map count, and the channel rebind run on
-  shell builtins until the helper is torn down. That constraint is load
-  bearing -- a munmap of 16 KiB frees four order-0 pages into the
-  per-cpu page cache rather than one order-2 buddy block, and
-  drain_all_pages() never runs against a fully mlocked pattern -- so the
-  helper's 512 groups / 2048 pages (windows-latest) and 504 / 2016
-  (windows-2025) are a munmap tally, not forkable stacks. The ready=1
-  line reports the buddy's own order-2-and-above count as buddy_order2=
-  -- 0 on both guests -- which is what a clone would actually have
+  partners it keeps pinned, so nothing above order-0 can coalesce. On run
+  36949824155 both hosted guests reach a depleted buddy: exhausted=1,
+  pagemap=1, with high_order_7plus=497->26->0 on windows-latest and
+  500->26->0 on windows-2025. The drill's post-ready path is fork-free:
+  after ready=1 every parse, every buddy and map count, and the channel
+  rebind run on shell builtins until the helper is torn down. That
+  constraint is load-bearing -- a munmap of 16 KiB frees four order-0
+  pages into the per-cpu page cache rather than one order-2 buddy block,
+  and drain_all_pages() never runs against a fully mlocked pattern -- so
+  the helper's 512 groups / 2048 pages (windows-latest) and 504 / 2016
+  (windows-2025) are a munmap tally, not forkable stacks. The ready=1 line
+  reports the buddy's own order-2-and-above count as buddy_order2= -- 0 on
+  both guests on that run -- which is what a clone would actually have
   found. Channel open under that pattern survives on both -- rebind yes,
   zero accept4 failures, zero oops -- and the ring-allocation verdict is
-  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the historical
-  one, that channel open does not die under buddy fragmentation. On an
-  ordinary x86_64 guest vmbus_alloc_buffer() always takes vzalloc(), so
-  the chunked order-N -> order-0 degrade is not what ran here; that path
-  is covered by fault injection and stays open on CoCo hardware. A green
-  drill job is not by itself a gate closure -- the gate is the RESULT,
-  VERDICT and MMAP_HOLD lines in the guest console.
+  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the
+  historical one, that channel open does not die under buddy
+  fragmentation. On an ordinary x86_64 guest vmbus_alloc_buffer()
+  always takes vzalloc(), so the chunked order-N -> order-0 degrade
+  is not what ran here; that path is covered by fault injection and
+  stays open on CoCo hardware. A green drill job is not by itself a
+  gate closure -- the gate is the RESULT, VERDICT and MMAP_HOLD lines
+  in the guest console.
+
+  A follow-up run of the same code (36951361583) reproduced the
+  lifecycle evidence on both guests -- exact map return, cycle_fails=0
+  / 400 steps, LIFECYCLE_VERDICT=PASS -- but reached full order-7
+  depletion on only one of them. windows-2025 reported
+  high_order_7plus=495->26->0 and exhausted=1; windows-latest stopped at
+  the chase memory floor with high_order_7plus=497->28->1, and the drill
+  correctly reported the fragmentation phase INCONCLUSIVE_CAP_REACHED
+  instead of a PASS it had not measured. The depth of the pattern is
+  therefore not reproducible on every run. What is reproducible is that
+  channel open survives it, and that the drill refuses to claim
+  exhaustion it did not measure. That is why a green drill job is not
+  the gate.
 
   An earlier run against a build that still carried a second high-order
   allocation on the subchannel-open path -- the RNDIS request
   descriptor, fixed in 8/8 -- reached a buddy with buddy_order2=1 and
   died in netvsc_subchan_work -> get_rndis_request with "page
-  allocation failure: order:2" and an oom-kill of the drill shell. The
-  eight-patch run above reached a tighter buddy than that
-  (buddy_order2=0 on both guests) and the subchannel open survived:
-  nic_rebound=yes, accept4_failures=0, oops=0. That is the failure mode
-  0008 removes, shown absent on the bytes that remove it.
+  allocation failure: order:2" and an oom-kill of the drill shell. Run
+  36949824155 reached a tighter buddy than that (buddy_order2=0 on both
+  guests) and the subchannel open survived: nic_rebound=yes,
+  accept4_failures=0, oops=0. That is the failure mode 0008 removes,
+  shown absent on the bytes that remove it.
 
 What is not proven here
 -----------------------

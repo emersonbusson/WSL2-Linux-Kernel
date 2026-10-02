@@ -800,9 +800,27 @@ Subject: [PATCH v2 2/8] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated
-chunks when cleanup or GPADL teardown has an uncertain outcome. Add focused
-KUnit coverage for buffer sizing, ownership decisions, and the ring
-fallback order descent.
+chunks when cleanup or GPADL teardown has an uncertain outcome. Add
+focused KUnit coverage for buffer sizing, ownership decisions, and the
+ring fallback order descent.
+
+vmbus_alloc_buffer() rounds the requested size up to PAGE_SIZE before it
+computes nr_pages. A zero size, and a size within PAGE_SIZE of U32_MAX,
+both produce a rounded value that is wrong: zero allocates nothing, and
+the near-U32_MAX cases wrap to a small nr_pages, so a small chunk array
+is built for a buffer the host is told is large. Reject both before the
+rounded size is stored or used.
+
+vmbus_buffer_should_free() gathers the leak decision in one place. A
+cleanup whose GPADL create or teardown message may have reached the host
+cannot prove the host has released the pages. Handing those pages back
+to the allocator, or re-encrypting them, while the host may still map
+them is a use-after-free from the host's side and a Confidential
+Computing hazard. Such a buffer is marked leaked and its chunks are
+retained instead of freed.
+
+The new cases pin both rules, the partial-allocation rollback, and the
+order-descent fallback.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
@@ -1063,6 +1081,17 @@ Subject: [PATCH v2 3/8] uio: hv_generic: allocate host-visible buffers through
 
 Route generic VMBus UIO send and receive buffers through the VMBus
 allocator and release path so page and GPADL ownership stay together.
+
+The driver allocated the send and receive buffers itself and then
+established a GPADL over them. The pages and the GPADL had separate
+lifetimes, so a UIO mmap could hold pages whose GPADL was still being
+established, or whose GPADL had already been torn down. Both windows are
+host-visible: the host maps that GPADL.
+
+vmbus_alloc_buffer() and vmbus_establish_gpadl_caller_decrypted() keep
+the pages, the GPADL and the leak flags in one struct vmbus_buffer, and
+teardown takes that whole descriptor. A buffer whose GPADL outcome
+cannot be proven is retained rather than freed.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
@@ -3973,10 +4002,9 @@ Free side is kfree(rqstor->req_arr) and the error path in
 vmbus_alloc_requestor(); both must become kvfree() because the
 allocation may now come from vmalloc.
 
-Rollback trigger: revert this patch if a channel open under buddy
-fragmentation starts reporting -ENOMEM from vmbus_alloc_requestor()
-again, or if any path begins to treat req_arr as host-visible or
-direct-mapped memory.
+Revert this patch if a channel open under buddy fragmentation starts
+reporting -ENOMEM from vmbus_alloc_requestor() again, or if any path
+begins to treat req_arr as host-visible or direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
@@ -4084,10 +4112,10 @@ tail would be an information leak.
 Free side is kfree(req) in put_rndis_request(); it must become kvfree()
 because the allocation may now come from vmalloc.
 
-Rollback trigger: revert this patch if rndis_set_subchannel() or
-netvsc_subchan_work() reports -ENOMEM from get_rndis_request() again,
-if a page-allocation-failure call trace reaches get_rndis_request, or
-if any path begins to treat the request descriptor as host-visible or
+Revert this patch if rndis_set_subchannel() or netvsc_subchan_work()
+reports -ENOMEM from get_rndis_request() again, if a
+page-allocation-failure call trace reaches get_rndis_request(), or if
+any path begins to treat the request descriptor as host-visible or
 direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
