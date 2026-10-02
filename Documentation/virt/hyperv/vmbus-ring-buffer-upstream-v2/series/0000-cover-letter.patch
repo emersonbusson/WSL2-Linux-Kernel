@@ -85,6 +85,17 @@ What changed
   the window where a UIO mmap holds pages whose GPADL is still being
   established.
 
+- A UIO mmap races the reclaimer in the other direction: the page
+  array and the pages behind it can be freed between reading them and
+  building the mapping. That window is closed by a method rather than
+  by open-coded reference counting at each call site.
+  vmbus_buffer_pin_pages() snapshots the array and takes a reference
+  on every page under the owners lock, failing cleanly if reclaim has
+  already begun. vmbus_buffer_unpin_pages() drops the references once
+  the VMA holds its own. Both are exported, because hv_uio lives in a
+  separate module and both of its mmap paths -- the char-device map
+  and the sysfs ring map -- need them.
+
 - Size rounding is validated before it is stored, and a cleanup with an
   uncertain outcome preserves the allocated chunks instead of freeing
   them. A buffer whose GPADL or encryption state cannot be proven is
@@ -100,9 +111,17 @@ What changed
   zero and still exercise a real order-zero allocation, plus clean
   exhaustion when order zero also fails.
 
-- The previously exported allocator, free, GPADL establish, caller-
-  decrypted establish and teardown signatures are preserved in the
-  merged tree, so external consumers of those symbols are unaffected.
+- The five previously exported symbols keep their exact prototypes,
+  and the encryption contract each one has always carried. The compat
+  establish still decrypts a range whose caller did not prepare it.
+  The compat teardown re-encrypts that range before returning, because
+  its callers free the memory themselves as soon as it returns and
+  there is no owner left to defer the work to reclaim. The compat
+  alloc/free pair keeps the same per-chunk re-encryption in
+  vmbus_free_buffer(). What those adapters deliberately do not carry
+  is the retained-owner lifetime: each builds an owner and drops it
+  before returning, so the compat surface stays synchronous and
+  self-contained.
   There is one intermediate shape worth naming: 1/9 gives
   vmbus_alloc_buffer() a bool confidential argument. The mainline
   function decides host-visibility from channel->co_external_memory
@@ -165,7 +184,12 @@ What changed
   remove path that cancels the timer first. The shutdown walk cancels
   with the non-_sync variant under the owners lock, because reclaim
   work that is already running blocks on that same lock and
-  destroy_workqueue() waits for it afterwards.
+  destroy_workqueue() waits for it afterwards. An owner that is
+  already ready to reclaim is queued once more so the drain frees it
+  before the workqueue goes away, rather than stranding it. A mapping
+  that still holds its pages at that point cannot be freed safely, so
+  those pages are retained and flagged instead of dropped under a live
+  mapping.
 
 - HV_GPADL_BUFFER_DECRYPTED is gone. Once every caller goes through
   vmbus_alloc_buffer(), the distinction it carried is redundant.

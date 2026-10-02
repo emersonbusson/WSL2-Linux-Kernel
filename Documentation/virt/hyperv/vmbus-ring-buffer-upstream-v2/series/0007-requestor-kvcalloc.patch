@@ -1,4 +1,4 @@
-From 987df48adae536caa87142e2f5e10e7b525fd41f Mon Sep 17 00:00:00 2001
+From 8092a86442c06ea2e597089af9058940c623d505 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 7/9] hv: vmbus: allocate the requestor array with
@@ -52,10 +52,10 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  1 file changed, 11 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index ffb3ead..b53e2ae 100644
+index 41fabb6524ef..d0d8c4d51581 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -1738,6 +1738,14 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
+@@ -1880,6 +1880,14 @@ EXPORT_SYMBOL_GPL(vmbus_buffer_unpin_pages);
   * keeps track of the next available slot in the array. Initially, each
   * slot points to the next one (as in a Linked List). The last slot
   * does not point to anything, so its value is U64_MAX by default.
@@ -70,7 +70,7 @@ index ffb3ead..b53e2ae 100644
   * @size: The size of the array
   */
  static u64 *request_arr_init(u32 size)
-@@ -1745,7 +1753,7 @@ static u64 *request_arr_init(u32 size)
+@@ -1887,7 +1895,7 @@ static u64 *request_arr_init(u32 size)
  	int i;
  	u64 *req_arr;
  
@@ -79,7 +79,7 @@ index ffb3ead..b53e2ae 100644
  	if (!req_arr)
  		return NULL;
  
-@@ -1774,7 +1782,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1916,7 +1924,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  
  	bitmap = bitmap_zalloc(size, GFP_KERNEL);
  	if (!bitmap) {
@@ -88,7 +88,7 @@ index ffb3ead..b53e2ae 100644
  		return -ENOMEM;
  	}
  
-@@ -1793,7 +1801,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1935,7 +1943,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
   */
  static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
  {
@@ -97,3 +97,6 @@ index ffb3ead..b53e2ae 100644
  	bitmap_free(rqstor->req_bitmap);
  }
  
+-- 
+2.43.0
+

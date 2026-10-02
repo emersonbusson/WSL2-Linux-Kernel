@@ -1,8 +1,8 @@
-From fa043e12940bde9cc723949e88366ff082d3b4c8 Mon Sep 17 00:00:00 2001
+From 926c4f10aa17420a45803b7945dba423fe035ab1 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 01:18:44 -0300
-Subject: [PATCH v2 9/9] hv: netvsc: handle a NULL request address on
- empty completions
+Subject: [PATCH v2 9/9] hv: netvsc: handle a NULL request address on empty
+ completions
 
 netvsc_send_pkt() registers (ulong)skb as the VMBus request address.
 Control RNDIS sends carry no skb -- rndis_filter.c calls netvsc_send()
@@ -43,10 +43,10 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  1 file changed, 42 insertions(+), 19 deletions(-)
 
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 5cd084e..7049d68 100644
+index fd8aa7a3dcb3..8dca08cc96de 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
-@@ -774,6 +774,32 @@ static inline void netvsc_free_send_slot(struct netvsc_device *net_device,
+@@ -764,6 +764,32 @@ static inline void netvsc_free_send_slot(struct netvsc_device *net_device,
  	sync_change_bit(index, net_device->send_section_map);
  }
  
@@ -79,7 +79,7 @@ index 5cd084e..7049d68 100644
  static void netvsc_send_tx_complete(struct net_device *ndev,
  				    struct netvsc_device *net_device,
  				    struct vmbus_channel *channel,
-@@ -783,11 +809,10 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
+@@ -773,11 +799,10 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
  	struct net_device_context *ndev_ctx = netdev_priv(ndev);
  	struct sk_buff *skb;
  	u16 q_idx = 0;
@@ -92,7 +92,7 @@ index 5cd084e..7049d68 100644
  		netdev_err(ndev, "Invalid transaction ID %llx\n", desc->trans_id);
  		return;
  	}
-@@ -816,22 +841,7 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
+@@ -806,22 +831,7 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
  		napi_consume_skb(skb, budget);
  	}
  
@@ -116,7 +116,7 @@ index 5cd084e..7049d68 100644
  }
  
  static void netvsc_send_completion(struct net_device *ndev,
-@@ -850,11 +860,24 @@ static void netvsc_send_completion(struct net_device *ndev,
+@@ -840,11 +850,24 @@ static void netvsc_send_completion(struct net_device *ndev,
  	if (!msglen) {
  		cmd_rqst = incoming_channel->request_addr_callback(incoming_channel,
  								   desc->trans_id);

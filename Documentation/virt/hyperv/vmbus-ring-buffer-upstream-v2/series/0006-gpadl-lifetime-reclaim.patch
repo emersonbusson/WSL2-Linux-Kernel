@@ -1,4 +1,4 @@
-From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
+From 6c6cc9765e2236ec083545dedc4af59a72fdd2a1 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 14:35:00 -0300
 Subject: [PATCH v2 6/9] hv: vmbus: retain buffer ownership until GPADL and
@@ -37,31 +37,48 @@ disconnected VMBus message path frees its allocated context.
 
 In-tree migrated callers use descriptor-aware _owned entry points. The
 previously exported allocator, free, GPADL establish, caller-decrypted
-establish and teardown signatures are preserved through adapters, so
-external consumers are unaffected. This is also where
-vmbus_alloc_buffer() gets its four-argument prototype back: 1/9
-temporarily widened it with a bool confidential argument, which now
-lives only on vmbus_alloc_buffer_owned().
+establish and teardown signatures are preserved through adapters. The
+compat establish still decrypts a range whose owner did not, and the
+compat teardown re-encrypts that range before returning, exactly as
+this symbol always has: its callers free the memory themselves as soon
+as it returns, so there is no owner left to defer the work to reclaim.
+The owned path defers the same work through owner->raw_decrypted. This
+is also where vmbus_alloc_buffer() gets its four-argument prototype
+back: 1/9 temporarily widened it with a bool confidential argument,
+which now lives only on vmbus_alloc_buffer_owned().
+
+A UIO mmap races the reclaimer in the other direction. The page array
+and the pages behind it can be freed between reading them and building
+the mapping, so vmbus_buffer_pin_pages() snapshots the array and takes
+a reference on every page under the owners lock. The reclaimer already
+refuses to free a folio whose reference count is above one and refuses
+to begin once it has started reclaiming, so the references close the
+window without adding a second lifetime. vmbus_buffer_unpin_pages()
+drops them once the VMA holds its own.
 
 The reclaimer workqueue is torn down by cancelling every timer-pending
 delayed_work before destroy_workqueue(): drain_workqueue() only drains
-work that is queued or running, and a delayed_work still waiting on
-its timer is not on the workqueue yet. The shutdown walk uses
-cancel_delayed_work() rather than the _sync variant under the owners
-lock, because reclaim work that is already running blocks on that same
-lock and destroy_workqueue() waits for it afterwards.
+work that is queued or running, and a delayed_work still waiting on its
+timer is not on the workqueue yet. An owner that is already ready to
+reclaim is queued once more so that drain frees it before the
+workqueue goes away. The shutdown walk uses cancel_delayed_work()
+rather than the _sync variant under the owners lock, because reclaim
+work that is already running blocks on that same lock and
+destroy_workqueue() waits for it afterwards. A mapping that still holds
+pages at that point cannot be freed safely, so those pages are retained
+and flagged rather than dropped under a live mapping.
 
 The owner records two distinct encryption facts. needs_encrypt is set
 when the chunked allocator decrypted pages for a shared mapping and
 they must be re-encrypted before release; reclaim does that per chunk
 through page_address(), which is the direct map that
 set_memory_encrypted() requires. raw_decrypted covers the legacy
-whole-range case, where an external consumer established a GPADL over
-memory it decrypted itself and set gpadl.decrypted on the public
-struct vmbus_buffer. No in-tree caller takes that path today -- every
-in-tree establish passes memory_prepared=true -- but the struct is
-public and vmbus_release_buffer() is exported, so the field is part of
-the external surface and stays.
+whole-range case, where a consumer established a GPADL over memory it
+decrypted itself and set gpadl.decrypted on the public struct
+vmbus_buffer. No in-tree caller takes that path today -- every in-tree
+establish passes memory_prepared=true -- but the struct is public and
+vmbus_release_buffer() is exported, so the field is part of the
+external surface and stays.
 
 KUnit coverage exercises the reclaim gate, the reclaim schedule gate,
 host-revoke state, mapping references and repeated owner release.
@@ -69,20 +86,20 @@ host-revoke state, mapping references and repeated owner release.
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c         | 911 +++++++++++++++++++++++++++++--------
- drivers/hv/channel_mgmt.c    |  36 ++-
- drivers/hv/hyperv_vmbus.h    |   3 +
- drivers/hv/vmbus_drv.c       |  14 +-
- drivers/net/hyperv/netvsc.c  |  52 +--
- drivers/uio/uio_hv_generic.c | 384 ++++++++++++++--
- include/linux/hyperv.h       |  32 +-
- 7 files changed, 1166 insertions(+), 266 deletions(-)
+ drivers/hv/channel.c         | 1027 ++++++++++++++++++++++++++++------
+ drivers/hv/channel_mgmt.c    |   36 +-
+ drivers/hv/hyperv_vmbus.h    |    3 +
+ drivers/hv/vmbus_drv.c       |   14 +-
+ drivers/net/hyperv/netvsc.c  |   54 +-
+ drivers/uio/uio_hv_generic.c |  438 +++++++++++++--
+ include/linux/hyperv.h       |   37 +-
+ 7 files changed, 1347 insertions(+), 262 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 6b1e1fd..ffb3ead 100644
+index 1c0a834bb687..41fabb6524ef 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -24,19 +24,70 @@
+@@ -24,19 +24,87 @@
  #include <linux/set_memory.h>
  #include <linux/vmalloc.h>
  #include <linux/export.h>
@@ -120,6 +137,23 @@ index 6b1e1fd..ffb3ead 100644
 +static struct workqueue_struct *vmbus_buffer_reclaim_wq;
 +static bool vmbus_buffer_reclaimer_stopping;
 +
++/*
++ * Reclaim scheduling. VMBUS_BUFFER_RECLAIM_SCHEDULE_MS is the delay
++ * before the first reclaim attempt after ownership state changes;
++ * it is kept at one jiffy so a completed GPADL teardown frees the
++ * buffer promptly. VMBUS_BUFFER_RECLAIM_RETRY_MS is the steady-state
++ * retry while a guest mapping still holds the pages. The workqueue
++ * is unbound so reclaim never runs in the caller's context, and
++ * WQ_MEM_RECLAIM so the free path is not blocked by the very
++ * pressure it is relieving. max_active stays at one: re-encryption
++ * is serialized and the cost of a second concurrent worker is not
++ * worth the ordering questions it would raise.
++ */
++#define VMBUS_BUFFER_RECLAIM_SCHEDULE_MS	1
++#define VMBUS_BUFFER_RECLAIM_RETRY_MS		1000
++#define VMBUS_BUFFER_RECLAIM_WQ_FLAGS		(WQ_UNBOUND | WQ_MEM_RECLAIM)
++#define VMBUS_BUFFER_RECLAIM_WQ_MAX_ACTIVE	1
++
  static int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
 +static bool
 +vmbus_needs_shared_pages(bool hv_isolation, bool guest_mem_encrypted,
@@ -155,7 +189,7 @@ index 6b1e1fd..ffb3ead 100644
  static struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
  						    unsigned int *order,
  						    vmbus_alloc_pages_fn alloc,
-@@ -80,6 +131,25 @@ static void vmbus_buffer_size_overflow_test(struct kunit *test)
+@@ -80,6 +148,25 @@ static void vmbus_buffer_size_overflow_test(struct kunit *test)
  			(u32)(U32_MAX - PAGE_SIZE + 1));
  }
  
@@ -181,7 +215,7 @@ index 6b1e1fd..ffb3ead 100644
  static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
  {
  	unsigned int order;
-@@ -111,6 +181,91 @@ static void vmbus_buffer_failed_teardown_leaks_test(struct kunit *test)
+@@ -111,6 +198,91 @@ static void vmbus_buffer_failed_teardown_leaks_test(struct kunit *test)
  	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
  }
  
@@ -273,7 +307,7 @@ index 6b1e1fd..ffb3ead 100644
  static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
  {
  	struct page **chunks;
-@@ -118,7 +273,7 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
+@@ -118,7 +290,7 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
  
  	chunks = kmalloc_obj(*chunks, GFP_KERNEL);
  	KUNIT_ASSERT_NOT_NULL(test, chunks);
@@ -282,7 +316,7 @@ index 6b1e1fd..ffb3ead 100644
  
  	buffer.addr = vzalloc(PAGE_SIZE);
  	KUNIT_ASSERT_NOT_NULL(test, buffer.addr);
-@@ -127,6 +282,27 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
+@@ -127,6 +299,27 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
  	vmbus_release_buffer(&buffer);
  }
  
@@ -310,7 +344,7 @@ index 6b1e1fd..ffb3ead 100644
  struct vmbus_buffer_page_alloc_test_context {
  	struct kunit *test;
  	unsigned int attempts;
-@@ -336,7 +512,7 @@ static void vmbus_gpadl_response_state_test(struct kunit *test)
+@@ -336,7 +529,7 @@ static void vmbus_gpadl_response_state_test(struct kunit *test)
  	posted = true;
  	KUNIT_EXPECT_EQ(test,
  			vmbus_gpadl_response_status(0, true, &posted), -ENODEV);
@@ -319,7 +353,7 @@ index 6b1e1fd..ffb3ead 100644
  }
  
  static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
-@@ -362,9 +538,15 @@ static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
+@@ -362,9 +555,15 @@ static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
  static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_buffer_size_rounding_test),
  	KUNIT_CASE(vmbus_buffer_size_overflow_test),
@@ -335,7 +369,7 @@ index 6b1e1fd..ffb3ead 100644
  	KUNIT_CASE(vmbus_buffer_order_zero_allocation_test),
  	KUNIT_CASE(vmbus_gpadl_post_failure_test),
  	KUNIT_CASE(vmbus_gpadl_post_success_test),
-@@ -393,6 +575,13 @@ static int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
+@@ -393,6 +592,13 @@ static int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
  	return 0;
  }
  
@@ -349,7 +383,7 @@ index 6b1e1fd..ffb3ead 100644
  static unsigned int vmbus_buffer_order(unsigned long remaining,
  				       unsigned int max_order)
  {
-@@ -428,6 +617,246 @@ static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
+@@ -439,6 +645,272 @@ static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
  	       !buffer->gpadl.gpadl_handle;
  }
  
@@ -386,7 +420,7 @@ index 6b1e1fd..ffb3ead 100644
 +
 +	owner->work_active = true;
 +	mod_delayed_work(vmbus_buffer_reclaim_wq, &owner->reclaim_work,
-+			 msecs_to_jiffies(1));
++			 msecs_to_jiffies(VMBUS_BUFFER_RECLAIM_SCHEDULE_MS));
 +}
 +
 +static void
@@ -427,7 +461,8 @@ index 6b1e1fd..ffb3ead 100644
 +	if (!vmbus_buffer_reclaim_wq) {
 +		vmbus_buffer_reclaim_wq =
 +			alloc_workqueue("vmbus-buffer-reclaim",
-+					WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
++					VMBUS_BUFFER_RECLAIM_WQ_FLAGS,
++					VMBUS_BUFFER_RECLAIM_WQ_MAX_ACTIVE);
 +		if (!vmbus_buffer_reclaim_wq)
 +			goto err_unlock;
 +	}
@@ -485,21 +520,37 @@ index 6b1e1fd..ffb3ead 100644
 +	struct vmbus_buffer_retained *owner = container_of(to_delayed_work(work),
 +								   struct vmbus_buffer_retained,
 +								   reclaim_work);
-+	unsigned long delay = msecs_to_jiffies(1000);
++	unsigned long delay = msecs_to_jiffies(VMBUS_BUFFER_RECLAIM_RETRY_MS);
 +	u32 i;
 +	int ret = 0;
 +
 +	mutex_lock(&vmbus_buffer_owners_lock);
-+	if (vmbus_buffer_reclaimer_stopping ||
-+	    !vmbus_buffer_owner_can_reclaim(owner)) {
++	/*
++	 * A ready owner must still be reclaimable while the workqueue
++	 * is being destroyed: shutdown re-queues exactly those so they
++	 * drain before destroy_workqueue() returns. New work is never
++	 * scheduled past that point because
++	 * vmbus_buffer_owner_should_schedule() refuses once stopping.
++	 */
++	if (!vmbus_buffer_owner_can_reclaim(owner)) {
 +		owner->work_active = false;
 +		mutex_unlock(&vmbus_buffer_owners_lock);
 +		return;
 +	}
 +
 +	if (vmbus_buffer_pages_busy(owner)) {
-+		mod_delayed_work(vmbus_buffer_reclaim_wq,
-+				 &owner->reclaim_work, delay);
++		if (vmbus_buffer_reclaimer_stopping) {
++			/*
++			 * A guest mapping still holds these pages as the
++			 * workqueue goes away. Freeing them would be a
++			 * use-after-free, so retain and say so.
++			 */
++			owner->permanent_leak = true;
++			owner->work_active = false;
++		} else {
++			mod_delayed_work(vmbus_buffer_reclaim_wq,
++					 &owner->reclaim_work, delay);
++		}
 +		mutex_unlock(&vmbus_buffer_owners_lock);
 +		return;
 +	}
@@ -584,9 +635,18 @@ index 6b1e1fd..ffb3ead 100644
 +	 * cancel_delayed_work() rather than _sync: reclaim work that
 +	 * is already running blocks on this same lock, and
 +	 * destroy_workqueue() below waits for it to finish.
++	 *
++	 * An owner that is already ready to reclaim must not be lost
++	 * with its cancelled timer. Queue it once more so the drain
++	 * below frees its pages before the workqueue goes away.
 +	 */
-+	list_for_each_entry(owner, &vmbus_buffer_owners, list)
++	list_for_each_entry(owner, &vmbus_buffer_owners, list) {
 +		cancel_delayed_work(&owner->reclaim_work);
++		if (wq && vmbus_buffer_owner_can_reclaim(owner)) {
++			owner->work_active = true;
++			mod_delayed_work(wq, &owner->reclaim_work, 0);
++		}
++	}
 +	mutex_unlock(&vmbus_buffer_owners_lock);
 +
 +	if (wq)
@@ -596,7 +656,7 @@ index 6b1e1fd..ffb3ead 100644
  /*
   * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
   *
-@@ -572,30 +1001,20 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
+@@ -583,30 +1055,20 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
  {
  	struct vmbus_buffer *buffer = &newchannel->ringbuffer;
  	u32 size;
@@ -632,7 +692,7 @@ index 6b1e1fd..ffb3ead 100644
  
  	return 0;
  }
-@@ -895,12 +1314,15 @@ static int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
+@@ -906,12 +1368,15 @@ static int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
  static int vmbus_gpadl_response_status(u32 creation_status, bool rescind,
  				       bool *posted)
  {
@@ -650,7 +710,7 @@ index 6b1e1fd..ffb3ead 100644
  	return 0;
  }
  
-@@ -923,21 +1345,22 @@ static int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
+@@ -934,21 +1399,22 @@ static int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
  }
  
  static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
@@ -679,7 +739,7 @@ index 6b1e1fd..ffb3ead 100644
  	gpadl->leak = false;
  
  	next_gpadl_handle =
-@@ -965,6 +1388,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -976,6 +1442,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  			dev_warn(&channel->device_obj->device,
  				"Failed to set host visibility for new GPADL %d.\n",
  				ret);
@@ -689,7 +749,7 @@ index 6b1e1fd..ffb3ead 100644
  			vmbus_free_channel_msginfo(msginfo);
  			return ret;
  		}
-@@ -992,6 +1418,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -1003,6 +1472,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	ret = vmbus_post_gpadl_messages(msginfo, next_gpadl_handle, &posted,
  					vmbus_gpadl_post_real, NULL);
@@ -698,7 +758,7 @@ index 6b1e1fd..ffb3ead 100644
  	if (ret)
  		goto cleanup;
  
-@@ -1011,6 +1439,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -1022,6 +1493,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	gpadl->gpadl_handle = gpadlmsg->gpadl;
  	gpadl->buffer = kbuffer;
  	gpadl->size = size;
@@ -707,7 +767,7 @@ index 6b1e1fd..ffb3ead 100644
  
  cleanup:
  	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
-@@ -1019,115 +1449,110 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -1030,115 +1503,115 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	vmbus_free_channel_msginfo(msginfo);
  
@@ -856,10 +916,15 @@ index 6b1e1fd..ffb3ead 100644
 -			continue;
 -		__free_pages(chunks[i], order);
 +	if (!owner) {
-+		if (!buffer->chunks && vmbus_buffer_should_free(buffer))
-+			vfree(buffer->addr);
-+		else
++		if (vmbus_buffer_should_free(buffer)) {
++			if (buffer->chunks)
++				vmbus_free_buffer(buffer->addr, buffer->chunks,
++						  buffer->chunk_cnt);
++			else
++				vfree(buffer->addr);
++		} else {
 +			pr_warn_ratelimited("VMBus buffer has no ownership record; retaining backing pages\n");
++		}
 +		memset(buffer, 0, sizeof(*buffer));
 +		return;
  	}
@@ -867,11 +932,6 @@ index 6b1e1fd..ffb3ead 100644
 -	kvfree(chunks);
 -}
 -EXPORT_SYMBOL_GPL(vmbus_free_buffer);
--
--void vmbus_release_buffer(struct vmbus_buffer *buffer)
--{
--	if (!buffer->addr)
--		return;
 +	mutex_lock(&vmbus_buffer_owners_lock);
 +	owner->addr = buffer->addr;
 +	owner->chunks = buffer->chunks;
@@ -887,6 +947,11 @@ index 6b1e1fd..ffb3ead 100644
 +		owner->host_may_own = false;
 +	owner->released = true;
  
+-void vmbus_release_buffer(struct vmbus_buffer *buffer)
+-{
+-	if (!buffer->addr)
+-		return;
+-
 -	kvfree(buffer->pages);
 -	if (vmbus_buffer_should_free(buffer))
 -		vmbus_free_buffer(buffer->addr, buffer->chunks,
@@ -897,7 +962,7 @@ index 6b1e1fd..ffb3ead 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_release_buffer);
  
-@@ -1140,14 +1565,13 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+@@ -1151,14 +1624,13 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
  }
  
  /**
@@ -915,7 +980,7 @@ index 6b1e1fd..ffb3ead 100644
   *
   * Buffers not requiring decryption are allocated with vzalloc().
   *
-@@ -1157,46 +1581,67 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+@@ -1168,46 +1640,67 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
   * host-visible via set_memory_decrypted() on its direct-map address, then all
   * chunks are combined into a virtually-contiguous range via vmap().
   *
@@ -1004,7 +1069,7 @@ index 6b1e1fd..ffb3ead 100644
  		goto err;
  
  	while (remaining) {
-@@ -1222,6 +1667,11 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -1225,6 +1718,11 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  		if (!page)
  			goto err;
  
@@ -1016,7 +1081,7 @@ index 6b1e1fd..ffb3ead 100644
  		ret = set_memory_decrypted((unsigned long)page_address(page),
  					   1U << order);
  		if (ret) {
-@@ -1229,35 +1679,87 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -1232,35 +1730,151 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  			 * set_memory_decrypted() failed; the page state is
  			 * unknown so it must be leaked rather than freed.
  			 */
@@ -1117,10 +1182,74 @@ index 6b1e1fd..ffb3ead 100644
 +}
 +EXPORT_SYMBOL_GPL(vmbus_free_buffer);
 +
++/**
++ * vmbus_buffer_pin_pages - snapshot a buffer's pages and hold references
++ * @buffer: buffer whose pages the caller is about to map
++ * @pages: out parameter for the page array owned by @buffer
++ * @page_count: out parameter for the number of pages in @pages
++ *
++ * Take a reference on every page of @buffer and hand back the array
++ * that describes them. The references close the window between the
++ * snapshot and the point where a new mapping holds its own: the
++ * reclaim worker refuses to free pages whose folio reference count
++ * is above one, and refuses to start at all once it has begun
++ * reclaiming. Call vmbus_buffer_unpin_pages() after the mapping
++ * holds its own references.
++ *
++ * Return: 0 on success, -ENODEV if the pages are gone or reclaim
++ * has already taken ownership of them.
++ */
++int vmbus_buffer_pin_pages(struct vmbus_buffer *buffer, struct page ***pages,
++			   unsigned long *page_count)
++{
++	struct vmbus_buffer_retained *owner = buffer->owner;
++	u32 i;
++
++	if (!buffer->pages || !buffer->page_cnt)
++		return -ENODEV;
++
++	mutex_lock(&vmbus_buffer_owners_lock);
++	if (owner && (owner->reclaiming || owner->permanent_leak)) {
++		mutex_unlock(&vmbus_buffer_owners_lock);
++		return -ENODEV;
++	}
++
++	for (i = 0; i < buffer->page_cnt; i++) {
++		if (WARN_ON_ONCE(!buffer->pages[i])) {
++			while (i--)
++				put_page(buffer->pages[i]);
++			mutex_unlock(&vmbus_buffer_owners_lock);
++			return -ENODEV;
++		}
++		get_page(buffer->pages[i]);
++	}
++
++	*pages = buffer->pages;
++	*page_count = buffer->page_cnt;
++	mutex_unlock(&vmbus_buffer_owners_lock);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(vmbus_buffer_pin_pages);
++
++/**
++ * vmbus_buffer_unpin_pages - drop references taken by vmbus_buffer_pin_pages
++ * @pages: page array returned by vmbus_buffer_pin_pages
++ * @page_count: number of pages in @pages
++ */
++void vmbus_buffer_unpin_pages(struct page **pages, unsigned long page_count)
++{
++	unsigned long i;
++
++	for (i = 0; i < page_count; i++)
++		put_page(pages[i]);
++}
++EXPORT_SYMBOL_GPL(vmbus_buffer_unpin_pages);
++
  /**
   * request_arr_init - Allocates memory for the requestor array. Each slot
   * keeps track of the next available slot in the array. Initially, each
-@@ -1358,11 +1860,9 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -1361,11 +1975,9 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  	/* Establish the gpadl for the ring buffer */
  	buffer->gpadl.gpadl_handle = 0;
  
@@ -1134,7 +1263,7 @@ index 6b1e1fd..ffb3ead 100644
  	if (err)
  		goto error_clean_ring;
  
-@@ -1453,8 +1953,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -1456,8 +2068,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  error_free_info:
  	kfree(open_info);
  error_free_gpadl:
@@ -1144,7 +1273,7 @@ index 6b1e1fd..ffb3ead 100644
  error_clean_ring:
  	hv_ringbuffer_cleanup(&newchannel->outbound);
  	hv_ringbuffer_cleanup(&newchannel->inbound);
-@@ -1500,19 +1999,46 @@ EXPORT_SYMBOL_GPL(vmbus_open);
+@@ -1503,12 +2114,39 @@ EXPORT_SYMBOL_GPL(vmbus_open);
  /*
   * vmbus_teardown_gpadl -Teardown the specified GPADL handle
   */
@@ -1186,14 +1315,7 @@ index 6b1e1fd..ffb3ead 100644
  
  	info = kzalloc(sizeof(*info) +
  		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
- 	if (!info) {
- 		gpadl->leak = true;
- 		return -ENOMEM;
- 	}
- 
- 	init_completion(&info->waitevent);
- 	info->waiting_channel = channel;
-@@ -1525,49 +2051,71 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1528,37 +2166,83 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  		      &vmbus_connection.chn_msg_list);
  	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
  
@@ -1250,23 +1372,12 @@ index 6b1e1fd..ffb3ead 100644
  
 -	if (!ret && gpadl->decrypted) {
 -		int encrypt_ret;
--
--		encrypt_ret = set_memory_encrypted((unsigned long)gpadl->buffer,
--						   PFN_UP(gpadl->size));
--		if (encrypt_ret) {
--			pr_warn("Failed to re-encrypt GPADL buffer: %d\n",
--				encrypt_ret);
--			ret = encrypt_ret;
--		}
--		gpadl->decrypted = !!encrypt_ret;
--	}
--	if (ret)
 +	if (ret) {
- 		gpadl->leak = true;
++		gpadl->leak = true;
 +		if (owner)
 +			vmbus_buffer_update_host_ownership(owner, true);
 +	}
-+
+ 
 +	return ret;
 +}
 +
@@ -1283,14 +1394,35 @@ index 6b1e1fd..ffb3ead 100644
 +	struct vmbus_buffer buffer = {
 +		.gpadl = *gpadl,
 +	};
++	int encrypt_ret;
 +	int ret;
- 
++
 +	ret = __vmbus_teardown_gpadl_buffer(channel, &buffer);
 +	*gpadl = buffer.gpadl;
++
++	/*
++	 * The compat entry point builds an owner-less buffer, so the
++	 * reclaim path never sees it and cannot re-encrypt on its
++	 * behalf. Restore the synchronous re-encryption this symbol
++	 * has always performed: the caller is about to release the
++	 * range, and returning it decrypted would put shared pages
++	 * back on the free list. The owned path defers the same work
++	 * to reclaim through owner->raw_decrypted.
++	 */
++	if (!ret && gpadl->decrypted) {
+ 		encrypt_ret = set_memory_encrypted((unsigned long)gpadl->buffer,
+ 						   PFN_UP(gpadl->size));
+ 		if (encrypt_ret) {
+@@ -1568,8 +2252,6 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+ 		}
+ 		gpadl->decrypted = !!encrypt_ret;
+ 	}
+-	if (ret)
+-		gpadl->leak = true;
+ 
  	return ret;
  }
- EXPORT_SYMBOL_GPL(vmbus_teardown_gpadl);
-@@ -1643,9 +2191,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
+@@ -1646,9 +2328,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
  
  	/* Tear down the gpadl for the channel's ring buffer */
  	else if (channel->ringbuffer.gpadl.gpadl_handle) {
@@ -1302,7 +1434,7 @@ index 6b1e1fd..ffb3ead 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/channel_mgmt.c b/drivers/hv/channel_mgmt.c
-index a044fd3..cdc4c4c 100644
+index a044fd3b3c4e..cdc4c4c27513 100644
 --- a/drivers/hv/channel_mgmt.c
 +++ b/drivers/hv/channel_mgmt.c
 @@ -26,6 +26,8 @@
@@ -1416,7 +1548,7 @@ index a044fd3..cdc4c4c 100644
  }
  
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 20d023c..6796f37 100644
+index 20d023c9735e..6796f378a100 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -354,6 +354,9 @@ struct vmbus_channel_message_table_entry {
@@ -1430,7 +1562,7 @@ index 20d023c..6796f37 100644
  /* General vmbus interface */
  
 diff --git a/drivers/hv/vmbus_drv.c b/drivers/hv/vmbus_drv.c
-index 5ebdbe2..bce835c 100644
+index 5ebdbe24b5a1..bce835c4a015 100644
 --- a/drivers/hv/vmbus_drv.c
 +++ b/drivers/hv/vmbus_drv.c
 @@ -1022,6 +1022,7 @@ static const struct bus_type  hv_bus = {
@@ -1486,7 +1618,7 @@ index 5ebdbe2..bce835c 100644
  	cpuhp_remove_state(hyperv_cpuhp_online);
  	hv_synic_free();
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 29ccd77..8a5d0fe 100644
+index 29ccd77fb177..fd8aa7a3dcb3 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -243,7 +243,6 @@ static void netvsc_revoke_recv_buf(struct hv_device *device,
@@ -1547,7 +1679,7 @@ index 29ccd77..8a5d0fe 100644
  			netdev_err(ndev,
  				   "unable to teardown send buffer's gpadl\n");
  			return;
-@@ -385,12 +375,10 @@ static int netvsc_init_buf(struct hv_device *device,
+@@ -385,16 +375,13 @@ static int netvsc_init_buf(struct hv_device *device,
  		buf_size = min_t(unsigned int, buf_size,
  				 NETVSC_RECEIVE_BUFFER_SIZE_LEGACY);
  
@@ -1564,7 +1696,11 @@ index 29ccd77..8a5d0fe 100644
  		netdev_err(ndev,
  			   "unable to allocate receive buffer of size %u\n",
  			   buf_size);
-@@ -405,11 +393,8 @@ static int netvsc_init_buf(struct hv_device *device,
+-		ret = -ENOMEM;
+ 		goto cleanup;
+ 	}
+ 
+@@ -405,11 +392,8 @@ static int netvsc_init_buf(struct hv_device *device,
  	 * channel.  Note: This call uses the vmbus connection rather
  	 * than the channel to establish the gpadl handle.
  	 */
@@ -1578,7 +1714,7 @@ index 29ccd77..8a5d0fe 100644
  	if (ret != 0) {
  		netdev_err(ndev,
  			"unable to establish receive buffer's gpadl\n");
-@@ -497,12 +482,10 @@ static int netvsc_init_buf(struct hv_device *device,
+@@ -497,15 +481,12 @@ static int netvsc_init_buf(struct hv_device *device,
  	buf_size = device_info->send_sections * device_info->send_section_size;
  	buf_size = round_up(buf_size, PAGE_SIZE);
  
@@ -1594,8 +1730,11 @@ index 29ccd77..8a5d0fe 100644
 +	if (ret) {
  		netdev_err(ndev, "unable to allocate send buffer of size %u\n",
  			   buf_size);
- 		ret = -ENOMEM;
-@@ -514,11 +497,8 @@ static int netvsc_init_buf(struct hv_device *device,
+-		ret = -ENOMEM;
+ 		goto cleanup;
+ 	}
+ 	net_device->send_buf_size = buf_size;
+@@ -514,11 +495,8 @@ static int netvsc_init_buf(struct hv_device *device,
  	 * channel.  Note: This call uses the vmbus connection rather
  	 * than the channel to establish the gpadl handle.
  	 */
@@ -1610,7 +1749,7 @@ index 29ccd77..8a5d0fe 100644
  		netdev_err(ndev,
  			   "unable to establish send buffer's gpadl\n");
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 0d7a980..d06d5fc 100644
+index 0d7a9802e9db..f6c08c682af1 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -25,10 +25,12 @@
@@ -1635,7 +1774,7 @@ index 0d7a980..d06d5fc 100644
  
  	struct vmbus_buffer recv_buffer;
  	char	recv_name[32];	/* "recv_4294967295" */
-@@ -148,22 +152,350 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
+@@ -148,22 +152,402 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
  	vmbus_device_unregister(channel->device_obj);
  }
  
@@ -1649,6 +1788,7 @@ index 0d7a980..d06d5fc 100644
 +struct hv_uio_mmap_region {
 +	struct page **pages;
 +	unsigned long page_count;
++	struct vmbus_buffer *buffer;
 +	bool decrypted;
 +};
 +
@@ -1668,28 +1808,33 @@ index 0d7a980..d06d5fc 100644
 +		if (channel->state != CHANNEL_OPENED_STATE)
 +			return -ENODEV;
 +		buffer = &channel->ringbuffer;
++		region->buffer = buffer;
 +		region->pages = buffer->pages;
 +		region->page_count = buffer->page_cnt;
 +		region->decrypted = !!buffer->chunks;
 +		break;
 +	case INT_PAGE_MAP:
++		region->buffer = NULL;
 +		region->pages = pdata->int_pages;
 +		region->page_count = ARRAY_SIZE(pdata->int_pages);
 +		region->decrypted = false;
 +		break;
 +	case MON_PAGE_MAP:
++		region->buffer = NULL;
 +		region->pages = pdata->monitor_pages;
 +		region->page_count = ARRAY_SIZE(pdata->monitor_pages);
 +		region->decrypted = true;
 +		break;
 +	case RECV_BUF_MAP:
 +		buffer = &pdata->recv_buffer;
++		region->buffer = buffer;
 +		region->pages = buffer->pages;
 +		region->page_count = buffer->page_cnt;
 +		region->decrypted = !!buffer->chunks;
 +		break;
 +	case SEND_BUF_MAP:
 +		buffer = &pdata->send_buffer;
++		region->buffer = buffer;
 +		region->pages = buffer->pages;
 +		region->page_count = buffer->page_cnt;
 +		region->decrypted = !!buffer->chunks;
@@ -1742,9 +1887,26 @@ index 0d7a980..d06d5fc 100644
 +	if (ret)
 +		return ret;
 +
-+	return hv_uio_mmap_prepare_pages(desc, region.pages,
-+					 region.page_count, 0,
-+					 region.decrypted);
++	/*
++	 * Buffer-backed maps race with the reclaim worker: the page
++	 * array and the pages themselves can be freed between the
++	 * snapshot above and the mapping below. Hold references until
++	 * the VMA holds its own.
++	 */
++	if (region.buffer) {
++		ret = vmbus_buffer_pin_pages(region.buffer, &region.pages,
++					     &region.page_count);
++		if (ret)
++			return ret;
++	}
++
++	ret = hv_uio_mmap_prepare_pages(desc, region.pages,
++					region.page_count, 0,
++					region.decrypted);
++	if (region.buffer)
++		vmbus_buffer_unpin_pages(region.pages, region.page_count);
++
++	return ret;
 +}
 +
 +static int hv_uio_ring_mmap_prepare(struct vmbus_channel *channel,
@@ -1778,7 +1940,14 @@ index 0d7a980..d06d5fc 100644
 +		.pgoff = 2,
 +		.page_prot = PAGE_SHARED,
 +	};
++	unsigned int i;
 +	int ret;
++
++	/* Mapping pins real pages; the array cannot hold NULL entries. */
++	for (i = 0; i < ARRAY_SIZE(pages); i++) {
++		pages[i] = alloc_page(GFP_KERNEL);
++		KUNIT_ASSERT_NOT_NULL(test, pages[i]);
++	}
 +
 +	channel.ringbuffer.pages = pages;
 +	channel.ringbuffer.chunks = chunks;
@@ -1804,6 +1973,9 @@ index 0d7a980..d06d5fc 100644
 +
 +	channel.state = CHANNEL_OPEN_STATE;
 +	KUNIT_EXPECT_EQ(test, hv_uio_ring_mmap_prepare(&channel, &desc), -ENODEV);
++
++	for (i = 0; i < ARRAY_SIZE(pages); i++)
++		__free_page(pages[i]);
 +}
 +
 +static void hv_uio_mmap_region_select_test(struct kunit *test)
@@ -1893,7 +2065,14 @@ index 0d7a980..d06d5fc 100644
 +		.pgoff = RECV_BUF_MAP,
 +		.page_prot = PAGE_SHARED,
 +	};
++	unsigned int i;
 +	int ret;
++
++	/* Mapping pins real pages; the array cannot hold NULL entries. */
++	for (i = 0; i < ARRAY_SIZE(pages); i++) {
++		pages[i] = alloc_page(GFP_KERNEL);
++		KUNIT_ASSERT_NOT_NULL(test, pages[i]);
++	}
 +
 +	pdata = kunit_kzalloc(test, sizeof(*pdata), GFP_KERNEL);
 +	KUNIT_ASSERT_NOT_NULL(test, pdata);
@@ -1952,6 +2131,9 @@ index 0d7a980..d06d5fc 100644
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(PAGE_SHARED));
++
++	for (i = 0; i < ARRAY_SIZE(pages); i++)
++		__free_page(pages[i]);
 +}
 +
 +static struct kunit_case hv_uio_ring_mmap_test_cases[] = {
@@ -1975,26 +2157,34 @@ index 0d7a980..d06d5fc 100644
  hv_uio_ring_mmap_prepare(struct vmbus_channel *channel, struct vm_area_desc *desc)
  {
 -	unsigned long pages = vma_desc_pages(desc);
++	struct vmbus_buffer *buffer = &channel->ringbuffer;
++	struct page **pages;
++	unsigned long page_count;
  	pgoff_t offset = desc->pgoff;
++	int ret;
  
  	if (channel->state != CHANNEL_OPENED_STATE)
  		return -ENODEV;
 -	if (offset >= channel->ringbuffer_pagecount ||
 -	    pages > channel->ringbuffer_pagecount - offset)
 -		return -EINVAL;
--
+ 
 -	mmap_action_map_kernel_pages(desc, desc->start,
 -				     channel->ringbuffer.pages + offset, pages);
 -	return 0;
-+	return hv_uio_mmap_prepare_pages(desc,
-+					channel->ringbuffer.pages,
-+					channel->ringbuffer.page_cnt,
-+					offset,
-+					!!channel->ringbuffer.chunks);
++	ret = vmbus_buffer_pin_pages(buffer, &pages, &page_count);
++	if (ret)
++		return ret;
++
++	ret = hv_uio_mmap_prepare_pages(desc, pages, page_count, offset,
++					!!buffer->chunks);
++	vmbus_buffer_unpin_pages(pages, page_count);
++
++	return ret;
  }
  
  /* Callback from VMBUS subsystem when new channel created. */
-@@ -196,11 +528,11 @@ static void
+@@ -196,11 +580,11 @@ static void
  hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
  {
  	if (pdata->send_buffer.gpadl.gpadl_handle)
@@ -2008,7 +2198,7 @@ index 0d7a980..d06d5fc 100644
  	vmbus_release_buffer(&pdata->recv_buffer);
  }
  
-@@ -272,6 +604,7 @@ hv_uio_probe(struct hv_device *dev,
+@@ -272,6 +656,7 @@ hv_uio_probe(struct hv_device *dev,
  	pdata->info.name = "uio_hv_generic";
  	pdata->info.version = DRIVER_VERSION;
  	pdata->info.irqcontrol = hv_uio_irqcontrol;
@@ -2016,7 +2206,7 @@ index 0d7a980..d06d5fc 100644
  	pdata->info.open = hv_uio_open;
  	pdata->info.release = hv_uio_release;
  	pdata->info.irq = UIO_IRQ_CUSTOM;
-@@ -290,28 +623,25 @@ hv_uio_probe(struct hv_device *dev,
+@@ -290,28 +675,23 @@ hv_uio_probe(struct hv_device *dev,
  		= (uintptr_t)vmbus_connection.int_page;
  	pdata->info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
  	pdata->info.mem[INT_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
@@ -2036,12 +2226,12 @@ index 0d7a980..d06d5fc 100644
 -					   &pdata->recv_buffer.chunks,
 -					   &pdata->recv_buffer.chunk_cnt);
 -		if (!pdata->recv_buffer.addr) {
+-			ret = -ENOMEM;
 +		ret = vmbus_alloc_buffer_owned(channel, RECV_BUFFER_SIZE, false,
 +					       &pdata->recv_buffer);
-+		if (ret) {
- 			ret = -ENOMEM;
++		if (ret)
  			goto fail_free_ring;
- 		}
+-		}
  
 -		ret = vmbus_establish_gpadl_caller_decrypted(channel,
 -							     pdata->recv_buffer.addr,
@@ -2052,7 +2242,7 @@ index 0d7a980..d06d5fc 100644
  		if (ret)
  			goto fail_close;
  
-@@ -324,20 +654,14 @@ hv_uio_probe(struct hv_device *dev,
+@@ -324,20 +704,12 @@ hv_uio_probe(struct hv_device *dev,
  		pdata->info.mem[RECV_BUF_MAP].size = RECV_BUFFER_SIZE;
  		pdata->info.mem[RECV_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
  
@@ -2061,12 +2251,12 @@ index 0d7a980..d06d5fc 100644
 -					   &pdata->send_buffer.chunks,
 -					   &pdata->send_buffer.chunk_cnt);
 -		if (!pdata->send_buffer.addr) {
+-			ret = -ENOMEM;
 +		ret = vmbus_alloc_buffer_owned(channel, SEND_BUFFER_SIZE, false,
 +					       &pdata->send_buffer);
-+		if (ret) {
- 			ret = -ENOMEM;
++		if (ret)
  			goto fail_close;
- 		}
+-		}
  
 -		ret = vmbus_establish_gpadl_caller_decrypted(channel,
 -							     pdata->send_buffer.addr,
@@ -2078,7 +2268,7 @@ index 0d7a980..d06d5fc 100644
  			goto fail_close;
  
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 567679c..0f482ed 100644
+index 567679c68da1..dc22c6651d54 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -784,13 +784,18 @@ struct vmbus_gpadl {
@@ -2120,7 +2310,7 @@ index 567679c..0f482ed 100644
  
  int vmbus_request_offers(void);
  
-@@ -1208,26 +1216,36 @@ extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
+@@ -1208,28 +1216,43 @@ extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
  				     u64 requestid);
  
  extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
@@ -2162,7 +2352,14 @@ index 567679c..0f482ed 100644
 +
  void vmbus_release_buffer(struct vmbus_buffer *buffer);
  
++int vmbus_buffer_pin_pages(struct vmbus_buffer *buffer, struct page ***pages,
++			   unsigned long *page_count);
++
++void vmbus_buffer_unpin_pages(struct page **pages, unsigned long page_count);
++
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
+ 
+ extern int vmbus_recvpacket(struct vmbus_channel *channel,
 -- 
 2.43.0
 

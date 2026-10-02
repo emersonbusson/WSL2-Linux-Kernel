@@ -1,4 +1,4 @@
-From 2c70c59cdc0eb25015aae55f724af6ec08465aef Mon Sep 17 00:00:00 2001
+From 07965f04c0ad689c5dd3026660ecb0bc38a68b78 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 21:40:00 -0300
 Subject: [PATCH v2 8/9] hv: netvsc: allocate RNDIS request descriptors with
@@ -60,13 +60,12 @@ any path begins to treat the request descriptor as host-visible or
 direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
-
 ---
  drivers/net/hyperv/rndis_filter.c | 19 +++++++++++++++++--
  1 file changed, 17 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
-index 9b6c44979..2c70c59cd 100644
+index 9b6c44979b4e..2c70c59cdc0e 100644
 --- a/drivers/net/hyperv/rndis_filter.c
 +++ b/drivers/net/hyperv/rndis_filter.c
 @@ -87,7 +87,21 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
@@ -102,3 +101,6 @@ index 9b6c44979..2c70c59cd 100644
  }
  
  static void dump_rndis_message(struct net_device *netdev,
+-- 
+2.43.0
+
