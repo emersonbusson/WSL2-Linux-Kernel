@@ -1,17 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 22:15:00 -0300
-Subject: [PATCH v2 0/8] hv: vmbus: make rings and host-visible buffers
+Subject: [PATCH v2 0/9] hv: vmbus: make rings and host-visible buffers
  survive fragmentation without breaking CoCo
 
-This is v2 of the VMBus ring-allocation series. v1 was posted unversioned
-on 2026-09-17/18 as a two-patch series and proposed a plain vzalloc()
-fallback for vmbus_alloc_ring(). Michael Kelley reviewed that approach on
-2026-09-22 and pointed out the problem it creates: set_memory_decrypted()
-only works on physically contiguous direct-mapped memory, so a vmalloc
-ring in an arm64 CCA or TDX guest without a paravisor cannot be re-
-encrypted. The fallback would fix ordinary guests and break confidential
-ones.
+This is v2 of the VMBus ring-allocation series. v1 was posted
+unversioned on 2026-09-17/18 as a two-patch series and proposed a plain
+vzalloc() fallback for vmbus_alloc_ring(). Michael Kelley reviewed that
+approach on 2026-09-22 and pointed out the problem it creates:
+set_memory_decrypted() only works on physically contiguous direct-mapped
+memory, so a vmalloc ring in an arm64 CCA or TDX guest without a
+paravisor cannot be re-encrypted. The fallback would fix ordinary guests
+and break confidential ones.
 
 He asked for the opposite structure: build on Kameron Carr's
 vmbus_alloc_buffer() (already upstream) rather than adding a second
@@ -29,7 +29,7 @@ References
   on, Message-ID stem 2026081160447.2529876-1.
 
   Michael Kelley's review of v1, 2026-09-22. It is the source of the
-  five points mapped below and of Suggested-by on 1/8 and 6/8.
+  five points mapped below and of Suggested-by on 1/9 and 6/9.
 
 Problem
 -------
@@ -103,12 +103,12 @@ What changed
 - The previously exported allocator, free, GPADL establish, caller-
   decrypted establish and teardown signatures are preserved in the
   merged tree, so external consumers of those symbols are unaffected.
-  There is one intermediate shape worth naming: 1/8 gives
+  There is one intermediate shape worth naming: 1/9 gives
   vmbus_alloc_buffer() a bool confidential argument. The mainline
   function decides host-visibility from channel->co_external_memory
   alone, while a ring buffer on the same channel is governed by
   channel->co_ring_buffer, so the caller has to say which policy
-  applies to the buffer it is allocating. 6/8 folds that argument
+  applies to the buffer it is allocating. 6/9 folds that argument
   into vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer()
   to the exact four-argument prototype mainline has today.
   vmbus_alloc_buffer_owned(), vmbus_establish_gpadl_owned(),
@@ -130,8 +130,8 @@ What changed
 
 - struct rndis_request is larger than KMALLOC_MAX_CACHE_SIZE because it
   embeds two RNDIS_EXT_LEN (4 KiB) protocol tails, so kzalloc_obj()
-  hands back an order-2 compound page on every RNDIS control request. That
-  runs on the subchannel open path (netvsc_subchan_work ->
+  hands back an order-2 compound page on every RNDIS control request.
+  That runs on the subchannel open path (netvsc_subchan_work ->
   get_rndis_request) and is the second high-order allocation there.
   Those tails are protocol capacity, not padding -- a response is
   memcpy'd into &request->response_msg and may spill into response_ext
@@ -170,6 +170,23 @@ What changed
 - HV_GPADL_BUFFER_DECRYPTED is gone. Once every caller goes through
   vmbus_alloc_buffer(), the distinction it carried is redundant.
 
+- A completion that resolves to a NULL request address is no longer
+  dereferenced. netvsc_send_pkt() registers (ulong)skb as the VMBus
+  request address, and control RNDIS sends carry no skb -- rndis_filter
+  calls netvsc_send() with skb == NULL -- so the registered address is
+  NULL. That is intentional: there is no guest object to hand back, and
+  the request slot is still allocated so the completion can reclaim it.
+  netvsc_send_tx_complete() already tolerated it with if (likely(skb)).
+  The empty-payload branch of netvsc_send_completion() did not: it cast
+  the address to struct nvsp_message * and read hdr.msg_type
+  unconditionally, which is a fatal NULL dereference in NAPI/softirq.
+  This is not a ring-allocation change. It is reachable from this
+  series because channel open now survives buddy fragmentation and
+  control RNDIS traffic proceeds where it used to fail with -ENOMEM.
+  It is kept in the series because the runtime drill has to be green on
+  the bytes being posted; a trivial split is available if the netvsc
+  maintainers prefer it standalone.
+
 Mapping to the 2026-09-22 review
 --------------------------------
 
@@ -202,22 +219,27 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-Every measurement below is from the eight-patch code. Build, apply and
+Every measurement below is from patches 1/9 through 8/9. Those eight
+diffs are byte-identical to the code the cited runs executed; 9/9 is
+new and is discussed at the end of this section. Build, apply and
 KUnit are runs 36949824209, 36954234370 and 36957852118. Runtime is
 six Hyper-V drill runs on the same hosted guests -- 36949824155,
 36951361583, 36952899809, 36954234419, 36955854882 and 36957852050
 -- so the claims below are what repeated across them, not what one
 run happened to show. The code diffs are identical across these
-runs; 6/8 and 8/8 commit messages were clarified after the first
+runs; 6/9 and 8/9 commit messages were clarified after the first
 five without changing a single diff line.
 
 Build and apply:
 
   The series applies cleanly to the pinned mainline base, commit
-  93f51579e7df ("Linux 7.3-rc4"), as eight stages. It builds on
-  x86_64 and on arm64 (aarch64-linux-gnu), with the Confidential
-  Computing static invariants enforced on both. The WSL 6.18.40.1
-  backport builds with W=1 and sparse.
+  93f51579e7df ("Linux 7.3-rc4"), as nine stages. The cited apply
+  and build runs covered the first eight of those stages, whose
+  diffs are byte-identical in this revision; 9/9 is a single
+  netvsc.c change and its CI cycle is the next qualification step.
+  It builds on x86_64 and on arm64 (aarch64-linux-gnu), with the
+  Confidential Computing static invariants enforced on both. The WSL
+  6.18.40.1 backport builds with W=1 and sparse.
 
 KUnit (hosted, no Hyper-V required):
 
@@ -233,8 +255,10 @@ KUnit (hosted, no Hyper-V required):
   hyperv-vmbus-gpadl-lifetime 12 and hyperv-uio-hv-generic-mmap 3 --
   covering GPADL rescind and re-encrypt lifetime plus UIO mmap. Only
   vmbus_buffer_size_rounding_test is shared by name. 0008 touches
-  rndis_filter.c, which no named case covers; the named cases are the
-  ones this series adds, and they pass on these bytes.
+  rndis_filter.c and 0009 touches netvsc.c completion paths, neither of
+  which a named case covers; the named cases are the ones this series
+  adds, and they pass on these bytes. 0009 adds no named case of its
+  own.
 
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
@@ -326,15 +350,35 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
   An earlier run against a build that still carried a second high-order
   allocation on the subchannel-open path -- the RNDIS request
-  descriptor, fixed in 8/8 -- reached a buddy with buddy_order2=1 and
+  descriptor, fixed in 8/9 -- reached a buddy with buddy_order2=1 and
   died in netvsc_subchan_work -> get_rndis_request with "page
   allocation failure: order:2" and an oom-kill of the drill shell. The
   runs above reach a tighter buddy than that (buddy_order2=0 on
   36949824155) and the subchannel open survived. That is the failure
   mode 0008 removes, shown absent on the bytes that remove it.
 
+  A later run against the same eight-patch bytes failed differently,
+  and 9/9 is the response. Run 36960219285 panicked in netvsc_poll
+  with "BUG: kernel NULL pointer dereference, address: 0000000000000000"
+  and "Kernel panic - not syncing: Fatal exception in interrupt". A
+  control RNDIS send registers a NULL skb as the request address, an
+  empty completion for it resolved to that NULL address, and the
+  unguarded empty-payload branch of netvsc_send_completion()
+  dereferenced it. The crash is pre-existing relative to commit
+  93f51579e7df ("Linux 7.3-rc4") and is not introduced by these diffs;
+  the series exposes it because channel open now survives the
+  fragmentation the drill creates. That run is cited here as a failure
+  only. Patch 9/9 is the fix, and the runtime proof that the fix holds
+  is a drill on the nine-patch bytes -- not cited in this revision.
+
 What is not proven here
 -----------------------
+
+Runtime proof of 9/9. The NULL-request-address fix is reasoned from
+the mainline completion paths and from the crash trace of run
+36960219285, and it is style-checked, but it has not yet been shown
+surviving the drill that found the panic. Until that run is cited
+above, the claim for 9/9 is source-level only.
 
 CoCo page-state transitions. SEV-SNP, TDX, and Arm CCA memory-state
 behaviour has not been observed on real confidential hardware. The
@@ -356,7 +400,7 @@ awaits platform validation.
 The design follows Michael Kelley's review of the v1 series. Comments
 welcome.
 
-Emerson Busson (8):
+Emerson Busson (9):
   hv: vmbus: convert ring buffer allocation to vmbus_alloc_buffer()
   hv: vmbus: validate chunk buffer allocation and cleanup
   uio: hv_generic: allocate host-visible buffers through VMBus
@@ -366,6 +410,7 @@ Emerson Busson (8):
     resolved
   hv: vmbus: allocate the requestor array with kvcalloc()
   hv: netvsc: allocate RNDIS request descriptors with kvzalloc_obj()
+  hv: netvsc: handle a NULL request address on empty completions
 
  drivers/hv/channel.c              | 1504 +++++++++++++++++++++++++++++++------
  drivers/hv/channel_mgmt.c         |   36 +-
@@ -373,11 +418,11 @@ Emerson Busson (8):
  drivers/hv/ring_buffer.c          |    9 +-
  drivers/hv/vmbus_drv.c            |   14 +-
  drivers/net/hyperv/hyperv_net.h   |   10 +-
- drivers/net/hyperv/netvsc.c       |   56 +-
+ drivers/net/hyperv/netvsc.c       |  117 ++--
  drivers/net/hyperv/rndis_filter.c |   19 +-
  drivers/uio/uio_hv_generic.c      |  419 +++++++++--
  include/linux/hyperv.h            |   48 +-
- 10 files changed, 1783 insertions(+), 339 deletions(-)
+ 10 files changed, 1825 insertions(+), 358 deletions(-)
 
 --
 2.43.0

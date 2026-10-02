@@ -1,7 +1,7 @@
 From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 6/8] hv: vmbus: retain buffer ownership until GPADL and
+Subject: [PATCH v2 6/9] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator
@@ -21,15 +21,13 @@ baseline. A create or teardown with an uncertain outcome retains the
 owner rather than freeing, so a partial post can never release pages the
 host may still map.
 
-The shared-page decision is an explicit helper rather than a bare
-hv_is_isolation_supported() test. Mainline takes the chunked decrypt
-path from that call alone, so an Arm CCA or Intel TDX guest without a
-Hyper-V isolation property falls through to vzalloc() and cannot
-re-encrypt its ring. Guest-memory encryption is reported through
-CC_ATTR_GUEST_MEM_ENCRYPT independently of Hyper-V isolation, so
-vmbus_needs_shared_pages() consults Hyper-V isolation, guest-memory
-encryption and the per-buffer confidential flag as separate arguments.
-Ordinary private guests still take vzalloc().
+The shared-page test that 2/8 grew is pulled into
+vmbus_needs_shared_pages() here, so the three inputs -- Hyper-V
+isolation, guest-memory encryption through CC_ATTR_GUEST_MEM_ENCRYPT,
+and the per-buffer confidential flag -- are named at the call site
+instead of composed inline. That is also what lets KUnit pin the
+private-versus-shared selection without a live host. See 2/8 for why
+the condition is not a bare hv_is_isolation_supported() test.
 
 Distinguish host rescind from local unload, since both previously set
 the same channel flag and a rescind-based free could drop pages after a

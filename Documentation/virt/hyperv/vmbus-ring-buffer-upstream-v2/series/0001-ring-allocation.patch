@@ -1,7 +1,7 @@
 From cc0910d7e7aec7f316227a6450826513ead7e971 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH v2 1/8] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 1/9] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy

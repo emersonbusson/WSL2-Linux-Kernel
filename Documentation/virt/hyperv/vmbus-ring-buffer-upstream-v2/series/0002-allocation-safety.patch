@@ -1,7 +1,7 @@
 From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/8] hv: vmbus: validate chunk buffer allocation and
+Subject: [PATCH v2 2/9] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated
@@ -23,6 +23,15 @@ to the allocator, or re-encrypting them, while the host may still map
 them is a use-after-free from the host's side and a Confidential
 Computing hazard. Such a buffer is marked leaked and its chunks are
 retained instead of freed.
+
+The shared-page condition stops being a bare hv_is_isolation_supported()
+test. Mainline took the chunked decrypt path from that call alone, so an
+Arm CCA or Intel TDX guest without a Hyper-V isolation property fell
+through to vzalloc() and could not re-encrypt its ring. Guest-memory
+encryption is reported through CC_ATTR_GUEST_MEM_ENCRYPT independently
+of Hyper-V isolation, so both are consulted here, together with the
+per-buffer confidential flag. Ordinary private guests still take
+vzalloc().
 
 The new cases pin both rules, the partial-allocation rollback, and the
 order-descent fallback.

@@ -1,7 +1,7 @@
 From cc0910d7e7aec7f316227a6450826513ead7e971 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH v2 1/8] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 1/9] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy
@@ -809,7 +809,7 @@ index 9e109d9..567679c 100644
 From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/8] hv: vmbus: validate chunk buffer allocation and
+Subject: [PATCH v2 2/9] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated
@@ -831,6 +831,15 @@ to the allocator, or re-encrypting them, while the host may still map
 them is a use-after-free from the host's side and a Confidential
 Computing hazard. Such a buffer is marked leaked and its chunks are
 retained instead of freed.
+
+The shared-page condition stops being a bare hv_is_isolation_supported()
+test. Mainline took the chunked decrypt path from that call alone, so an
+Arm CCA or Intel TDX guest without a Hyper-V isolation property fell
+through to vzalloc() and could not re-encrypt its ring. Guest-memory
+encryption is reported through CC_ATTR_GUEST_MEM_ENCRYPT independently
+of Hyper-V isolation, so both are consulted here, together with the
+per-buffer confidential flag. Ordinary private guests still take
+vzalloc().
 
 The new cases pin both rules, the partial-allocation rollback, and the
 order-descent fallback.
@@ -1089,7 +1098,7 @@ index 87b806a..c47a923 100644
 From 574aca54bc6e46a34a86b83cb036c90698eb4c9a Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH v2 3/8] uio: hv_generic: allocate host-visible buffers through
+Subject: [PATCH v2 3/9] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
 Route generic VMBus UIO send and receive buffers through the VMBus
@@ -1239,7 +1248,7 @@ index b3f41ff..0d7a980 100644
 From c1bd2b6ebc43932cdad770e1f393f7e6833721b7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 4/8] hv: vmbus: add KUnit tests for GPADL post failure
+Subject: [PATCH v2 4/9] hv: vmbus: add KUnit tests for GPADL post failure
  injection
 
 Route GPADL message posting through a private callback so KUnit can inject
@@ -1664,7 +1673,7 @@ index c47a923..35bdc94 100644
 From 784ba79da9a83642c9b860043a743c15d7cf5443 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
-Subject: [PATCH v2 5/8] hv: vmbus: add KUnit test for order-zero allocation
+Subject: [PATCH v2 5/9] hv: vmbus: add KUnit test for order-zero allocation
  fallback
 
 Factor the order-descent allocation loop so KUnit can inject failures for
@@ -1835,7 +1844,7 @@ index 35bdc94..6b1e1fd 100644
 From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 6/8] hv: vmbus: retain buffer ownership until GPADL and
+Subject: [PATCH v2 6/9] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator
@@ -1855,15 +1864,13 @@ baseline. A create or teardown with an uncertain outcome retains the
 owner rather than freeing, so a partial post can never release pages the
 host may still map.
 
-The shared-page decision is an explicit helper rather than a bare
-hv_is_isolation_supported() test. Mainline takes the chunked decrypt
-path from that call alone, so an Arm CCA or Intel TDX guest without a
-Hyper-V isolation property falls through to vzalloc() and cannot
-re-encrypt its ring. Guest-memory encryption is reported through
-CC_ATTR_GUEST_MEM_ENCRYPT independently of Hyper-V isolation, so
-vmbus_needs_shared_pages() consults Hyper-V isolation, guest-memory
-encryption and the per-buffer confidential flag as separate arguments.
-Ordinary private guests still take vzalloc().
+The shared-page test that 2/8 grew is pulled into
+vmbus_needs_shared_pages() here, so the three inputs -- Hyper-V
+isolation, guest-memory encryption through CC_ATTR_GUEST_MEM_ENCRYPT,
+and the per-buffer confidential flag -- are named at the call site
+instead of composed inline. That is also what lets KUnit pin the
+private-versus-shared selection without a live host. See 2/8 for why
+the condition is not a bare hv_is_isolation_supported() test.
 
 Distinguish host rescind from local unload, since both previously set
 the same channel flag and a rescind-based free could drop pages after a
@@ -4007,7 +4014,7 @@ index 567679c..0f482ed 100644
 From 987df48adae536caa87142e2f5e10e7b525fd41f Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
-Subject: [PATCH v2 7/8] hv: vmbus: allocate the requestor array with
+Subject: [PATCH v2 7/9] hv: vmbus: allocate the requestor array with
  kvcalloc()
 
 __vmbus_open() sizes the per-channel requestor array from the ring
@@ -4106,7 +4113,7 @@ index ffb3ead..b53e2ae 100644
 From 2c70c59cdc0eb25015aae55f724af6ec08465aef Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 21:40:00 -0300
-Subject: [PATCH v2 8/8] hv: netvsc: allocate RNDIS request descriptors with
+Subject: [PATCH v2 8/9] hv: netvsc: allocate RNDIS request descriptors with
  kvzalloc_obj()
 
 struct rndis_request embeds two RNDIS_EXT_LEN protocol tails.
@@ -4207,3 +4214,148 @@ index 9b6c44979..2c70c59cd 100644
  }
  
  static void dump_rndis_message(struct net_device *netdev,
+From fa043e12940bde9cc723949e88366ff082d3b4c8 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Fri, 2 Oct 2026 01:18:44 -0300
+Subject: [PATCH v2 9/9] hv: netvsc: handle a NULL request address on
+ empty completions
+
+netvsc_send_pkt() registers (ulong)skb as the VMBus request address.
+Control RNDIS sends carry no skb -- rndis_filter.c calls netvsc_send()
+with skb == NULL -- so the registered address is NULL. That is
+intentional: there is no guest object to hand back, and the request
+slot is still allocated so the completion can reclaim it.
+
+netvsc_send_tx_complete() already tolerates that with if (likely(skb)).
+netvsc_send_completion()'s empty-payload branch does not. It casts the
+request address to struct nvsp_message * and reads hdr.msg_type
+unconditionally, so a completion that resolves to NULL is a fatal NULL
+dereference in NAPI/softirq context.
+
+The empty-payload branch exists for NVSP_MSG4_TYPE_SWITCH_DATA_PATH,
+which netvsc_switch_datapath() sends with a real nvsp_message address.
+A NULL request address is not that message and must not be
+dereferenced. Validate VMBUS_NO_RQSTOR alongside VMBUS_RQST_ERROR in
+both completion paths -- request_addr_callback() returns it when the
+channel has no requestor -- and account a NULL-address completion the
+same way the payload path accounts a NULL skb. The request id is
+consumed by the lookup, so that completion is the one that owns the
+queue_sends decrement and the possible queue wake.
+
+This is reached by the runtime drill in this series once channel open
+survives buddy fragmentation: control RNDIS traffic proceeds where it
+used to fail with -ENOMEM, and an empty completion for one of those
+requests takes the unguarded path.
+
+Rollback trigger: a netvsc TX stall, an "Invalid transaction ID"
+flood, or a regression in RNDIS control exchange (subchannel setup,
+OID query) after reverts to the single-sentinel check.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/net/hyperv/netvsc.c | 61 +++++++++++++++++++++++++------------
+ 1 file changed, 42 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
+index 5cd084e..7049d68 100644
+--- a/drivers/net/hyperv/netvsc.c
++++ b/drivers/net/hyperv/netvsc.c
+@@ -774,6 +774,32 @@ static inline void netvsc_free_send_slot(struct netvsc_device *net_device,
+ 	sync_change_bit(index, net_device->send_section_map);
+ }
+ 
++static void netvsc_send_acct(struct net_device *ndev,
++			     struct netvsc_device *net_device,
++			     struct vmbus_channel *channel,
++			     u16 q_idx)
++{
++	struct net_device_context *ndev_ctx = netdev_priv(ndev);
++	int queue_sends;
++
++	queue_sends =
++		atomic_dec_return(&net_device->chan_table[q_idx].queue_sends);
++
++	if (unlikely(net_device->destroy)) {
++		if (queue_sends == 0)
++			wake_up(&net_device->wait_drain);
++	} else {
++		struct netdev_queue *txq = netdev_get_tx_queue(ndev, q_idx);
++
++		if (netif_tx_queue_stopped(txq) && !net_device->tx_disable &&
++		    (hv_get_avail_to_write_percent(&channel->outbound) >
++		     RING_AVAIL_PERCENT_HIWATER || queue_sends < 1)) {
++			netif_tx_wake_queue(txq);
++			ndev_ctx->eth_stats.wake_queue++;
++		}
++	}
++}
++
+ static void netvsc_send_tx_complete(struct net_device *ndev,
+ 				    struct netvsc_device *net_device,
+ 				    struct vmbus_channel *channel,
+@@ -783,11 +809,10 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
+ 	struct net_device_context *ndev_ctx = netdev_priv(ndev);
+ 	struct sk_buff *skb;
+ 	u16 q_idx = 0;
+-	int queue_sends;
+ 	u64 cmd_rqst;
+ 
+ 	cmd_rqst = channel->request_addr_callback(channel, desc->trans_id);
+-	if (cmd_rqst == VMBUS_RQST_ERROR) {
++	if (cmd_rqst == VMBUS_RQST_ERROR || cmd_rqst == VMBUS_NO_RQSTOR) {
+ 		netdev_err(ndev, "Invalid transaction ID %llx\n", desc->trans_id);
+ 		return;
+ 	}
+@@ -816,22 +841,7 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
+ 		napi_consume_skb(skb, budget);
+ 	}
+ 
+-	queue_sends =
+-		atomic_dec_return(&net_device->chan_table[q_idx].queue_sends);
+-
+-	if (unlikely(net_device->destroy)) {
+-		if (queue_sends == 0)
+-			wake_up(&net_device->wait_drain);
+-	} else {
+-		struct netdev_queue *txq = netdev_get_tx_queue(ndev, q_idx);
+-
+-		if (netif_tx_queue_stopped(txq) && !net_device->tx_disable &&
+-		    (hv_get_avail_to_write_percent(&channel->outbound) >
+-		     RING_AVAIL_PERCENT_HIWATER || queue_sends < 1)) {
+-			netif_tx_wake_queue(txq);
+-			ndev_ctx->eth_stats.wake_queue++;
+-		}
+-	}
++	netvsc_send_acct(ndev, net_device, channel, q_idx);
+ }
+ 
+ static void netvsc_send_completion(struct net_device *ndev,
+@@ -850,11 +860,24 @@ static void netvsc_send_completion(struct net_device *ndev,
+ 	if (!msglen) {
+ 		cmd_rqst = incoming_channel->request_addr_callback(incoming_channel,
+ 								   desc->trans_id);
+-		if (cmd_rqst == VMBUS_RQST_ERROR) {
++		if (cmd_rqst == VMBUS_RQST_ERROR || cmd_rqst == VMBUS_NO_RQSTOR) {
+ 			netdev_err(ndev, "Invalid transaction ID %llx\n", desc->trans_id);
+ 			return;
+ 		}
+ 
++		/*
++		 * netvsc_send_pkt() registers (ulong)skb as the request
++		 * address. Control RNDIS sends carry no skb, so the
++		 * registered address is NULL and there is no nvsp_message
++		 * to inspect. The request id is consumed above, so this
++		 * completion owns the send accounting -- the same thing
++		 * netvsc_send_tx_complete() does when it sees a NULL skb.
++		 */
++		if (!cmd_rqst) {
++			netvsc_send_acct(ndev, net_device, incoming_channel, 0);
++			return;
++		}
++
+ 		pkt_rqst = (struct nvsp_message *)(uintptr_t)cmd_rqst;
+ 		switch (pkt_rqst->hdr.msg_type) {
+ 		case NVSP_MSG4_TYPE_SWITCH_DATA_PATH:
+-- 
+2.43.0
+
