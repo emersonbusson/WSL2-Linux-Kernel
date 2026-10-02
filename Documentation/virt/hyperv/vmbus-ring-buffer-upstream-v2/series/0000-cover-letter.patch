@@ -307,9 +307,27 @@ vmbus_alloc_buffer_owned() failure sites, and names the reclaim
 schedule, retry and workqueue constants. The two KUnit tests that
 fed a NULL page array now allocate real pages, because pin
 dereferences the array. 1/9 through 5/9 are byte-identical to
-what those four runs executed. A fresh build + KUnit +
-both-drill-legs pair on the posted bytes is required before any
-measurement below is cited for them.
+what those four runs executed. The fresh build + KUnit +
+both-drill-legs pair on the posted bytes is now measured:
+37058078668 and 37058079485. 37058078668 applied all nine stages,
+passed 24 of 24 KUnit cases on x86_64 and 15 of 15 on the WSL
+6.18.40.1 backport, and cleared CoCo static invariants on x86_64
+and arm64 with all three gate self-tests rejecting their
+injections. 37058079485 booted the same bytes on both hosted
+guests. windows-latest printed status=PASS,
+scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation,
+high_order_7plus=504->26->0, exhausted=1 and
+VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, with PHASE1
+cycle_fails=0 / 400 steps and LIFECYCLE_VERDICT=PASS cycles=100
+phase2=yes. windows-2025 printed status=PARTIAL,
+scope=lifecycle-pass-fragment-inconclusive: lifecycle passed the
+same way, and its buddy chase stopped at chase-memfree-margin
+with high_order_7plus_blocks=1 (reread=1) still free, so
+VERDICT=INCONCLUSIVE_CAP_REACHED rather than a fragment pass.
+Both legs printed order7_dmesg=0 accept4_failures=0 oops=0,
+splats=0 faults=0 and reader_status=DONE. The opposite leg was
+the inconclusive half on 37054709239; this is runner buddy
+capacity, not a property of these bytes.
 
 One diff changed after the seven early drill runs named further
 below. 6/9 used to reformat the allocation-failure path in
