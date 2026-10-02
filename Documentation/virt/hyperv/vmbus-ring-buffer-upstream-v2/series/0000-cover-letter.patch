@@ -463,9 +463,36 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   survives. On all twenty-two guest-runs the hv_netvsc rebind comes
   back (nic_rebound=yes), with zero accept4 failures and zero oops,
   at every measured depth -- including the three that stopped with a
-  single order-7 block still free. Where depletion was reached the
-  verdict is PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, scoped as
+  single order-7 block still free. In those twenty-two, where
+  depletion was reached the verdict is
+  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, scoped as
   ordinary-x86_64-vzalloc-path; co-co-chunked-fallback-not-exercised.
+
+  Two runs outside that census name the wall past depletion. After
+  the hog is mlocked, compaction is off and min_free_kbytes is
+  forced to 512, a later channel open can die in SLUB before the
+  ring allocator is reached at all. The oom-killer header on both
+  is the same:
+
+    gfp_mask=0x40cc0(GFP_KERNEL|__GFP_COMP), order=1
+    Workqueue: hv_sub_chan vmbus_add_channel_work
+    Out of memory and no killable processes...
+    Kernel panic - not syncing: System is deadlocked on memory
+
+  36982941081 and 37043082886, both windows-2025, both print
+  PRE-OPEN 12 maps and then this at 4.1s of guest time, and neither
+  reaches POST-OPEN. 0007 and 0008 have already taken the order-7
+  requestor array and the order-2 RNDIS descriptor off this path;
+  what is left is an ordinary SLUB new-slab page for a small
+  __kmalloc, and with the hog holding about 1.9 GiB unevictable and
+  init the only killable task, nothing can satisfy it. The buddy
+  counters do not predict that. 36949824155 survived a tighter
+  reading -- 2091 order-0 blocks and no order-1 at all -- than the
+  two that died at 1238 and 2068 order-0 with four and five order-1
+  still free at ready=1. What decides it is whether the kmalloc
+  cache that open needs still has a free object, which the drill
+  does not measure. Neither run is a ring-allocation failure, and
+  neither is counted in the census above.
 
   On an ordinary x86_64 guest vmbus_alloc_buffer() always takes
   vzalloc(), so the chunked order-N -> order-0 degrade is not what ran
@@ -498,10 +525,12 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   allocation on the subchannel-open path -- the RNDIS request
   descriptor, fixed in 8/9 -- reached a buddy with buddy_order2=1 and
   died in netvsc_subchan_work -> get_rndis_request with "page
-  allocation failure: order:2" and an oom-kill of the drill shell. The
-  runs above reach a tighter buddy than that (buddy_order2=0 on
-  36949824155) and the subchannel open survived. That is the failure
-  mode 0008 removes, shown absent on the bytes that remove it.
+  allocation failure: order:2" and an oom-kill of the drill shell. In
+  the census above the runs reach a tighter buddy than that
+  (buddy_order2=0 on 36949824155) and the subchannel open survived.
+  That is the failure mode 0008 removes, shown absent on the bytes
+  that remove it. The SLUB wall named further up is a different
+  failure mode, and is not what 0008 addresses.
 
   A later run against the same eight-patch bytes failed differently,
   and 9/9 is the response. Run 36960219285 panicked in netvsc_poll
