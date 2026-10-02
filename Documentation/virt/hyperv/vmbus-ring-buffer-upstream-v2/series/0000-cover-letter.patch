@@ -362,11 +362,17 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   mapping held open across the teardown, the UIO device maps and the
   2 MiB subchannel ring both stay alive while the ring is freed
   (/dev/uio0 maps=5, sysfs ring maps=1, PHASE2 hold-in-mmap window
-  OPEN) on every run and both guests, 100 bind/unbind cycles complete
-  with zero bind failures (400 steps, cycle_fails=0), and the
+  OPEN) on every guest-run in the census above, 100 bind/unbind cycles
+  complete with zero bind failures (400 steps, cycle_fails=0), and the
   vmbus_alloc_buffer map set still returns to its exact baseline. No
   splat, fault, or accept4 failure appears on any of the twenty-two
   guest-runs.
+
+  The sysfs ring map goes through hv_uio_ring_mmap(), which rejects a
+  channel that is not CHANNEL_OPENED_STATE with -ENODEV. A subchannel
+  can be present in sysfs and still read maps=0 if the helper reaches
+  it before the open completes; the UIO device map carries the hold in
+  that case. uio0 reads maps=5 on every guest-run in the census.
 
   One wrapper count sits outside both gates and differs on two
   guests. after_lifecycle, the harness map count taken after
