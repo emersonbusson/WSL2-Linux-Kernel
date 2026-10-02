@@ -288,15 +288,19 @@ the corrected 6/9 bytes, and 36978224340 on the same diff hunks
 with the revised commit messages. 37022259049 and 37025110735
 are the drill runs that carried the current nine bytes, and
 37022258445 and 37025110180 the matching build and KUnit halves.
-The claims below are drawn from those thirteen and are what
-repeated across them, not what one run happened to show. Three
-further passing drill runs are outside this count: 36956881309
-and 36959412461 on superseded byte snapshots, and 36967341916,
-which shares its bytes with
-36965808247. Commit messages have been revised after their diffs
-settled, never touching a diff line: 6/9 and 8/9 after the first
-five, and again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9. Patch
-9/9 has its own build and runtime runs, 36965808263 and 36965808247.
+The claims below are drawn from the eleven drill runs tabulated
+below -- twenty-two guest-runs -- and are what repeated across
+them, not what one run happened to show. The two drill runs that
+carried the current nine bytes, 37022259049 and 37025110735, are
+described with the pin above. One further passing drill run sits
+outside both sets: 36967341916, which shares its bytes with
+36965808247. Two earlier runs on superseded byte snapshots are
+not passes and are not counted: 36956881309 and 36959412461 each
+stopped short on windows-latest with INCONCLUSIVE_CAP_REACHED.
+Commit messages have been revised after their diffs settled,
+never touching a diff line: 6/9 and 8/9 after the first five, and
+again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9. Patch 9/9 has
+its own build and runtime runs, 36965808263 and 36965808247.
 
 Build and apply:
 
