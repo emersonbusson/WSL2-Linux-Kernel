@@ -4,7 +4,7 @@
 Static negative proof: the guest-fatal pattern Michael Kelley named
 (set_memory_decrypted() on a vmalloc()/vmap() virtual range) has no code path
 in any allocation this series introduces. Run against the candidate tree after
-all six patches are applied.
+all nine patches are applied.
 
   python3 coco-static-invariants.py --tree <linux-tree>
 
@@ -23,13 +23,20 @@ CHANNEL = Path("drivers/hv/channel.c")
 UIO = Path("drivers/uio/uio_hv_generic.c")
 NETVSC = Path("drivers/net/hyperv/netvsc.c")
 
-# The one virtual-address encryption site that mainline already had, preserved
-# by the exported legacy API for non-owned caller buffers. It is reached only
-# from vmbus_establish_gpadl() (memory_prepared == false) and is symmetrically
-# undone by the owner->raw_decrypted branch of the reclaim worker. Every path
-# this series allocates uses page_address() of an alloc_pages_node() result.
+# Virtual-address encryption sites that mainline already had, preserved by the
+# exported legacy API for non-owned caller buffers. vmbus_establish_gpadl()
+# decrypts the caller's kbuffer once (memory_prepared == false) and attaches no
+# owner, so the range is re-encrypted on whichever teardown path holds it. The
+# owner-less compat vmbus_teardown_gpadl() adapter does it synchronously on
+# gpadl->buffer, exactly as mainline always has, because its caller frees the
+# range as soon as the symbol returns and there is no owner left to defer the
+# work to. A retained owner instead defers the same work to the reclaim worker:
+# owner->raw_decrypted re-encrypts the whole range through owner->addr, and the
+# chunked owner->needs_encrypt path re-encrypts per page_address() page. Every
+# path this series allocates uses page_address() of an alloc_pages_node() result.
 LEGACY_DECRYPT_ARG = "kbuffer"
 LEGACY_ENCRYPT_ARG = "owner->addr"
+LEGACY_COMPAT_ENCRYPT_ARG = "gpadl->buffer"
 
 failures: list[str] = []
 notes: list[str] = []
@@ -145,6 +152,7 @@ def scan_set_memory(src: str, path: Path) -> None:
     code = strip_comments(src)
     seen_decrypt_legacy = 0
     seen_encrypt_legacy = 0
+    seen_compat_encrypt = 0
     for match in re.finditer(r"\b(set_memory_decrypted|set_memory_encrypted)\s*\(", code):
         fn = match.group(1)
         arg = first_call_arg(code, match.end() - 1)
@@ -170,6 +178,17 @@ def scan_set_memory(src: str, path: Path) -> None:
             seen_encrypt_legacy += 1
             note(f"{path}:{line} set_memory_encrypted({LEGACY_ENCRYPT_ARG}) legacy reclaim")
             continue
+        if fn == "set_memory_encrypted" and compact in (
+            f"(unsigned long){LEGACY_COMPAT_ENCRYPT_ARG}",
+            f"(unsigned long) {LEGACY_COMPAT_ENCRYPT_ARG}",
+            LEGACY_COMPAT_ENCRYPT_ARG,
+        ):
+            seen_compat_encrypt += 1
+            note(
+                f"{path}:{line} set_memory_encrypted({LEGACY_COMPAT_ENCRYPT_ARG}) "
+                f"legacy compat teardown"
+            )
+            continue
         fail(
             f"INV-1 {path}:{line}: {fn}() on a non-page_address argument "
             f"`{compact}` — this is the guest-fatal vmalloc decryption pattern"
@@ -183,6 +202,12 @@ def scan_set_memory(src: str, path: Path) -> None:
         fail(
             f"INV-1: expected exactly 1 legacy set_memory_encrypted({LEGACY_ENCRYPT_ARG}) "
             f"site in {path}, found {seen_encrypt_legacy}"
+        )
+    if seen_compat_encrypt != 1:
+        fail(
+            f"INV-1: expected exactly 1 legacy "
+            f"set_memory_encrypted({LEGACY_COMPAT_ENCRYPT_ARG}) "
+            f"site in {path}, found {seen_compat_encrypt}"
         )
 
 

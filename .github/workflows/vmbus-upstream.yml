@@ -309,6 +309,25 @@ jobs:
           echo "gate self-test OK: UIO encryption transition rejected"
 
           restore_sources
+
+          # The A1 shape: a compat teardown that hands decrypted pages back.
+          # Dropping the re-encryption must be rejected, or the gate cannot
+          # tell a restored contract from a silent regression.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("linux/drivers/hv/channel.c")
+          s = p.read_text()
+          needle = "\t\tencrypt_ret = set_memory_encrypted((unsigned long)gpadl->buffer,\n\t\t\t\t\t\t   PFN_UP(gpadl->size));"
+          assert needle in s, "compat teardown encrypt site not found"
+          p.write_text(s.replace(needle, "\t\tencrypt_ret = 0;", 1))
+          PY
+          if python3 "$CHECKER" --tree linux; then
+            echo "gate self-test FAILED: missing compat re-encryption was not rejected" >&2
+            exit 1
+          fi
+          echo "gate self-test OK: missing compat re-encryption rejected"
+
+          restore_sources
           trap - EXIT
           python3 "$CHECKER" --tree linux | tee -a vmbus-artifacts/coco-static-invariants.log
       - name: Require and run VMBus KUnit cases
