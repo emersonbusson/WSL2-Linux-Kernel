@@ -24,7 +24,17 @@
   Hyper-V VM name. Defaults to vmbus-drill-$PID.
 
 .PARAMETER TimeoutSec
-  Maximum wall-clock to wait for the guest to finish. Default 420.
+  Maximum wall-clock to wait for the guest to finish. Default 1200.
+
+  1200 is not slack. On an uncontented runner the whole drill is about
+  20-25 seconds of guest kernel time and finishes in well under a minute
+  of wall clock. On a noisy windows-latest neighbour the guest can be
+  descheduled to roughly a tenth of the CPU while a 2004 MiB fragmentation
+  hog thrashes against host dynamic-memory negotiation. Run 36980429381
+  reached PHASE1-BEFORE at 48.8s of kernel time after burning the whole
+  420s backstop and was then scored NO_RESULT -- a failed measurement,
+  not a candidate failure. Keep this large enough that a starved guest
+  can still finish; a real hang still reddens here.
 
 .EXAMPLE
   ./new-hyperv-drill-vm.ps1 -BzImage ./drill-out/BOOTX64.EFI
@@ -38,7 +48,7 @@ param(
 
   [string]$VmName = "vmbus-drill-$PID",
 
-  [int]$TimeoutSec = 420,
+  [int]$TimeoutSec = 1200,
 
   [int]$MemoryMB = 2048,
 

@@ -163,7 +163,10 @@ jobs:
       matrix:
         runner: [windows-2025, windows-latest]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    # 40, not 30: the guest backstop below is 1200s and the harness adds
+    # ~110s of setup/teardown on top. 30 minutes would kill the job while
+    # a merely starved guest is still making progress.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -190,7 +193,7 @@ jobs:
             -BzImage $image `
             -WorkDir (Join-Path $PWD 'drill-vm-work') `
             -VmName "vmbus-drill-$env:RUNNER_OS" `
-            -TimeoutSec 420 `
+            -TimeoutSec 1200 `
             -MemoryMB 2048 `
             -CpuCount 2
           $code = $LASTEXITCODE
