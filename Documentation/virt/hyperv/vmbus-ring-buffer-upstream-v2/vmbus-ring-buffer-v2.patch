@@ -1864,7 +1864,10 @@ disconnected VMBus message path frees its allocated context.
 In-tree migrated callers use descriptor-aware _owned entry points. The
 previously exported allocator, free, GPADL establish, caller-decrypted
 establish and teardown signatures are preserved through adapters, so
-external consumers are unaffected.
+external consumers are unaffected. This is also where
+vmbus_alloc_buffer() gets its four-argument prototype back: 1/8
+temporarily widened it with a bool confidential argument, which now
+lives only on vmbus_alloc_buffer_owned().
 
 KUnit coverage exercises the reclaim gate, the reclaim schedule gate,
 host-revoke state, mapping references and repeated owner release.
@@ -4132,6 +4135,10 @@ any path begins to treat the request descriptor as host-visible or
 direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+
+---
+ drivers/net/hyperv/rndis_filter.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
 index 9b6c44979..2c70c59cd 100644

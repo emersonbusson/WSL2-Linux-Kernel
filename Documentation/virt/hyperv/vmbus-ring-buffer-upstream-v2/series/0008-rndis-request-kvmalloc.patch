@@ -61,6 +61,10 @@ direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 
+---
+ drivers/net/hyperv/rndis_filter.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
 diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
 index 9b6c44979..2c70c59cd 100644
 --- a/drivers/net/hyperv/rndis_filter.c

@@ -30,7 +30,10 @@ disconnected VMBus message path frees its allocated context.
 In-tree migrated callers use descriptor-aware _owned entry points. The
 previously exported allocator, free, GPADL establish, caller-decrypted
 establish and teardown signatures are preserved through adapters, so
-external consumers are unaffected.
+external consumers are unaffected. This is also where
+vmbus_alloc_buffer() gets its four-argument prototype back: 1/8
+temporarily widened it with a bool confidential argument, which now
+lives only on vmbus_alloc_buffer_owned().
 
 KUnit coverage exercises the reclaim gate, the reclaim schedule gate,
 host-revoke state, mapping references and repeated owner release.
