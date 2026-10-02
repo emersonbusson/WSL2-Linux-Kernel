@@ -1855,6 +1855,16 @@ baseline. A create or teardown with an uncertain outcome retains the
 owner rather than freeing, so a partial post can never release pages the
 host may still map.
 
+The shared-page decision is an explicit helper rather than a bare
+hv_is_isolation_supported() test. Mainline takes the chunked decrypt
+path from that call alone, so an Arm CCA or Intel TDX guest without a
+Hyper-V isolation property falls through to vzalloc() and cannot
+re-encrypt its ring. Guest-memory encryption is reported through
+CC_ATTR_GUEST_MEM_ENCRYPT independently of Hyper-V isolation, so
+vmbus_needs_shared_pages() consults Hyper-V isolation, guest-memory
+encryption and the per-buffer confidential flag as separate arguments.
+Ordinary private guests still take vzalloc().
+
 Distinguish host rescind from local unload, since both previously set
 the same channel flag and a rescind-based free could drop pages after a
 successful-looking teardown that left its GPADL handle set. Revocation
@@ -1868,6 +1878,26 @@ external consumers are unaffected. This is also where
 vmbus_alloc_buffer() gets its four-argument prototype back: 1/8
 temporarily widened it with a bool confidential argument, which now
 lives only on vmbus_alloc_buffer_owned().
+
+The reclaimer workqueue is torn down by cancelling every timer-pending
+delayed_work before destroy_workqueue(): drain_workqueue() only drains
+work that is queued or running, and a delayed_work still waiting on
+its timer is not on the workqueue yet. The shutdown walk uses
+cancel_delayed_work() rather than the _sync variant under the owners
+lock, because reclaim work that is already running blocks on that same
+lock and destroy_workqueue() waits for it afterwards.
+
+The owner records two distinct encryption facts. needs_encrypt is set
+when the chunked allocator decrypted pages for a shared mapping and
+they must be re-encrypted before release; reclaim does that per chunk
+through page_address(), which is the direct map that
+set_memory_encrypted() requires. raw_decrypted covers the legacy
+whole-range case, where an external consumer established a GPADL over
+memory it decrypted itself and set gpadl.decrypted on the public
+struct vmbus_buffer. No in-tree caller takes that path today -- every
+in-tree establish passes memory_prepared=true -- but the struct is
+public and vmbus_release_buffer() is exported, so the field is part of
+the external surface and stays.
 
 KUnit coverage exercises the reclaim gate, the reclaim schedule gate,
 host-revoke state, mapping references and repeated owner release.
