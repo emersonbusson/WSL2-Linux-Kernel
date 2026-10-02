@@ -219,10 +219,11 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-Ten runs across five pairs are the census for this revision:
+Twelve runs across six pairs are the census for this revision:
 36970357736 and 36970357645, then 36972315239 and 36972315260,
 then 36975012643 and 36975012655, then 36978224379 and
-36978224340, then 37022258445 and 37022259049. The left-hand run
+36978224340, then 37022258445 and 37022259049, then 37025110180
+and 37025110735. The left-hand run
 of each pair is build, checkpatch and KUnit on x86_64, arm64 and
 the WSL 6.18.40.1 backport; the right-hand run is the Hyper-V
 runtime on both hosted guests. The first three pairs pinned one
@@ -252,20 +253,21 @@ vmbus_alloc_pages_with_fallback() and discloses the invariant in
 its commit message. 0001-0004 and 0006-0009 are byte-identical to
 what that pair executed.
 
-37022258445 and 37022259049 are the byte-exact pin for this
-revision. They ran the nine patch files as they now read against
-series/SHA256SUMS on the pinned base. 37022258445 applied all
-nine stages and passed 24 of 24 KUnit cases, including
+37022258445, 37022259049, 37025110180 and 37025110735 are the
+byte-exact pin for this revision. All four ran the nine patch
+files as they now read against series/SHA256SUMS on the pinned
+base. 37022258445 and 37025110180 applied all nine stages and
+passed 24 of 24 KUnit cases, including
 vmbus_ring_fallback_order_zero_test and the four gpadl
-fault-injection cases. 37022259049 booted those same bytes as a
-Gen2 guest on both hosted guests and both printed
-HYPERV_DRILL_RESULT status=PASS with
+fault-injection cases. 37022259049 and 37025110735 booted those
+same bytes as a Gen2 guest on both hosted guests, and all four
+legs printed HYPERV_DRILL_RESULT status=PASS with
 scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation.
-Both legs exhausted order-7-plus supply to zero and then reopened
+Every leg exhausted order-7-plus supply to zero and then reopened
 the channel with order7_dmesg=0, accept4_failures=0, oops=0 and
-rebind=yes. Lifecycle ran 100 cycles with phase2=yes on both.
-Splats and faults are 0 on both. series/SHA256SUMS records the
-5/9 those runs executed.
+rebind=yes. Lifecycle ran 100 cycles with phase2=yes on all.
+Splats and faults are 0 on all. series/SHA256SUMS records the
+5/9 those four runs executed.
 
 One diff changed after the seven early drill runs named further
 below. 6/9 used to reformat the allocation-failure path in
@@ -283,12 +285,14 @@ drill runs on the same hosted guests -- 36949824155, 36951361583,
 36952899809, 36954234419, 36955854882, 36957852050 and
 36965808247 -- plus 36970357645, 36972315260 and 36975012655 on
 the corrected 6/9 bytes, and 36978224340 on the same diff hunks
-with the revised commit messages. 37022259049 is the pair that
-ran the current nine bytes. The claims below are drawn from those
-eleven and are what repeated across them, not what one run
-happened to show. Three further passing drill runs are outside
-this count: 36956881309 and 36959412461 on superseded byte
-snapshots, and 36967341916, which shares its bytes with
+with the revised commit messages. 37022259049 and 37025110735
+are the drill runs that carried the current nine bytes, and
+37022258445 and 37025110180 the matching build and KUnit halves.
+The claims below are drawn from those thirteen and are what
+repeated across them, not what one run happened to show. Three
+further passing drill runs are outside this count: 36956881309
+and 36959412461 on superseded byte snapshots, and 36967341916,
+which shares its bytes with
 36965808247. Commit messages have been revised after their diffs
 settled, never touching a diff line: 6/9 and 8/9 after the first
 five, and again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9. Patch
