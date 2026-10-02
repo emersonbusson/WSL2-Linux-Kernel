@@ -362,11 +362,14 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   mapping held open across the teardown, the UIO device maps and the
   2 MiB subchannel ring both stay alive while the ring is freed
   (/dev/uio0 maps=5, sysfs ring maps=1, PHASE2 hold-in-mmap window
-  OPEN) on every guest-run in the census above, 100 bind/unbind cycles
-  complete with zero bind failures (400 steps, cycle_fails=0), and the
-  vmbus_alloc_buffer map set still returns to its exact baseline. No
-  splat, fault, or accept4 failure appears on any of the twenty-two
-  guest-runs.
+  OPEN) on every guest-run in the census above. The 100 bind/unbind
+  cycles complete with zero bind failures (400 steps, cycle_fails=0).
+  The exact map-set match is the PHASE1 pair above. PHASE2 allocates
+  its own subchannel region and does not claim to return to BASELINE;
+  FINAL reads one region above it, which is that region still live
+  after restore_nic. The wrapper note below covers the counts taken
+  outside these gates. No splat, fault, or accept4 failure appears on
+  any of the twenty-two guest-runs.
 
   The sysfs ring map goes through hv_uio_ring_mmap(), which rejects a
   channel that is not CHANNEL_OPENED_STATE with -ENODEV. A subchannel
