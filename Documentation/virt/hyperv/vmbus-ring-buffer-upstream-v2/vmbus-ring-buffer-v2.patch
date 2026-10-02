@@ -1,7 +1,7 @@
 From cc0910d7e7aec7f316227a6450826513ead7e971 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH v2 1/7] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 1/8] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy
@@ -796,7 +796,7 @@ index 9e109d9..567679c 100644
 From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/7] hv: vmbus: validate chunk buffer allocation and
+Subject: [PATCH v2 2/8] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated
@@ -1058,7 +1058,7 @@ index 87b806a..c47a923 100644
 From 574aca54bc6e46a34a86b83cb036c90698eb4c9a Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH v2 3/7] uio: hv_generic: allocate host-visible buffers through
+Subject: [PATCH v2 3/8] uio: hv_generic: allocate host-visible buffers through
  VMBus
 
 Route generic VMBus UIO send and receive buffers through the VMBus
@@ -1197,7 +1197,7 @@ index b3f41ff..0d7a980 100644
 From c1bd2b6ebc43932cdad770e1f393f7e6833721b7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 4/7] hv: vmbus: add KUnit tests for GPADL post failure
+Subject: [PATCH v2 4/8] hv: vmbus: add KUnit tests for GPADL post failure
  injection
 
 Route GPADL message posting through a private callback so KUnit can inject
@@ -1622,7 +1622,7 @@ index c47a923..35bdc94 100644
 From 784ba79da9a83642c9b860043a743c15d7cf5443 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
-Subject: [PATCH v2 5/7] hv: vmbus: add KUnit test for order-zero allocation
+Subject: [PATCH v2 5/8] hv: vmbus: add KUnit test for order-zero allocation
  fallback
 
 Factor the order-descent allocation loop so KUnit can inject failures for
@@ -1793,7 +1793,7 @@ index 35bdc94..6b1e1fd 100644
 From fd445f46589264bca0cc01988686da9286f1cb82 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 14:35:00 -0300
-Subject: [PATCH v2 6/7] hv: vmbus: retain buffer ownership until GPADL and
+Subject: [PATCH v2 6/8] hv: vmbus: retain buffer ownership until GPADL and
  page state are resolved
 
 Converting rings and host-visible buffers to the chunked allocator
@@ -2110,7 +2110,7 @@ index 6b1e1fd..ffb3ead 100644
  static unsigned int vmbus_buffer_order(unsigned long remaining,
  				       unsigned int max_order)
  {
-@@ -428,6 +617,219 @@ static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
+@@ -428,6 +617,246 @@ static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
  	       !buffer->gpadl.gpadl_handle;
  }
  
@@ -2203,7 +2203,7 @@ index 6b1e1fd..ffb3ead 100644
 +	return NULL;
 +}
 +
-+static void vmbus_buffer_owner_remove(struct vmbus_buffer_retained *owner)
++static void vmbus_buffer_owner_free(struct vmbus_buffer_retained *owner)
 +{
 +	mutex_lock(&vmbus_buffer_owners_lock);
 +	if (!list_empty(&owner->list))
@@ -2211,6 +2211,20 @@ index 6b1e1fd..ffb3ead 100644
 +	mutex_unlock(&vmbus_buffer_owners_lock);
 +
 +	kfree(owner);
++}
++
++static void vmbus_buffer_owner_remove(struct vmbus_buffer_retained *owner)
++{
++	/*
++	 * The owner embeds a delayed_work and its timer may still be
++	 * armed when an external caller drops the last reference.
++	 * Freeing the object under an armed timer would let the
++	 * callback reach freed memory, so stop the timer first. The
++	 * reclaim work itself must not come through here: it would
++	 * wait for its own completion.
++	 */
++	cancel_delayed_work_sync(&owner->reclaim_work);
++	vmbus_buffer_owner_free(owner);
 +}
 +
 +static bool vmbus_buffer_pages_busy(struct vmbus_buffer_retained *owner)
@@ -2295,7 +2309,7 @@ index 6b1e1fd..ffb3ead 100644
 +
 +	kvfree(owner->chunks);
 +	kvfree(owner->pages);
-+	vmbus_buffer_owner_remove(owner);
++	vmbus_buffer_owner_free(owner);
 +}
 +
 +void vmbus_buffer_revoke_channel(u64 channel_id)
@@ -2316,11 +2330,24 @@ index 6b1e1fd..ffb3ead 100644
 +void vmbus_buffer_reclaimer_shutdown(void)
 +{
 +	struct workqueue_struct *wq;
++	struct vmbus_buffer_retained *owner;
 +
 +	mutex_lock(&vmbus_buffer_owners_lock);
 +	vmbus_buffer_reclaimer_stopping = true;
 +	wq = vmbus_buffer_reclaim_wq;
 +	vmbus_buffer_reclaim_wq = NULL;
++
++	/*
++	 * destroy_workqueue() drains work that is queued or already
++	 * running. A delayed_work still waiting on its timer is not
++	 * on the workqueue yet, so cancel those timers here or they
++	 * fire against a workqueue that is about to be freed.
++	 * cancel_delayed_work() rather than _sync: reclaim work that
++	 * is already running blocks on this same lock, and
++	 * destroy_workqueue() below waits for it to finish.
++	 */
++	list_for_each_entry(owner, &vmbus_buffer_owners, list)
++		cancel_delayed_work(&owner->reclaim_work);
 +	mutex_unlock(&vmbus_buffer_owners_lock);
 +
 +	if (wq)
@@ -2330,7 +2357,7 @@ index 6b1e1fd..ffb3ead 100644
  /*
   * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
   *
-@@ -572,30 +974,20 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
+@@ -572,30 +1001,20 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
  {
  	struct vmbus_buffer *buffer = &newchannel->ringbuffer;
  	u32 size;
@@ -2366,7 +2393,7 @@ index 6b1e1fd..ffb3ead 100644
  
  	return 0;
  }
-@@ -895,12 +1287,15 @@ static int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
+@@ -895,12 +1314,15 @@ static int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
  static int vmbus_gpadl_response_status(u32 creation_status, bool rescind,
  				       bool *posted)
  {
@@ -2384,7 +2411,7 @@ index 6b1e1fd..ffb3ead 100644
  	return 0;
  }
  
-@@ -923,21 +1318,22 @@ static int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
+@@ -923,21 +1345,22 @@ static int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
  }
  
  static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
@@ -2413,7 +2440,7 @@ index 6b1e1fd..ffb3ead 100644
  	gpadl->leak = false;
  
  	next_gpadl_handle =
-@@ -965,6 +1361,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -965,6 +1388,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  			dev_warn(&channel->device_obj->device,
  				"Failed to set host visibility for new GPADL %d.\n",
  				ret);
@@ -2423,7 +2450,7 @@ index 6b1e1fd..ffb3ead 100644
  			vmbus_free_channel_msginfo(msginfo);
  			return ret;
  		}
-@@ -992,6 +1391,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -992,6 +1418,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	ret = vmbus_post_gpadl_messages(msginfo, next_gpadl_handle, &posted,
  					vmbus_gpadl_post_real, NULL);
@@ -2432,7 +2459,7 @@ index 6b1e1fd..ffb3ead 100644
  	if (ret)
  		goto cleanup;
  
-@@ -1011,6 +1412,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -1011,6 +1439,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	gpadl->gpadl_handle = gpadlmsg->gpadl;
  	gpadl->buffer = kbuffer;
  	gpadl->size = size;
@@ -2441,7 +2468,7 @@ index 6b1e1fd..ffb3ead 100644
  
  cleanup:
  	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
-@@ -1019,115 +1422,110 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -1019,115 +1449,110 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	vmbus_free_channel_msginfo(msginfo);
  
@@ -2631,7 +2658,7 @@ index 6b1e1fd..ffb3ead 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_release_buffer);
  
-@@ -1140,14 +1538,13 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+@@ -1140,14 +1565,13 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
  }
  
  /**
@@ -2649,7 +2676,7 @@ index 6b1e1fd..ffb3ead 100644
   *
   * Buffers not requiring decryption are allocated with vzalloc().
   *
-@@ -1157,46 +1554,67 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+@@ -1157,46 +1581,67 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
   * host-visible via set_memory_decrypted() on its direct-map address, then all
   * chunks are combined into a virtually-contiguous range via vmap().
   *
@@ -2738,7 +2765,7 @@ index 6b1e1fd..ffb3ead 100644
  		goto err;
  
  	while (remaining) {
-@@ -1222,6 +1640,11 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -1222,6 +1667,11 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  		if (!page)
  			goto err;
  
@@ -2750,7 +2777,7 @@ index 6b1e1fd..ffb3ead 100644
  		ret = set_memory_decrypted((unsigned long)page_address(page),
  					   1U << order);
  		if (ret) {
-@@ -1229,35 +1652,87 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -1229,35 +1679,87 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  			 * set_memory_decrypted() failed; the page state is
  			 * unknown so it must be leaked rather than freed.
  			 */
@@ -2854,7 +2881,7 @@ index 6b1e1fd..ffb3ead 100644
  /**
   * request_arr_init - Allocates memory for the requestor array. Each slot
   * keeps track of the next available slot in the array. Initially, each
-@@ -1358,11 +1833,9 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -1358,11 +1860,9 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  	/* Establish the gpadl for the ring buffer */
  	buffer->gpadl.gpadl_handle = 0;
  
@@ -2868,7 +2895,7 @@ index 6b1e1fd..ffb3ead 100644
  	if (err)
  		goto error_clean_ring;
  
-@@ -1453,8 +1926,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -1453,8 +1953,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  error_free_info:
  	kfree(open_info);
  error_free_gpadl:
@@ -2878,7 +2905,7 @@ index 6b1e1fd..ffb3ead 100644
  error_clean_ring:
  	hv_ringbuffer_cleanup(&newchannel->outbound);
  	hv_ringbuffer_cleanup(&newchannel->inbound);
-@@ -1500,19 +1972,46 @@ EXPORT_SYMBOL_GPL(vmbus_open);
+@@ -1500,19 +1999,46 @@ EXPORT_SYMBOL_GPL(vmbus_open);
  /*
   * vmbus_teardown_gpadl -Teardown the specified GPADL handle
   */
@@ -2929,7 +2956,7 @@ index 6b1e1fd..ffb3ead 100644
  
  	init_completion(&info->waitevent);
  	info->waiting_channel = channel;
-@@ -1525,49 +2024,71 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1525,49 +2051,71 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  		      &vmbus_connection.chn_msg_list);
  	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
  
@@ -3026,7 +3053,7 @@ index 6b1e1fd..ffb3ead 100644
  	return ret;
  }
  EXPORT_SYMBOL_GPL(vmbus_teardown_gpadl);
-@@ -1643,9 +2164,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
+@@ -1643,9 +2191,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
  
  	/* Tear down the gpadl for the channel's ring buffer */
  	else if (channel->ringbuffer.gpadl.gpadl_handle) {
@@ -3905,7 +3932,7 @@ index 567679c..0f482ed 100644
 From 987df48adae536caa87142e2f5e10e7b525fd41f Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
-Subject: [PATCH v2 7/7] hv: vmbus: allocate the requestor array with
+Subject: [PATCH v2 7/8] hv: vmbus: allocate the requestor array with
  kvcalloc()
 
 __vmbus_open() sizes the per-channel requestor array from the ring
@@ -3928,8 +3955,11 @@ guest the failure prints as
   hv_netvsc ... eth0: sub channel open failed: -12
 
 The rings themselves already come from vmbus_alloc_buffer() (patch
-1/7), so this is the remaining high-order allocation on the open
-path.
+1/8), so this removes the order-7 allocation from the open path. A
+second, smaller high-order allocation remains there: the RNDIS
+request descriptor in rndis_filter.c is larger than
+KMALLOC_MAX_CACHE_SIZE and takes an order-2 compound page. That one
+is removed in patch 8/8.
 
 The requestor array is guest-private bookkeeping: it stores request
 ids the guest hands out and never reaches the host, so it is not
@@ -3999,3 +4029,99 @@ index ffb3ead..b53e2ae 100644
  	bitmap_free(rqstor->req_bitmap);
  }
  
+From 82a14d43efb8b0852a2a5a394ba348c7c327b8d4 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Thu, 1 Oct 2026 21:40:00 -0300
+Subject: [PATCH v2 8/8] netvsc: allocate RNDIS request descriptors with
+ kvmalloc()
+
+struct rndis_request embeds two RNDIS_EXT_LEN tails. RNDIS_EXT_LEN is
+HV_HYP_PAGE_SIZE, so the two tails alone are 8 KiB and the struct is
+just over KMALLOC_MAX_CACHE_SIZE. get_rndis_request() therefore falls
+through kzalloc() to kmalloc_large(), which asks for an order-2
+compound page on every RNDIS control request.
+
+That is a high-order allocation on the subchannel open path. The
+fragmentation drill of this series reproduces it: with the buddy
+holding a single order-2 block, the hv_netvsc rebind reaches
+
+  kworker/0:1 invoked oom-killer:
+    gfp_mask=0x40dc0(GFP_KERNEL|__GFP_ZERO|__GFP_COMP), order=2
+  Workqueue: events netvsc_subchan_work
+  ? ___kmalloc_large_node
+  ? __kmalloc_large_noprof
+  ? get_rndis_request
+  ? rndis_set_rss_param_msg
+  ? rndis_set_subchannel
+  ? netvsc_subchan_work
+  sh: page allocation failure: order:2, ...
+  Kernel panic - not syncing: System is deadlocked on memory
+
+Patch 7/8 removes the order-7 requestor array from that path. This
+removes the order-2 request descriptor, which is the last high-order
+allocation between the rebind and the ring. Without it the series does
+not deliver the symptom it is written against.
+
+kvmalloc() is the right allocator here rather than a smaller object.
+The two RNDIS_EXT_LEN tails are protocol capacity -- a QUERY response
+is copied into response_ext and checked against
+sizeof(struct rndis_message) + RNDIS_EXT_LEN -- so shrinking them is a
+behaviour change, not a cleanup. The request is a control-path object
+copied into the VMBus ring; it is never DMA-mapped from this
+allocation, so vmalloc backing is fine and is the same idiom patch 7/8
+already uses for the requestor array. kvmalloc() attempts the kmalloc
+path with __GFP_NORETRY|__GFP_NOWARN first, so it neither fails hard
+nor reaches the OOM killer when no compound page is free -- which is
+also what removes the oom-kill of the drill shell above.
+
+Free side is put_rndis_request(), the single kfree() of the object,
+and it becomes kvfree().
+
+Rollback trigger: revert this patch if an RNDIS control path begins to
+require the request descriptor to be direct-mapped or DMA-mapped, or
+if a vmalloc-backed request introduces a measurable control-path
+regression.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/net/hyperv/rndis_filter.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
+index c35f9685b6bf..82a14d43efb8 100644
+--- a/drivers/net/hyperv/rndis_filter.c
++++ b/drivers/net/hyperv/rndis_filter.c
+@@ -87,7 +87,20 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
+ 	struct rndis_set_request *set;
+ 	unsigned long flags;
+ 
+-	request = kzalloc(sizeof(struct rndis_request), GFP_KERNEL);
++	/*
++	 * struct rndis_request embeds two RNDIS_EXT_LEN (4 KiB) tails and
++	 * is larger than KMALLOC_MAX_CACHE_SIZE, so kzalloc() would hand
++	 * back an order-2 compound page. That is a high-order allocation
++	 * on the subchannel open path and it fails under buddy
++	 * fragmentation -- the same failure this series removes from the
++	 * rings and the requestor array. The request is a control-path
++	 * object copied into the VMBus ring and never DMA-mapped from
++	 * this allocation, so vmalloc backing is fine. kvmalloc() tries
++	 * the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it
++	 * neither fails hard nor reaches the OOM killer when no
++	 * compound page is available.
++	 */
++	request = kvmalloc(sizeof(*request), GFP_KERNEL);
+ 	if (!request)
+ 		return NULL;
+ 
+@@ -124,7 +137,8 @@ static void put_rndis_request(struct rndis_device *dev,
+ 	list_del(&req->list_ent);
+ 	spin_unlock_irqrestore(&dev->request_lock, flags);
+ 
+-	kfree(req);
++	/* Paired with the kvmalloc() in get_rndis_request(). */
++	kvfree(req);
+ }
+ 
+ static void dump_rndis_message(struct net_device *netdev,
+-- 
+2.43.0

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 30 Sep 2026 20:00:00 -0300
-Subject: [PATCH v2 0/7] hv: vmbus: make rings and host-visible buffers
+Subject: [PATCH v2 0/8] hv: vmbus: make rings and host-visible buffers
  survive fragmentation without breaking CoCo
 
 This is v2 of the VMBus ring-allocation series. v1 was posted unversioned
@@ -95,11 +95,38 @@ What changed
 - The per-channel requestor array is allocated with kvcalloc() instead
   of kcalloc(). Its size follows the ring size, so at the default
   ring_size of 128 pages the array is larger than 256 KiB and kcalloc()
-  would request an order-7 compound page -- the remaining high-order
-  allocation on the channel-open path, and the one that fails with
+  would request an order-7 compound page -- the order-7 allocation on
+  the channel-open path, and one of the two that fail with
   "sub channel open failed: -12" under buddy fragmentation. The array
   is guest-private request bookkeeping and never reaches the host, so
   vmalloc backing has no Confidential Computing implication.
+
+- struct rndis_request is larger than KMALLOC_MAX_CACHE_SIZE because it
+  embeds two RNDIS_EXT_LEN (4 KiB) protocol tails, so kzalloc() hands
+  back an order-2 compound page on every RNDIS control request. That
+  runs on the subchannel open path (netvsc_subchan_work ->
+  get_rndis_request) and is the second high-order allocation there.
+  Those tails are protocol capacity, not padding -- a response is
+  memcpy'd into &request->response_msg and may spill into response_ext
+  -- so the descriptor is not shrunk. It is allocated with kvmalloc()
+  instead: the object is a control-path descriptor copied into the
+  VMBus ring and is never DMA-mapped from this allocation, so vmalloc
+  backing has no Confidential Computing implication, and kvmalloc()
+  tries the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first so it
+  neither fails hard nor reaches the OOM killer when no compound page
+  is available. Freed with kvfree() in the matching put_rndis_request().
+
+- The reclaim workqueue teardown now cancels every timer-pending
+  delayed_work before destroy_workqueue(). drain_workqueue() only
+  drains work that is queued or running; a delayed_work still waiting
+  on its timer lives in the timer wheel, not on the workqueue, so
+  freeing the workqueue under an armed timer is a use-after-free.
+  Owners are split into an internal free path (used by the reclaim
+  work, which cannot wait for its own completion) and an external
+  remove path that cancels the timer first. The shutdown walk cancels
+  with the non-_sync variant under the owners lock, because reclaim
+  work that is already running blocks on that same lock and
+  destroy_workqueue() waits for it afterwards.
 
 - HV_GPADL_BUFFER_DECRYPTED is gone. Once every caller goes through
   vmbus_alloc_buffer(), the distinction it carried is redundant.
@@ -132,6 +159,16 @@ Mapping to the 2026-09-22 review
 
 Testing
 -------
+
+The measurements below were taken on the seven-patch bytes of run
+36943904717. The eight-patch series differs in two places the runtime
+path can see: 0006 now cancels timer-pending delayed_work before
+destroy_workqueue() (module-exit only, not on the rebind path), and 0008
+allocates the RNDIS request descriptor with kvmalloc() (on the rebind
+and subchannel-open path). The eight-patch bytes are being re-measured
+and the numbers below will be restated against them before this is
+sent. The structural claims -- zero splats, zero accept4 failures,
+exact map-set return -- are what the drill is re-proving.
 
 KUnit (hosted, no Hyper-V required):
 
@@ -191,6 +228,14 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   hardware. A green drill job is not by itself a gate closure -- the gate
   is the RESULT, VERDICT and MMAP_HOLD lines in the guest console.
 
+  A later run against a build that still carried a second high-order
+  allocation on the subchannel-open path -- the RNDIS request
+  descriptor, since fixed in 8/8 -- reached a buddy with
+  buddy_order2=1 and died in netvsc_subchan_work -> get_rndis_request
+  with "page allocation failure: order:2" and an oom-kill of the drill
+  shell. That is the failure mode 0008 removes. Its absence on the
+  eight-patch bytes is what the re-measure has to show.
+
 What is not proven here
 -----------------------
 
@@ -212,7 +257,7 @@ by the KUnit injection tests and awaits platform validation.
 The design follows Michael Kelley's review of the v1 series. Comments
 welcome.
 
-Emerson Busson (7):
+Emerson Busson (8):
   hv: vmbus: convert ring buffer allocation to vmbus_alloc_buffer()
   hv: vmbus: validate chunk buffer allocation and cleanup
   uio: hv_generic: allocate host-visible buffers through VMBus
@@ -221,17 +266,19 @@ Emerson Busson (7):
   hv: vmbus: retain buffer ownership until GPADL and page state are
     resolved
   hv: vmbus: allocate the requestor array with kvcalloc()
+  hv: netvsc: allocate RNDIS request descriptors with kvmalloc()
 
- drivers/hv/channel.c            | 1477 +++++++++++++++++++++++++++++++++------
- drivers/hv/channel_mgmt.c       |   36 +-
- drivers/hv/hyperv_vmbus.h       |    7 +-
- drivers/hv/ring_buffer.c        |    9 +-
- drivers/hv/vmbus_drv.c          |   14 +-
- drivers/net/hyperv/hyperv_net.h |   10 +-
- drivers/net/hyperv/netvsc.c     |   56 +-
- drivers/uio/uio_hv_generic.c    |  419 +++++++++--
- include/linux/hyperv.h          |   48 +-
- 9 files changed, 1739 insertions(+), 337 deletions(-)
+ drivers/hv/channel.c              | 1676 ++++++++++++++++++++++++++++++++++--------
+ drivers/hv/channel_mgmt.c         |   36 +
+ drivers/hv/hyperv_vmbus.h         |    7 +
+ drivers/hv/ring_buffer.c          |    9 +
+ drivers/hv/vmbus_drv.c            |   14 +
+ drivers/net/hyperv/hyperv_net.h   |   10 -
+ drivers/net/hyperv/netvsc.c       |  112 +--
+ drivers/net/hyperv/rndis_filter.c |   18 +
+ drivers/uio/uio_hv_generic.c      |  495 ++++++++++--
+ include/linux/hyperv.h            |   52 +
+ 10 files changed, 1936 insertions(+), 493 deletions(-)
 
 --
 2.43.0

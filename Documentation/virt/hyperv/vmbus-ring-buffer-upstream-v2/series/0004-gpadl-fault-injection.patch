@@ -1,7 +1,7 @@
 From c1bd2b6ebc43932cdad770e1f393f7e6833721b7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
-Subject: [PATCH v2 4/7] hv: vmbus: add KUnit tests for GPADL post failure
+Subject: [PATCH v2 4/8] hv: vmbus: add KUnit tests for GPADL post failure
  injection
 
 Route GPADL message posting through a private callback so KUnit can inject

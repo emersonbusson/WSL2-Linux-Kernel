@@ -87,7 +87,20 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
 	struct rndis_set_request *set;
 	unsigned long flags;
 
-	request = kzalloc(sizeof(struct rndis_request), GFP_KERNEL);
+	/*
+	 * struct rndis_request embeds two RNDIS_EXT_LEN (4 KiB) tails and
+	 * is larger than KMALLOC_MAX_CACHE_SIZE, so kzalloc() would hand
+	 * back an order-2 compound page. That is a high-order allocation
+	 * on the subchannel open path and it fails under buddy
+	 * fragmentation -- the same failure this series removes from the
+	 * rings and the requestor array. The request is a control-path
+	 * object copied into the VMBus ring and never DMA-mapped from
+	 * this allocation, so vmalloc backing is fine. kvmalloc() tries
+	 * the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it
+	 * neither fails hard nor reaches the OOM killer when no
+	 * compound page is available.
+	 */
+	request = kvmalloc(sizeof(*request), GFP_KERNEL);
 	if (!request)
 		return NULL;
 
@@ -124,7 +137,8 @@ static void put_rndis_request(struct rndis_device *dev,
 	list_del(&req->list_ent);
 	spin_unlock_irqrestore(&dev->request_lock, flags);
 
-	kfree(req);
+	/* Paired with the kvmalloc() in get_rndis_request(). */
+	kvfree(req);
 }
 
 static void dump_rndis_message(struct net_device *netdev,

@@ -4,7 +4,7 @@ name: Hyper-V role feasibility probe
 #
 # That probe proved a hosted Windows runner can boot a real Hyper-V guest via
 # WSL2 and expose VMBus. That is enough for WSL-backport runtime evidence. It
-# is NOT enough for the seven-patch mainline series: those patches apply to a
+# is NOT enough for the eight-patch mainline series: those patches apply to a
 # mainline base, and the runtime drills must run on that exact mainline kernel
 # inside a Hyper-V guest.
 #
@@ -254,7 +254,7 @@ jobs:
           switch ($verdict) {
             'HYPERV_MANAGEMENT_AVAILABLE' {
               $lines += 'This hosted runner can define an arbitrary Gen2 Hyper-V VM and reach'
-              $lines += 'Running. The mainline seven-patch candidate can be booted here as a'
+              $lines += 'Running. The mainline eight-patch candidate can be booted here as a'
               $lines += 'Hyper-V guest, and the GPADL/UIO lifecycle and order-zero fallback'
               $lines += 'drills can run against those exact mainline bytes. Every result must'
               $lines += 'still be labelled ordinary x86_64 Hyper-V evidence only: no hosted'
