@@ -219,23 +219,27 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-Three run pairs have pinned these nine patch bytes against
-series/SHA256SUMS: 36970357736 and 36970357645, then 36972315239
-and 36972315260, then 36975012643 and 36975012655. The left-hand
-run of each pair is build, checkpatch and KUnit on x86_64, arm64
-and the WSL 6.18.40.1 backport; the right-hand run is the Hyper-V
-runtime on both hosted guests. Only the cover letter differs
-between the three pairs. Every diff hunk in this revision is what
-all six runs built and drilled.
+Every diff hunk in this revision is what eight runs across four
+pairs built and drilled: 36970357736 and 36970357645, then
+36972315239 and 36972315260, then 36975012643 and 36975012655,
+then 36978224379 and 36978224340. The left-hand run of each pair is
+build, checkpatch and KUnit on x86_64, arm64 and the WSL 6.18.40.1
+backport; the right-hand run is the Hyper-V runtime on both hosted
+guests. The first three pairs pinned one set of nine patch bytes
+against series/SHA256SUMS, and across those three only the cover
+letter differed.
 
-No run has pinned this revision's patch files. Only the
-commit-message text above seven of the diffs changed afterwards --
+The fourth pair pinned the same diff hunks under the revised commit
+messages, and 36978224379 and 36978224340 are the byte-exact pair
+for the patch files as they now read. Only the commit-message text
+above seven of the diffs changed after the first three pairs --
 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9 -- and no diff hunk moved.
 Cross-references that still named an eight-patch series are
 renumbered to nine, 9/9's rollback wording is rewritten as the
 plain revert condition its neighbours already use, and 1/9, 4/9
-and 5/9 are rewrapped to 72 columns. The byte-exact pair for these
-message texts is the run pair that lands on this revision.
+and 5/9 are rewrapped to 72 columns. series/SHA256SUMS records
+those message changes. The cover letter itself is not in
+series/SHA256SUMS and CI never applies it.
 
 One diff changed after the seven early drill runs named further
 below. 6/9 used to reformat the allocation-failure path in
@@ -251,17 +255,17 @@ Build, apply and KUnit for the first eight patches are runs
 36949824209, 36954234370 and 36957852118. Runtime is seven Hyper-V
 drill runs on the same hosted guests -- 36949824155, 36951361583,
 36952899809, 36954234419, 36955854882, 36957852050 and
-36965808247 -- plus 36970357645, 36972315260 and 36975012655, the
-three runs on the corrected 6/9 bytes. The claims below are drawn
-from those ten and are what repeated across them, not what one run
+36965808247 -- plus 36970357645, 36972315260 and 36975012655 on
+the corrected 6/9 bytes, and 36978224340 on the same diff hunks
+with the revised commit messages. The claims below are drawn from
+those eleven and are what repeated across them, not what one run
 happened to show. Three further passing drill runs are outside
 this count: 36956881309 and 36959412461 on superseded byte
 snapshots, and 36967341916, which shares its bytes with
 36965808247. Commit messages have been revised after their diffs
-settled,
-never touching a diff line: 6/9 and 8/9 after the first five, and
-again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9. Patch 9/9 has
-its own build and runtime runs, 36965808263 and 36965808247.
+settled, never touching a diff line: 6/9 and 8/9 after the first
+five, and again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9. Patch
+9/9 has its own build and runtime runs, 36965808263 and 36965808247.
 
 Build and apply:
 
@@ -298,21 +302,25 @@ KUnit (hosted, no Hyper-V required):
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
   The exact pinned bytes boot as a Gen2 guest with the candidate symbols
-  present. The lifecycle half is what repeated. On all ten runs, on
+  present. The lifecycle half is what repeated. On all eleven runs, on
   both guests, the vmbus_alloc_buffer map set returns to its exact
   baseline across 100 hv_netvsc rebind cycles: PHASE1-BEFORE and
   PHASE1-AFTER both read MAPS count=12 bytes=20279296 pages=4939, with
   zero splats and zero faults, and LIFECYCLE_VERDICT=PASS cycles=100
   phase2=yes every time. Intermediate samples taken during a rebind
-  show the in-flight maps. Two of the twenty guest-runs differ from
-  the other eighteen at those checkpoints. On 36972315260's
+  show the in-flight maps. Four of the twenty-two guest-runs differ
+  from the other eighteen at those checkpoints. On 36972315260's
   windows-2025 guest they read count=18 bytes=73887744 pages=18021
   at every ten-cycle checkpoint and 17 at cycle 100 -- flat, not
   growing. On 36975012655's windows-2025 guest they read 12 at
   every checkpoint except cycle 50, which reads count=11
-  bytes=19226624 pages=4683 -- a one-sample dip, not a trend. The
-  checkpoint lines are what the gate reads, and PHASE1-AFTER matches
-  PHASE1-BEFORE exactly on every one.
+  bytes=19226624 pages=4683 -- a one-sample dip, not a trend.
+  36978224340's guests are not flat at all: windows-latest samples
+  13, 11, 18, 18, 12, 15, 18, 18, 12 and 18 across the ten
+  checkpoints, and windows-2025 samples 12 except for 18 at cycle 60
+  and 11 at cycle 80. In-flight maps during a rebind are transient
+  state, not a gate. The checkpoint lines are what the gate reads,
+  and PHASE1-AFTER matches PHASE1-BEFORE exactly on every one.
 
   The mmap-versus-release window repeats the same way. With a userspace
   mapping held open across the teardown, the UIO device maps and the
@@ -321,25 +329,28 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   OPEN) on every run and both guests, 100 bind/unbind cycles complete
   with zero bind failures (400 steps, cycle_fails=0), and the
   vmbus_alloc_buffer map set still returns to its exact baseline. No
-  splat, fault, or accept4 failure appears on any of the twenty
+  splat, fault, or accept4 failure appears on any of the twenty-two
   guest-runs.
 
-  One wrapper count sits outside both gates and differs on that same
-  guest. after_lifecycle, the harness map count taken after
+  One wrapper count sits outside both gates and differs on two
+  guests. after_lifecycle, the harness map count taken after
   restore_nic, reads 14 against a baseline of 12 on 36972315260's
-  windows-2025 guest, where the other nineteen guest-runs read 13.
-  It is consistent with the restored NIC re-establishing a ring map
-  after the FINAL snapshot; that reading is an interpretation, not
-  a measurement, and neither PHASE1 nor PHASE2 is affected.
+  windows-2025 guest and 9 on 36978224340's windows-latest guest,
+  where the other twenty guest-runs read 13. Both readings are
+  consistent with the restored NIC re-establishing a ring map after
+  the FINAL snapshot, at different points in that window; that
+  reading is an interpretation, not a measurement, and neither
+  PHASE1 nor PHASE2 is affected.
 
   The 115200 serial capture also drops single bytes now and then,
   which is worth naming so a reader of the raw logs is not surprised
   by a corrupted word. 36975012655's windows-2025 guest prints its
   PHASE1-BEFORE line as MAPS count=12 byts=... with the e missing,
-  and earlier runs lost a different single character in other lines
-  the same way. The numbers on those lines are intact and the
-  harness reads the counts; no claim above is taken from a corrupted
-  word.
+  and 36978224340's guests print HYPERV_DRIL_BOOT,
+  HYPERV_DRIL_DEVICE and high_order_7plus_blocks_reread0, each with
+  one character gone. Earlier runs lost a single character the same
+  way. The numbers on those lines are intact and the harness reads
+  the counts; no claim above is taken from a corrupted word.
 
   Fragmentation depth is the part that does not repeat, and the letter
   does not claim it does. The buddy-fragmentation drill allocates until
@@ -388,8 +399,12 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
                                       exhausted=0
                       windows-2025    high_order_7plus=503->26->0
                                       exhausted=1
+    run 36978224340   windows-latest  high_order_7plus=500->26->0
+                                      exhausted=1
+                      windows-2025    high_order_7plus=503->26->0
+                                      exhausted=1
 
-  So full order-7 depletion is reached in seventeen of twenty
+  So full order-7 depletion is reached in nineteen of twenty-two
   guest-runs. The drill reports INCONCLUSIVE_CAP_REACHED on the
   three that stop short, rather than claiming an exhaustion it did
   not measure. One of those three is the only guest-run in the set
@@ -400,11 +415,11 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   still passed; only the fragmentation half stopped short.
 
   What does repeat is the claim the series is about: channel open
-  survives. On all twenty guest-runs the hv_netvsc rebind comes back
-  (nic_rebound=yes), with zero accept4 failures and zero oops, at every
-  measured depth -- including the three that stopped with a single
-  order-7 block still free. Where depletion was reached the verdict is
-  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, scoped as
+  survives. On all twenty-two guest-runs the hv_netvsc rebind comes
+  back (nic_rebound=yes), with zero accept4 failures and zero oops,
+  at every measured depth -- including the three that stopped with a
+  single order-7 block still free. Where depletion was reached the
+  verdict is PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, scoped as
   ordinary-x86_64-vzalloc-path; co-co-chunked-fallback-not-exercised.
 
   On an ordinary x86_64 guest vmbus_alloc_buffer() always takes
@@ -422,10 +437,9 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   console to a clone at exactly that moment. So the helper's
   groups=504 pages=2016 are a munmap tally, not forkable stacks, and
   buddy_order2= is reported from the buddy's own order-2-and-above
-  count for information -- 0, 4, 5, 286, 305, 339, 342, 362 and 466
-  have all
-  been seen depending on the run, and it is not what the post-ready
-  path trusts.
+  count for information -- 0, 4, 5, 286, 305, 333, 339, 342, 362,
+  and 466 have all been seen depending on the run, and it is not
+  what the post-ready path trusts.
 
   A green drill job is not by itself a gate closure -- the gate is the
   RESULT, VERDICT and MMAP_HOLD lines in the guest console.
@@ -462,13 +476,13 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes with
   lifecycle=0 fragment=0 splats=0 faults=0. There is no NULL
   dereference and no panic on any of them. Run 36975012655 adds the
-  same negative on the same bytes with one guest short of depletion:
-  both its guests report order7_dmesg=0 accept4_failures=0 oops=0
-  rebind=yes and LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes. The
-  crash was in the
-  completion path for a control RNDIS send, and those sends are part
-  of every one of the 100 rebind cycles, so this is the surface that
-  failed in 36960219285, shown surviving.
+  same negative on the same bytes with one guest short of depletion,
+  and 36978224340 repeats it on the revised commit messages. Both
+  runs report order7_dmesg=0 accept4_failures=0 oops=0 rebind=yes
+  and LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes on every guest.
+  The crash was in the completion path for a control RNDIS send, and
+  those sends are part of every one of the 100 rebind cycles, so
+  this is the surface that failed in 36960219285, shown surviving.
 
 What is not proven here
 -----------------------
