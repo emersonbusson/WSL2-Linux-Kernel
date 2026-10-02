@@ -146,6 +146,15 @@ What changed
   neither fails hard nor reaches the OOM killer when no compound page
   is available. Freed with kvfree() in the matching put_rndis_request().
 
+- The shared-page decision is an explicit helper. Mainline took the
+  chunked decrypt path from hv_is_isolation_supported() alone, so an
+  Arm CCA or Intel TDX guest without a Hyper-V isolation property
+  fell through to vzalloc() and could not re-encrypt its ring.
+  Guest-memory encryption is reported through
+  CC_ATTR_GUEST_MEM_ENCRYPT, independently of Hyper-V isolation, so
+  vmbus_needs_shared_pages() consults both plus the per-buffer
+  confidential flag. Ordinary private guests still take vzalloc().
+
 - The reclaim workqueue teardown now cancels every timer-pending
   delayed_work before destroy_workqueue(). drain_workqueue() only
   drains work that is queued or running; a delayed_work still waiting
@@ -326,12 +335,14 @@ this patch set, not platform evidence. Platform validation is follow-up
 work and this series should be read with that gap open.
 
 Note also that the chunked order-N -> order-0 degrade only runs when
-vmbus_uses_shared_page_chunks() is true - host-visible buffer and
-(Hyper-V isolation or CONFIG_ARM64). An ordinary x86_64 guest always
-takes the single vzalloc() path inside vmbus_alloc_buffer(), so the
-runtime numbers above speak to ring lifecycle and fragmentation
-resilience, not to the confidential fallback. That fallback is covered
-by the KUnit injection tests and awaits platform validation.
+vmbus_needs_shared_pages() is true: a non-confidential buffer on a
+guest where hv_is_isolation_supported() or
+cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT) holds. An ordinary x86_64
+guest always takes the single vzalloc() path inside
+vmbus_alloc_buffer(), so the runtime numbers above speak to ring
+lifecycle and fragmentation resilience, not to the confidential
+fallback. That fallback is covered by the KUnit injection tests and
+awaits platform validation.
 
 The design follows Michael Kelley's review of the v1 series. Comments
 welcome.
