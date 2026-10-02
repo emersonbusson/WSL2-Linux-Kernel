@@ -563,6 +563,18 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   those sends are part of every one of the 100 rebind cycles, so
   this is the surface that failed in 36960219285, shown surviving.
 
+  One observation from a different surface, which is not evidence
+  about these nine patches. A WSL 6.18 development tree carrying
+  this design -- a different base from 7.3-rc4 and a different code
+  shape, folding buffer release into vmbus_free_buffer() rather
+  than exporting vmbus_release_buffer() -- is installed on a daily
+  WSL2 workstation. A post-boot capture on it read zero splats,
+  zero order-N allocation failures, zero accept4 failures and no
+  code WARNING or BUG, with the VMBus buffer symbols present and
+  107 live vmbus_alloc_buffer regions. That is a snapshot under
+  real daily use, not a soak, and it qualifies nothing about the
+  series as submitted.
+
 What is not proven here
 -----------------------
 
