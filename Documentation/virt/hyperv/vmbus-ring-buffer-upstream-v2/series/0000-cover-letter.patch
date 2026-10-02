@@ -219,29 +219,44 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-Every measurement below is from patches 1/9 through 8/9 unless a run
-is named against the nine-patch bytes. Those eight diffs are
-byte-identical to the code the cited runs executed. Build, apply and
-KUnit for them are runs 36949824209, 36954234370 and 36957852118.
-Runtime is six Hyper-V drill runs on the same hosted guests --
-36949824155, 36951361583, 36952899809, 36954234419, 36955854882 and
-36957852050 -- so the claims below are what repeated across them,
-not what one run happened to show. The code diffs are identical
-across these runs; 6/9 and 8/9 commit messages were clarified after
-the first five without changing a single diff line. Patch 9/9 has
-its own build and runtime runs, 36965808263 and 36965808247.
+The byte-exact evidence for this revision is runs 36970357736 and
+36970357645. Both pin all nine patches against series/SHA256SUMS
+before building a line: 36970357736 for build, checkpatch and
+KUnit on x86_64, arm64 and the WSL 6.18.40.1 backport, and
+36970357645 for the Hyper-V runtime on both hosted guests.
+
+One diff changed after the runs named further below. 6/9 used to
+reformat the allocation-failure path in
+__vmbus_teardown_gpadl_buffer as two consecutive if (!info) tests
+around the leak flag -- a style regression this series introduced.
+It is now the single braced block that 1/9 through 5/9 produce.
+Both forms set gpadl->leak and return -ENOMEM, so the behaviour
+every earlier run measured is unchanged, but those runs did not
+execute 6/9 as it now reads. Patches 1/9 through 5/9 and 7/9
+through 9/9 are byte-identical to what they executed.
+
+Build, apply and KUnit for the first eight patches are runs
+36949824209, 36954234370 and 36957852118. Runtime is seven Hyper-V
+drill runs on the same hosted guests -- 36949824155, 36951361583,
+36952899809, 36954234419, 36955854882, 36957852050 and
+36965808247 -- and the eighth is run 36970357645, on this
+revision's bytes. The claims below are what repeated across all
+eight, not what one run happened to show. 6/9 and 8/9 commit
+messages were clarified after the first five without changing a
+single diff line. Patch 9/9 has its own build and runtime runs,
+36965808263 and 36965808247.
 
 Build and apply:
 
   The series applies cleanly to the pinned mainline base, commit
-  93f51579e7df ("Linux 7.3-rc4"), as nine stages. Run 36965808263
-  applies and builds all nine of those stages, including 9/9; the
-  earlier apply and build runs covered the first eight, whose diffs
-  are byte-identical in this revision. It builds on x86_64 and on
-  arm64 (aarch64-linux-gnu), with the Confidential Computing static
+  93f51579e7df ("Linux 7.3-rc4"), as nine stages. Run 36970357736
+  pins every patch against series/SHA256SUMS, then applies and
+  builds all nine stages; run 36965808263 did the same for the
+  previous 6/9 bytes. It builds on x86_64 and on arm64
+  (aarch64-linux-gnu), with the Confidential Computing static
   invariants enforced on both. checkpatch --strict is clean across
-  the nine patches. The WSL 6.18.40.1 backport builds with W=1 and
-  sparse.
+  the nine patches, 0 errors and 0 warnings on each. The WSL
+  6.18.40.1 backport builds with W=1 and sparse.
 
 KUnit (hosted, no Hyper-V required):
 
@@ -265,7 +280,7 @@ KUnit (hosted, no Hyper-V required):
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
   The exact pinned bytes boot as a Gen2 guest with the candidate symbols
-  present. The lifecycle half is what repeated. On all seven runs, on
+  present. The lifecycle half is what repeated. On all eight runs, on
   both guests, the vmbus_alloc_buffer map set returns to its exact
   baseline across 100 hv_netvsc rebind cycles: PHASE1-BEFORE and
   PHASE1-AFTER both read MAPS count=12 bytes=20279296 pages=4939, with
@@ -281,7 +296,7 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   OPEN) on every run and both guests, 100 bind/unbind cycles complete
   with zero bind failures (400 steps, cycle_fails=0), and the
   vmbus_alloc_buffer map set still returns to its exact baseline. No
-  splat, fault, or accept4 failure appears on any of the fourteen
+  splat, fault, or accept4 failure appears on any of the sixteen
   guest-runs.
 
   Fragmentation depth is the part that does not repeat, and the letter
@@ -319,14 +334,18 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
                                       exhausted=1
                       windows-2025    high_order_7plus=495->26->0
                                       exhausted=1
+    run 36970357645   windows-latest  high_order_7plus=496->26->0
+                                      exhausted=1
+                      windows-2025    high_order_7plus=499->25->0
+                                      exhausted=1
 
-  So full order-7 depletion is reached in twelve of fourteen
+  So full order-7 depletion is reached in fourteen of sixteen
   guest-runs. The drill reports INCONCLUSIVE_CAP_REACHED on the two
   that stop short, rather than claiming an exhaustion it did not
   measure.
 
   What does repeat is the claim the series is about: channel open
-  survives. On all fourteen guest-runs the hv_netvsc rebind comes back
+  survives. On all sixteen guest-runs the hv_netvsc rebind comes back
   (nic_rebound=yes), with zero accept4 failures and zero oops, at every
   measured depth -- including the two that stopped with a single
   order-7 block still free. Where depletion was reached the verdict is
@@ -348,7 +367,8 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   console to a clone at exactly that moment. So the helper's
   groups=504 pages=2016 are a munmap tally, not forkable stacks, and
   buddy_order2= is reported from the buddy's own order-2-and-above
-  count for information -- 0, 5, 286, 305, 339, 362 and 466 have all
+  count for information -- 0, 5, 286, 305, 339, 342, 362 and 466
+  have all
   been seen depending on the run, and it is not what the post-ready
   path trusts.
 
@@ -377,15 +397,16 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   fragmentation the drill creates. That run is cited here as a failure
   only.
 
-  Patch 9/9 is the fix, and run 36965808247 is the runtime proof that
-  it holds. That run boots the nine-patch bytes on both hosted guests
-  and drives the same fragmentation and lifecycle sequence that found
-  the panic. Both guests report
+  Patch 9/9 is the fix. Run 36965808247 is the runtime proof that it
+  holds, and run 36970357645 repeats it on this revision's bytes.
+  Both boot as a Gen2 guest on both hosted guests and drive the same
+  fragmentation and lifecycle sequence that found the panic. Both
+  guests on both runs report
   VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION with
   order7_dmesg=0 accept4_failures=0 oops=0 rebind=yes, and
   LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes with
   lifecycle=0 fragment=0 splats=0 faults=0. There is no NULL
-  dereference and no panic on those bytes. The crash was in the
+  dereference and no panic on either run. The crash was in the
   completion path for a control RNDIS send, and those sends are part
   of every one of the 100 rebind cycles, so this is the surface that
   failed in 36960219285, shown surviving.
