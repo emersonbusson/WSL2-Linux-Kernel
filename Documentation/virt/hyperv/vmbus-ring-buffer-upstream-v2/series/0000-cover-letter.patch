@@ -119,9 +119,11 @@ What changed
   there is no owner left to defer the work to reclaim. The compat
   alloc/free pair keeps the same per-chunk re-encryption in
   vmbus_free_buffer(). What those adapters deliberately do not carry
-  is the retained-owner lifetime: each builds an owner and drops it
-  before returning, so the compat surface stays synchronous and
-  self-contained.
+  is the retained-owner lifetime. vmbus_alloc_buffer() builds an
+  owner inside vmbus_alloc_buffer_owned() and removes it before
+  returning. The establish and teardown adapters build an owner-less
+  stack buffer instead, so decrypt and re-encryption happen inline
+  and the compat surface stays synchronous and self-contained.
   There is one intermediate shape worth naming: 1/9 gives
   vmbus_alloc_buffer() a bool confidential argument. The mainline
   function decides host-visibility from channel->co_external_memory
@@ -332,11 +334,11 @@ changed since. The claims below are drawn from the eleven drill
 runs tabulated below -- twenty-two guest-runs -- and are what
 repeated across them, not what one run happened to show. They are
 claims about the design those runs exercised, not measurements of
-the bytes posted here; see the pin note above. One further passing drill run sits
-outside both sets: 36967341916, which shares its bytes with
-36965808247. Two earlier runs on superseded byte snapshots are
-not passes and are not counted: 36956881309 stopped short on
-windows-latest and 36959412461 on windows-2025, both
+the bytes posted here; see the pin note above. One further passing
+drill run sits outside both sets: 36967341916, which shares its
+bytes with 36965808247. Two earlier runs on superseded byte
+snapshots are not passes and are not counted: 36956881309 stopped
+short on windows-latest and 36959412461 on windows-2025, both
 INCONCLUSIVE_CAP_REACHED.
 Commit messages have been revised after their diffs settled,
 never touching a diff line: 6/9 and 8/9 after the first five, and
