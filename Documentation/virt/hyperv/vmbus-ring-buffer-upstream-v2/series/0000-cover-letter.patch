@@ -340,10 +340,12 @@ bytes with 36965808247. Two earlier runs on superseded byte
 snapshots are not passes and are not counted: 36956881309 stopped
 short on windows-latest and 36959412461 on windows-2025, both
 INCONCLUSIVE_CAP_REACHED.
-Commit messages have been revised after their diffs settled,
-never touching a diff line: 6/9 and 8/9 after the first five, and
-again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9. Patch 9/9 has
-its own build and runtime runs, 36965808263 and 36965808247.
+Within that census, commit messages were revised after their diffs
+settled and without touching a diff line: 6/9 and 8/9 after the
+first five, and again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9.
+The later revision described above did change 6/9 through 9/9
+diffs; that one sits outside the census. Patch 9/9 has its own
+build and runtime runs, 36965808263 and 36965808247.
 
 Build and apply:
 
