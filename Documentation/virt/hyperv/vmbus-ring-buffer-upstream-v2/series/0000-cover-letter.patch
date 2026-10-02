@@ -163,81 +163,90 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-The measurements below were taken on the seven-patch bytes of run
-36943904717. The eight-patch series differs in two places the runtime
-path can see: 0006 now cancels timer-pending delayed_work before
-destroy_workqueue() (module-exit only, not on the rebind path), and 0008
-allocates the RNDIS request descriptor with kvzalloc_obj() (on the rebind
-and subchannel-open path). The eight-patch bytes are being re-measured
-and the numbers below will be restated against them before this is
-sent. The structural claims -- zero splats, zero accept4 failures,
-exact map-set return -- are what the drill is re-proving.
+Every measurement below is from the eight-patch bytes. Build, apply and
+KUnit are run 36949824209; runtime is run 36949824155 on both hosted
+guests (windows-latest and windows-2025).
+
+Build and apply:
+
+  The series applies cleanly to the pinned mainline base 93f51579e7df
+  (Linux 7.3-rc4) as eight stages and builds on x86_64 and arm64
+  (aarch64-linux-gnu), with the Confidential Computing static
+  invariants enforced on both. The WSL 6.18.40.1 backport builds with
+  W=1 and sparse.
 
 KUnit (hosted, no Hyper-V required):
 
-  20/20 named cases on x86_64 against the seven-patch bytes, in two
-  suites -- hyperv-vmbus-buffer 16 and hyperv-uio-mmap 4 -- covering
-  size rounding, ownership decisions, partial-allocation cleanup,
-  GPADL post-failure injection at header/body/teardown, response-state
-  mapping including host rejection and rescind, the order-descent
-  fallback with injected order >0 failures, and clean exhaustion. The
-  separate WSL 6.18.40.1 backport build passes its own 15 named cases
-  in two differently named suites -- hyperv-vmbus-gpadl-lifetime 12 and
-  hyperv-uio-hv-generic-mmap 3 -- covering GPADL rescind and re-encrypt
-  lifetime plus UIO mmap. Only vmbus_buffer_size_rounding_test is
-  shared by name. CoCo gate self-tests are green.
+  20/20 named cases on x86_64, in two suites -- hyperv-vmbus-buffer 16
+  and hyperv-uio-mmap 4 -- covering size rounding, ownership decisions,
+  partial-allocation cleanup, GPADL post-failure injection at
+  header/body/teardown, response-state mapping including host rejection
+  and rescind, the order-descent fallback with injected order >0
+  failures, and clean exhaustion. The separate WSL 6.18.40.1 backport
+  build passes its own 15 named cases in two differently named suites --
+  hyperv-vmbus-gpadl-lifetime 12 and hyperv-uio-hv-generic-mmap 3 --
+  covering GPADL rescind and re-encrypt lifetime plus UIO mmap. Only
+  vmbus_buffer_size_rounding_test is shared by name. 0008 touches
+  rndis_filter.c, which no named case covers; the named cases are the
+  ones this series adds, and they pass on these bytes.
 
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
   The exact pinned bytes boot as a Gen2 guest with the candidate symbols
   present. Across 100 hv_netvsc rebind cycles the vmbus_alloc_buffer map
   set returns to its exact baseline (12 maps / 20 279 296 bytes / 4 939
-  pages before and after), with zero splats and zero faults. That is the
-  measured ordinary-guest evidence on these bytes.
+  pages before and after on both guests), with zero splats and zero
+  faults. Intermediate samples taken during a rebind briefly show the
+  in-flight maps; the checkpoint lines are what the gate reads, and
+  PHASE1-AFTER matches PHASE1-BEFORE exactly. That is the measured
+  ordinary-guest evidence on these bytes.
 
-  The mmap-versus-release window is now measured. With a userspace
-  mapping held open across the teardown, the UIO device maps and the
-  2 MiB subchannel ring both stay alive while the ring is freed
+  The mmap-versus-release window is measured on the same run. With a
+  userspace mapping held open across the teardown, the UIO device maps
+  and the 2 MiB subchannel ring both stay alive while the ring is freed
   (/dev/uio0 maps=5, sysfs ring maps=1, PHASE2 hold-in-mmap window
   OPEN), 100 bind/unbind cycles complete with zero bind failures (400
   steps, cycle_fails=0), and the vmbus_alloc_buffer map set still
   returns to its exact baseline. No splat, fault, or accept4 failure
-  appears on either guest.
+  appears on either guest. Both report LIFECYCLE_VERDICT=PASS
+  cycles=100 phase2=yes and HYPERV_DRILL_RESULT status=PASS with
+  splats=0 faults=0.
 
-  Fragmentation resilience is measured on the same guest. The
+  Fragmentation resilience is measured on the same guests. The
   buddy-fragmentation drill allocates until /proc/buddyinfo holds no free
   block of order 7 or above, then punches physical buddy holes whose
   partners it keeps pinned, so nothing above order-0 can coalesce. Both
-  hosted guests now reach a depleted buddy: exhausted=1 with
-  high_order_7plus_blocks=0 (windows-latest 497->25->0, windows-2025
-  499->27->0), pagemap=1. The drill's post-ready path is fork-free:
-  after ready=1 every parse, every buddy and map count, and the channel
-  rebind run on shell builtins until the helper is torn down. That
-  constraint is load bearing -- a munmap of 16 KiB frees four order-0
-  pages into the per-cpu page cache rather than one order-2 buddy
-  block, and drain_all_pages() never runs against a fully mlocked
-  pattern -- so the helper's 504 groups / 2016 pages (windows-latest)
-  and 512 / 2048 (windows-2025) are a munmap tally, not forkable
-  stacks. The ready=1 line reports the buddy's own order-2-and-above
-  count as buddy_order2= -- 4 on windows-latest, 300 on windows-2025
-  -- which is what a clone would actually have found. Channel open
-  under that pattern survives on both -- rebind yes, zero accept4
-  failures, zero oops -- and the ring-allocation verdict is
-  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the
-  historical one, that channel open does not die under buddy
-  fragmentation. On an ordinary x86_64 guest vmbus_alloc_buffer() always
-  takes vzalloc(), so the chunked order-N -> order-0 degrade is not what
-  ran here; that path is covered by fault injection and stays open on CoCo
-  hardware. A green drill job is not by itself a gate closure -- the gate
-  is the RESULT, VERDICT and MMAP_HOLD lines in the guest console.
+  hosted guests reach a depleted buddy: exhausted=1, pagemap=1, with
+  high_order_7plus=497->26->0 on windows-latest and 500->26->0 on
+  windows-2025. The drill's post-ready path is fork-free: after ready=1
+  every parse, every buddy and map count, and the channel rebind run on
+  shell builtins until the helper is torn down. That constraint is load
+  bearing -- a munmap of 16 KiB frees four order-0 pages into the
+  per-cpu page cache rather than one order-2 buddy block, and
+  drain_all_pages() never runs against a fully mlocked pattern -- so the
+  helper's 512 groups / 2048 pages (windows-latest) and 504 / 2016
+  (windows-2025) are a munmap tally, not forkable stacks. The ready=1
+  line reports the buddy's own order-2-and-above count as buddy_order2=
+  -- 0 on both guests -- which is what a clone would actually have
+  found. Channel open under that pattern survives on both -- rebind yes,
+  zero accept4 failures, zero oops -- and the ring-allocation verdict is
+  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the historical
+  one, that channel open does not die under buddy fragmentation. On an
+  ordinary x86_64 guest vmbus_alloc_buffer() always takes vzalloc(), so
+  the chunked order-N -> order-0 degrade is not what ran here; that path
+  is covered by fault injection and stays open on CoCo hardware. A green
+  drill job is not by itself a gate closure -- the gate is the RESULT,
+  VERDICT and MMAP_HOLD lines in the guest console.
 
-  A later run against a build that still carried a second high-order
+  An earlier run against a build that still carried a second high-order
   allocation on the subchannel-open path -- the RNDIS request
-  descriptor, since fixed in 8/8 -- reached a buddy with
-  buddy_order2=1 and died in netvsc_subchan_work -> get_rndis_request
-  with "page allocation failure: order:2" and an oom-kill of the drill
-  shell. That is the failure mode 0008 removes. Its absence on the
-  eight-patch bytes is what the re-measure has to show.
+  descriptor, fixed in 8/8 -- reached a buddy with buddy_order2=1 and
+  died in netvsc_subchan_work -> get_rndis_request with "page
+  allocation failure: order:2" and an oom-kill of the drill shell. The
+  eight-patch run above reached a tighter buddy than that
+  (buddy_order2=0 on both guests) and the subchannel open survived:
+  nic_rebound=yes, accept4_failures=0, oops=0. That is the failure mode
+  0008 removes, shown absent on the bytes that remove it.
 
 What is not proven here
 -----------------------
