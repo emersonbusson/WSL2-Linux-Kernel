@@ -186,7 +186,17 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	sh /scripts/vmbus-fragmentation-drill.sh "${FRAG_HOG:-512}" /var/tmp/fragment.log
 	FRAG_STATUS=$?
 	echo "HYPERV_DRILL_FRAGMENT status=$FRAG_STATUS"
-	echo "HYPERV_DRILL_MAPS after_fragment $(vmbus_maps)"
+	# A signal death (137 is SIGKILL) means the drill shell was OOM-killed
+	# while the hold was pinned and the helper is still tearing its
+	# mappings down. This process is PID 1 and cannot be killed, so the
+	# next fork is copy_process() wanting an order-2 stack with nothing
+	# left to reclaim -- the 36982941081 panic. Skip the measurement
+	# rather than fork into residual pressure.
+	if [ "${FRAG_STATUS:-0}" -gt 3 ] 2>/dev/null; then
+		echo "HYPERV_DRILL_MAPS after_fragment skipped=signal status=$FRAG_STATUS"
+	else
+		echo "HYPERV_DRILL_MAPS after_fragment $(vmbus_maps)"
+	fi
 else
 	echo "HYPERV_DRILL_FRAGMENT status=skipped reason=${NIC:+no_helper}${NIC:-no_nic}"
 fi
@@ -201,7 +211,13 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	sh /scripts/vmbus-lifecycle-drill.sh 100 /var/tmp/lifecycle.log
 	LIFECYCLE_STATUS=$?
 	echo "HYPERV_DRILL_LIFECYCLE status=$LIFECYCLE_STATUS"
-	echo "HYPERV_DRILL_MAPS after_lifecycle $(vmbus_maps)"
+	# Same rule as after_fragment: a signal death must not provoke a fork
+	# while the helper's teardown may still be reclaiming.
+	if [ "${LIFECYCLE_STATUS:-0}" -gt 3 ] 2>/dev/null; then
+		echo "HYPERV_DRILL_MAPS after_lifecycle skipped=signal status=$LIFECYCLE_STATUS"
+	else
+		echo "HYPERV_DRILL_MAPS after_lifecycle $(vmbus_maps)"
+	fi
 else
 	echo "HYPERV_DRILL_LIFECYCLE status=skipped reason=${NIC:+no_helper}${NIC:-no_nic}"
 fi
@@ -251,6 +267,15 @@ fi
 if [ "$LIFECYCLE_STATUS" = 1 ] || [ "$FRAG_STATUS" = 1 ]; then
 	RESULT=FAIL
 	SCOPE=drill-failed
+fi
+# Statuses outside the documented 0..3 set mean the drill died on a
+# signal instead of reporting (137 is SIGKILL). The measurement did
+# not complete: still FAIL, but say so rather than leaving scope=none
+# to read as candidate damage.
+if [ "${LIFECYCLE_STATUS:-0}" -gt 3 ] 2>/dev/null ||
+	[ "${FRAG_STATUS:-0}" -gt 3 ] 2>/dev/null; then
+	RESULT=FAIL
+	SCOPE=drill-killed
 fi
 
 emit_status "$RESULT"

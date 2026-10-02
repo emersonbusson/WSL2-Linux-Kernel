@@ -81,11 +81,13 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1517,8 +1519,43 @@ static void usage(void)
 		"       vmbus_drill_helper fragment-buddy <mib> <hold_seconds>\n");
 }
 
+/*
+ * Die with the caller. Every mode holds memory -- a UIO mapping, a locked
+ * hog, a buddy pattern -- that must not outlive the process that asked for
+ * it. The drills run as children of a shell the OOM killer is free to take:
+ * fragment-buddy pins itself at -1000 precisely so that shell is the only
+ * killable task left, and 36982941081 is what that does when a rebind slab
+ * allocation OOMs. The shell cannot run a trap on SIGKILL, so its teardown
+ * never kills the hog, the hog is reparented and keeps the guest out of
+ * memory, and init's next fork is copy_process() looking for an order-2
+ * stack with "no killable processes" -- a guest panic.
+ *
+ * PR_SET_PDEATHSIG with SIGKILL cannot be caught, blocked or ignored, and
+ * it fires on any parent death including a normal exit that skipped the
+ * teardown. Fail closed if it cannot be armed: holding memory without the
+ * guarantee is the bug being fixed. The getppid() re-read closes the
+ * fork-to-prctl race: if the caller died in that window the signal is never
+ * delivered and this process would be orphaned anyway.
+ */
+static int arm_parent_death(void)
+{
+	pid_t ppid = getppid();
+
+	if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0) {
+		fprintf(stderr, "PR_SET_PDEATHSIG: %s\n", strerror(errno));
+		return -1;
+	}
+	if (getppid() != ppid) {
+		fprintf(stderr, "caller exited before PR_SET_PDEATHSIG\n");
+		return -1;
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (arm_parent_death())
+		return 2;
 	if (argc < 2) {
 		usage();
 		return 2;
