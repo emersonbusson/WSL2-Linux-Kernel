@@ -197,47 +197,99 @@ fi
 say "--- BUDDY AFTER FRAGMENT ---"
 buddy
 
-# Count free blocks of order 7 and above. The helper's ready=1 line carries
-# `high_order_7plus=before->locked->after`, and the third value is measured
-# while the pattern is still pinned in place. That is the authoritative
-# count: this re-read happens later, and by then the helper can have been
-# reclaimed and the 2 GiB of locked pages returned to the buddy, which is
-# how run 36800977305 measured 356 blocks where the helper had just
-# measured 1. Keep both; the verdict trusts the helper's.
-#
-# buddyinfo layout is `Node <n>, zone <name>` followed by one count per order,
-# so order-7 is field 12 and higher orders follow.
-HIGH_ORDER_HELPER="$(printf '%s\n' "$FRAG_LINE" | sed -n 's/.*high_order_7plus=[0-9]*->[0-9]*->\([0-9]*\).*/\1/p')"
-HIGH_ORDER=$(awk '
-	{
-		for (i = 12; i <= NF; i++)
-			if ($i + 0 > 0) sum += $i
-	}
-	END { print sum + 0 }
-' /proc/buddyinfo 2>/dev/null)
-say "high_order_7plus_blocks_helper=${HIGH_ORDER_HELPER:-unknown} high_order_7plus_blocks_reread=${HIGH_ORDER:-unknown}"
+# --- post-ready: builtins only, no fork ---------------------------------
+# From here until the helper teardown below there must be zero forks.
+# copy_process() wants THREAD_SIZE_ORDER (order-2) for a shell stack, and
+# the buddy at this moment has none: every freed page of the pattern is an
+# order-0 whose partner is pinned, and the order-2 reserve the helper
+# munmap'd landed in the per-cpu page cache -- /proc/buddyinfo does not
+# count it and the alloc slowpath will not drain it, because
+# drain_all_pages() runs only after direct reclaim makes progress and the
+# pattern is all mlocked so it never does. Run 36940519876 read ready=1
+# stacks=504 while buddyinfo held 1459*4kB 0*8kB 0*16kB, the first $(sed)
+# died with "Killed", init's next clone panicked the guest and both the
+# RESULT and VERDICT lines were lost. $(...), pipelines, sed, awk, grep,
+# readlink, dmesg and sleep are all forks; parameters, case, read, set --
+# and redirections are not.
+
+# Parse `key=value` out of the helper's ready=1 line into $1 (the caller's
+# variable name). Values are single tokens; `stop=` carries hyphens and
+# `unsplit=` may carry a leading dash, neither of which contains a space.
+kv() {
+	_kv_rest="${FRAG_LINE#*"$2"}"
+	if [ "$_kv_rest" = "$FRAG_LINE" ]; then
+		return 1
+	fi
+	_kv_val="${_kv_rest%% *}"
+	_kv_val="${_kv_val%%;*}"
+	eval "$1=\$_kv_val"
+	return 0
+}
+
+HIGH_ORDER_HELPER=
+_p="${FRAG_LINE#*high_order_7plus=}"
+if [ "$_p" != "$FRAG_LINE" ]; then
+	_t="${_p%% *}"
+	_t="${_t%%;*}"
+	# _t is before->locked->after; the third value is measured with the
+	# pattern pinned and is the authoritative count.
+	HIGH_ORDER_HELPER="${_t##*->}"
+fi
+EXHAUSTED=
+kv EXHAUSTED 'exhausted=' || true
+PAGEMAP=
+kv PAGEMAP 'pagemap=' || true
+STOPREASON=
+kv STOPREASON 'stop=' || true
+UNSPLIT=
+kv UNSPLIT 'unsplit=' || true
+
+# Reread order-7-and-up from buddyinfo. buddyinfo is `Node <n>, zone
+# <name>` followed by one count per order, so order-0 is the 5th token and
+# order-7 the 12th; drop the four header fields and count from order 7.
+HIGH_ORDER=0
+if [ -r /proc/buddyinfo ]; then
+	while read -r _bline; do
+		set -- $_bline
+		shift 4 2>/dev/null || continue
+		_ord=0
+		for _c in "$@"; do
+			if [ "$_ord" -ge 7 ]; then
+				case "$_c" in
+				'' | *[!0-9]*) ;;
+				*) HIGH_ORDER=$((HIGH_ORDER + _c)) ;;
+				esac
+			fi
+			_ord=$((_ord + 1))
+		done
+	done < /proc/buddyinfo
+fi
+say "high_order_7plus_blocks_helper=${HIGH_ORDER_HELPER:-unknown} high_order_7plus_blocks_reread=$HIGH_ORDER"
 
 # --- exercise channel open under fragmentation ------------------------------
 say "=== CHANNEL OPEN UNDER FRAGMENTATION ==="
 
 # The instance id is host-assigned and differs on every VM. Discover it from
-# the hv_netvsc binding.
+# the hv_netvsc binding. ${d##*/} replaces basename and the hit lands in NIC
+# instead of on stdout: $(discover_nic) is a subshell, and a subshell is a
+# fork -- the one thing this window cannot afford.
 discover_nic() {
-	local d n
-	for d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
-		[ -e "$d" ] || continue
-		n="$(basename "$d")"
-		case "$n" in
+	for _dn_d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
+		[ -e "$_dn_d" ] || continue
+		_dn_n="${_dn_d##*/}"
+		case "$_dn_n" in
 		bind | unbind | uevent | module | new_id | remove_id) continue ;;
 		esac
-		[ -d "$d" ] || continue
-		printf '%s\n' "$n"
+		[ -d "$_dn_d" ] || continue
+		NIC="$_dn_n"
 		return 0
 	done
 	return 1
 }
 
-NIC="${NIC:-$(discover_nic || true)}"
+if [ -z "${NIC:-}" ]; then
+	discover_nic || true
+fi
 if [ -z "${NIC:-}" ]; then
 	say "REFUSE: no synthetic NIC bound to hv_netvsc; cannot force ring realloc"
 	if [ -n "${HOGPID:-}" ]; then
@@ -249,17 +301,40 @@ fi
 say "NIC=$NIC (discovered from hv_netvsc binding)"
 DRIVER_DIR="/sys/bus/vmbus/drivers"
 
-say "PRE-OPEN $(grep -c vmbus_alloc_buffer /proc/vmallocinfo 2>/dev/null || echo 0) maps"
+# Count vmbus_alloc_buffer maps in /proc/vmallocinfo with a read loop.
+# grep -c forks; read is a builtin.
+count_vmbus_maps() {
+	MAP_COUNT=0
+	if [ -r /proc/vmallocinfo ]; then
+		while read -r _vline; do
+			case "$_vline" in
+			*vmbus_alloc_buffer*) MAP_COUNT=$((MAP_COUNT + 1)) ;;
+			esac
+		done < /proc/vmallocinfo
+	fi
+}
+count_vmbus_maps
+say "PRE-OPEN $MAP_COUNT maps"
 
 # force a fresh ring allocation by rebinding the synthetic NIC
 echo "$NIC" >"$DRIVER_DIR/hv_netvsc/unbind" 2>>"$LOG" || true
-sleep 1
+# read -t as a delay, not sleep: sleep is a binary and a binary is a fork.
+# stdin is the console (see the tick source above) and nobody is typing, so
+# read -t blocks for the interval and then fails.
+read -t 1 _junk 2>/dev/null || true
 echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG" || say "rebind_fail"
-sleep 2
+read -t 2 _junk 2>/dev/null || true
 
-say "POST-OPEN $(grep -c vmbus_alloc_buffer /proc/vmallocinfo 2>/dev/null || echo 0) maps"
-NIC_DRIVER="$(readlink -f "/sys/bus/vmbus/devices/$NIC/driver" 2>/dev/null || echo none)"
-say "nic_driver=$NIC_DRIVER"
+count_vmbus_maps
+say "POST-OPEN $MAP_COUNT maps"
+
+# Did the NIC come back under hv_netvsc? Test the driver directory with a
+# glob instead of readlink -f, which forks.
+REBOUND=no
+for _d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
+	[ "${_d##*/}" = "$NIC" ] && REBOUND=yes
+done
+say "nic_rebound=$REBOUND"
 
 # --- verdict ----------------------------------------------------------------
 # What this drill can and cannot claim on an ordinary x86_64 Hyper-V guest:
@@ -279,34 +354,46 @@ say "nic_driver=$NIC_DRIVER"
 #   The chunked fallback itself is covered by the KUnit fault-injection test
 #   in 0005-order-zero-fallback-injection.patch and remains runtime-open on
 #   CoCo hardware (COCO-1..5).
+
+# Buddy while the pattern is still pinned. The helper's own
+# high_order_7plus=after inside ready=1 is measured at that same moment and
+# is what the verdict trusts; this reread is secondary evidence and is
+# expected to disagree if the pattern was reclaimed after ready=1.
+say "--- BUDDY FINAL ---"
+buddy
+
+# --- teardown hog -----------------------------------------------------------
+# The helper is killed, not waited out: killing it reclaims the 2 GiB hog
+# and the hole-held pages, which is what gives init an order-2 block to fork
+# the lifecycle drill from. kill and wait are builtins. Null-safe: set -u
+# aborts on an unset HOGPID, and a missing teardown would leave the 600s
+# hold pinned after the verdict is already out -- and would leave init with
+# no order-2 stack for the next clone, which is the panic this path exists
+# to prevent.
+if [ -n "${HOGPID:-}" ]; then
+	kill "$HOGPID" 2>/dev/null || true
+	wait "$HOGPID" 2>/dev/null || true
+fi
+
+# --- dmesg scan -------------------------------------------------------------
+# After the teardown the buddy is whole again and forks are safe. The scan
+# needs dmesg, tail and grep, all binaries. init's HYPERV_DRILL_SPLATS and
+# HYPERV_DRILL_FAULTS count the same events independently; this scan is
+# what feeds accept4_failures= and oops= on the RESULT line.
 say "--- DMESG SCAN ---"
 DM="$(dmesg 2>/dev/null | tail -500)"
-ORDER7="$(echo "$DM" | grep -c 'order:7' || true)"
-ACCEPT="$(echo "$DM" | grep -c 'accept4 failed' || true)"
-OOPS="$(echo "$DM" | grep -cE 'BUG:|Oops:|WARNING:|hung task' || true)"
-
-REBOUND=no
-case "$NIC_DRIVER" in
-*hv_netvsc*) REBOUND=yes ;;
-esac
+ORDER7="$(printf '%s\n' "$DM" | grep -c 'order:7' || true)"
+ACCEPT="$(printf '%s\n' "$DM" | grep -c 'accept4 failed' || true)"
+OOPS="$(printf '%s\n' "$DM" | grep -cE 'BUG:|Oops:|WARNING:|hung task' || true)"
 
 # exhausted=1 is what separates "the buddy was deprived of order-7" from
-# "we stopped early and the untouched remainder still has it". The previous
-# runs looked like the second while the log said the first, because the cap
-# was MemAvailable and the loop stopped at the ceiling before order-7 was
-# gone. stop= names why the loop ended.
-EXHAUSTED="$(printf '%s\n' "$FRAG_LINE" | sed -n 's/.*exhausted=\([0-9]*\).*/\1/p')"
-PAGEMAP="$(printf '%s\n' "$FRAG_LINE" | sed -n 's/.*pagemap=\([0-9]*\).*/\1/p')"
-STOPREASON="$(printf '%s\n' "$FRAG_LINE" | sed -n 's/.*stop=\([a-z0-9-]*\).*/\1/p')"
-# unsplit= is the chase floor's measured value at stop: buddyinfo order-0
-# plus the per-cpu page cache. It is not a gate input -- stop= already
-# names the floor -- but carrying it on the RESULT line makes a
-# chase-unsplit-floor stop self-explanatory without digging the helper
+# "we stopped early and the untouched remainder still has it". stop= names
+# why the loop ended. unsplit= is the chase floor's measured value at stop:
+# buddyinfo order-0 plus the per-cpu page cache. It is not a gate input --
+# stop= already names the floor -- but carrying it on the RESULT line makes
+# a chase-unsplit-floor stop self-explanatory without digging the helper
 # line out of the console, which is how run 36811867648 was diagnosed.
-UNSPLIT="$(printf '%s\n' "$FRAG_LINE" | sed -n 's/.*unsplit=\(-\?[0-9]*\).*/\1/p')"
-# Trust the helper's post-chase count; the reread is secondary evidence and
-# is expected to disagree if the pattern was reclaimed after ready=1.
-HIGH_ORDER_REREAD="${HIGH_ORDER:-unknown}"
+HIGH_ORDER_REREAD="$HIGH_ORDER"
 HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER}"
 say "RESULT high_order_7plus_blocks=${HIGH_ORDER:-unknown} (reread=${HIGH_ORDER_REREAD:-$HIGH_ORDER}) exhausted=${EXHAUSTED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
 
@@ -338,17 +425,6 @@ elif [ "$ACCEPT" -gt 0 ] || [ "$OOPS" -gt 0 ]; then
 else
 	say "VERDICT=FAIL channel did not rebind after fragmentation"
 	RC=1
-fi
-
-say "--- BUDDY FINAL ---"
-buddy
-
-# --- teardown hog -----------------------------------------------------------
-# Null-safe: set -u aborts on an unset HOGPID, and a missing teardown line
-# would leave the helper's 600s hold pinned after the verdict is already out.
-if [ -n "${HOGPID:-}" ]; then
-	kill "$HOGPID" 2>/dev/null || true
-	wait "$HOGPID" 2>/dev/null || true
 fi
 say "=== END vmbus-fragmentation-drill ==="
 say "log=$LOG"

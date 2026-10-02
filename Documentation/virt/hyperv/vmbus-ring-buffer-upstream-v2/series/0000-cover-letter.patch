@@ -102,13 +102,17 @@ Testing
 
 KUnit (hosted, no Hyper-V required):
 
-  20/20 named cases on x86_64 against the seven-patch bytes, covering
+  20/20 named cases on x86_64 against the seven-patch bytes, in two
+  suites -- hyperv-vmbus-buffer 16 and hyperv-uio-mmap 4 -- covering
   size rounding, ownership decisions, partial-allocation cleanup,
   GPADL post-failure injection at header/body/teardown, response-state
   mapping including host rejection and rescind, the order-descent
   fallback with injected order >0 failures, and clean exhaustion. The
-  separate WSL 6.18.40.1 backport build passes 15/15 of the same
-  named cases. CoCo gate self-tests are green.
+  separate WSL 6.18.40.1 backport build passes its own 15 named cases
+  in two differently named suites -- hyperv-vmbus-gpadl-lifetime 12 and
+  hyperv-uio-hv-generic-mmap 3 -- covering GPADL rescind and re-encrypt
+  lifetime plus UIO mmap. Only vmbus_buffer_size_rounding_test is
+  shared by name. CoCo gate self-tests are green.
 
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
@@ -132,11 +136,17 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   partners it keeps pinned, so nothing above order-0 can coalesce. Both
   hosted guests now reach a depleted buddy: exhausted=1 with
   high_order_7plus_blocks=0 (windows-latest 500->26->0, windows-2025
-  502->26->0), pagemap=1, and an order-2 stack reserve the shell can
-  still fork from -- 512 groups / 2048 pages on windows-latest and 504
-  / 2016 on windows-2025, each group released as a single 16 KiB munmap
-  so it coalesces into a real order-2 buddy block rather than four
-  order-0 crumbs. Channel open under that pattern survives on both --
+  502->26->0), pagemap=1. The drill's post-ready path is fork-free:
+  after ready=1 every parse, every buddy and map count, and the channel
+  rebind run on shell builtins until the helper is torn down. That
+  constraint is load bearing -- a munmap of 16 KiB frees four order-0
+  pages into the per-cpu page cache rather than one order-2 buddy
+  block, and drain_all_pages() never runs against a fully mlocked
+  pattern -- so the helper's 512 groups / 2048 pages (windows-latest)
+  and 504 / 2016 (windows-2025) are a munmap tally, not forkable
+  stacks, and the ready=1 line reports buddy_order2= read from
+  buddyinfo rather than the group count. Channel open under that
+  pattern survives on both --
   rebind yes, zero accept4 failures, zero oops -- and the ring-allocation
   verdict is PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The claim is the
   historical one, that channel open does not die under buddy

@@ -408,19 +408,27 @@ static int do_mlock_hog(int argc, char **argv)
  *
  * The measured claim is order-7-and-up, not order-2. Leaving a few
  * order-2 blocks does not weaken it and does not help the ring path:
- * on ordinary x86_64 vmbus_alloc_buffer() takes vzalloc() anyway. The
- * groups are released just before ready=1, so the shell's first
- * fork finds stacks while the buddy at the moment of the claim
- * still holds no free block of order 7 or above -- order-2 is
- * invisible to that count and cannot coalesce past order-2.
+ * on ordinary x86_64 vmbus_alloc_buffer() takes vzalloc() anyway.
+ *
+ * IMPORTANT -- these groups are NOT forkable stacks. A single munmap of
+ * 16 KiB frees four order-0 folios into the per-cpu page cache; it does
+ * not hand the buddy one order-2 block. /proc/buddyinfo does not count
+ * the PCP, and the alloc slowpath will not drain it: drain_all_pages()
+ * runs only after direct reclaim reports progress, and against this
+ * fully mlocked pattern it never does. Run 36940519876 reported
+ * stacks=504 while buddyinfo held 1459*4kB 0*8kB 0*16kB and the next
+ * shell fork was OOM-killed. The shell is therefore fork-free from
+ * ready=1 until this process is torn down, and the ready=1 line reports
+ * buddy_order2= measured from buddyinfo, not the munmap group count.
  *
  * mmap faults order-0, so held pages are physically scattered and an
- * order-2 block is found by PFN, not assumed from a virtual run. Each
- * released group is eight consecutive PFNs on a 4-page alignment: the
- * first four are unmapped, the last four are kept. The kept half is
- * the freed half's order-2 buddy, so the freed half stays order-2 and
- * cannot coalesce past it -- the order-7 depletion just measured is
- * not undone. Cap the groups like the holes: each munmap splits a VMA.
+ * order-2 candidate run is found by PFN, not assumed from a virtual
+ * run. Each released group is eight consecutive PFNs on a 4-page
+ * alignment: the first four are unmapped, the last four are kept. The
+ * kept half is the freed half's order-2 buddy, so the freed half cannot
+ * coalesce past order-2 even if the PCP does drain -- the order-7
+ * depletion just measured is not undone. Cap the groups like the holes:
+ * each munmap splits a VMA.
  *
  * Two properties make the runs findable. The per-cpu page cache is
  * drained first: it serves recycled, physically scattered order-0 pages
@@ -543,14 +551,18 @@ static void boost_factor_write(long v)
 }
 
 /*
- * Free blocks at order 7 and above, across all zones. This is the condition
- * the drill is actually about: while any remain, the buddy can still satisfy
- * an order-7 request outright and the fallback is not under test.
+ * Free blocks at or above `min_order`, across all zones. min_order 7 is the
+ * condition the fragmentation drill is actually about: while any remain, the
+ * buddy can still satisfy an order-7 request outright and the fallback is not
+ * under test. min_order 2 is the forkability probe: copy_process() wants
+ * THREAD_SIZE_ORDER, an order-2 page, so this is what a shell clone actually
+ * needs -- not a munmap of four order-0 pages, which lands in the per-cpu page
+ * cache and never appears here until the PCP drains.
  *
  * buddyinfo layout is `Node <n>, zone <name>` followed by one count per
- * order, so order-0 is field 5 and order-7 is field 12.
+ * order, so order-0 is field 5 and order-k is field 5+k.
  */
-static long high_order_blocks(void)
+static long buddy_blocks_at_or_above(int min_order)
 {
 	FILE *f = fopen("/proc/buddyinfo", "r");
 	char line[512];
@@ -565,7 +577,7 @@ static long high_order_blocks(void)
 
 		while (tok) {
 			field++;
-			if (field > 4 && field - 5 >= 7) {
+			if (field > 4 && field - 5 >= min_order) {
 				char *end = NULL;
 				long v = strtol(tok, &end, 10);
 
@@ -857,6 +869,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	void *soak[FRAG_PCP_SOAK_CHUNKS];
 	long soak_got = 0;
 	long reserve_got = 0, order2_groups = 0, order2_pages = 0;
+	long order2_buddy;
 	unsigned long *pfns = NULL, *seen = NULL;
 	unsigned long max_pfn = 0, seen_words = 0;
 	int pmfd;
@@ -967,7 +980,7 @@ static int do_fragment_buddy(int argc, char **argv)
 		return 1;
 	}
 
-	high_before = high_order_blocks();
+	high_before = buddy_blocks_at_or_above(7);
 	printf("FRAGMENT_BUDDY start cap_chunks=%ld high_order_7plus=%ld\n",
 	       want, high_before);
 	fflush(stdout);
@@ -1040,7 +1053,7 @@ static int do_fragment_buddy(int argc, char **argv)
 		char *m;
 		long high;
 
-		high = high_order_blocks();
+		high = buddy_blocks_at_or_above(7);
 		if (high == 0) {
 			stopped = 1;
 			stop_reason = "order7-depleted";
@@ -1067,7 +1080,7 @@ static int do_fragment_buddy(int argc, char **argv)
 		got++;
 	}
 	/* One final check: the loop may have stopped on the ceiling. */
-	if (stopped == 0 && high_order_blocks() == 0) {
+	if (stopped == 0 && buddy_blocks_at_or_above(7) == 0) {
 		stopped = 1;
 		stop_reason = "order7-depleted";
 	}
@@ -1080,7 +1093,7 @@ static int do_fragment_buddy(int argc, char **argv)
 		if (mlock(maps[i], FRAG_CHUNK) == 0)
 			locked++;
 	}
-	high_locked = high_order_blocks();
+	high_locked = buddy_blocks_at_or_above(7);
 	printf("FRAGMENT_BUDDY allocated chunks=%ld high_order_7plus=%ld->%ld locked=%ld stop=%s\n",
 	       got, high_before, high_locked, locked, stop_reason);
 	fflush(stdout);
@@ -1183,7 +1196,7 @@ static int do_fragment_buddy(int argc, char **argv)
 		char *m;
 		long high, unsplit;
 
-		high = high_order_blocks();
+		high = buddy_blocks_at_or_above(7);
 		if (high == 0) {
 			stopped = 1;
 			stop_reason = "order7-depleted";
@@ -1308,12 +1321,12 @@ static int do_fragment_buddy(int argc, char **argv)
 			}
 		}
 	}
-	if (stopped == 0 && high_order_blocks() == 0) {
+	if (stopped == 0 && buddy_blocks_at_or_above(7) == 0) {
 		stopped = 1;
 		stop_reason = "order7-depleted";
 	}
 
-	high_after = high_order_blocks();
+	high_after = buddy_blocks_at_or_above(7);
 	printf("FRAGMENT_BUDDY chase=%ld locked=%ld holes=%ld pairs=%ld high_order_7plus=%ld->%ld\n",
 	       chase, chase_locked, chase_holes, chase_pairs, high_locked,
 	       high_after);
@@ -1387,13 +1400,20 @@ static int do_fragment_buddy(int argc, char **argv)
 				continue;
 			}
 			/*
-			 * One munmap of the whole 16 KiB run, not four of one page.
-			 * Four single-page frees land on the per-cpu list as order-0
-			 * and never reach the buddy as an order-2 block, so the
-			 * shell's next fork -- copy_process wants THREAD_SIZE_ORDER,
-			 * an order-2 page -- found 0*16kB free with 12.6 MB of
-			 * order-0 crumbs and panicked the guest on "System is
-			 * deadlocked on memory" (run 36934739215, both guests).
+			 * One munmap of the whole 16 KiB run, not four of one
+			 * page. The intent is that the four pages are freed
+			 * together and, once the PCP drains, coalesce as an
+			 * order-2 block whose buddy (the held half) prevents
+			 * further growth. That drain is NOT guaranteed here: a
+			 * 16 KiB munmap still frees four order-0 folios into the
+			 * per-cpu page cache, and run 36934739215 (and 36940519876
+			 * with stacks=504) showed the shell's next fork --
+			 * copy_process wants THREAD_SIZE_ORDER, an order-2 page --
+			 * finding 0*16kB free with thousands of order-0 pages
+			 * parked in the PCP, then dying on "System is deadlocked
+			 * on memory". The shell is fork-free until teardown for
+			 * that reason; this loop is belt and braces for anything
+			 * that must clone anyway.
 			 */
 			if (munmap(m + off, (size_t)(4 * FRAG_PAGE)) == 0)
 				order2_pages += 4;
@@ -1401,8 +1421,16 @@ static int do_fragment_buddy(int argc, char **argv)
 			off += 8 * FRAG_PAGE;
 		}
 	}
-	printf("FRAGMENT_BUDDY order2_reserve groups=%ld pages=%ld reserve=%ld\n",
-	       order2_groups, order2_pages, reserve_got);
+	/*
+	 * What the buddy actually holds of order-2 now. If the PCP
+	 * swallowed the munmaps this reads 0 and the shell must not
+	 * fork; if it drained, this is the true forkable count. The
+	 * munmap group count is reported separately and is never a
+	 * forkability claim.
+	 */
+	order2_buddy = buddy_blocks_at_or_above(2);
+	printf("FRAGMENT_BUDDY order2_reserve groups=%ld pages=%ld reserve=%ld buddy_order2=%ld\n",
+	       order2_groups, order2_pages, reserve_got, order2_buddy);
 	fflush(stdout);
 
 	/*
@@ -1410,11 +1438,12 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * order 7 or above. It is not "the loop stopped", which is true of
 	 * every floor and every refusal as well.
 	 */
-	printf("FRAGMENT_BUDDY ready=1 chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 stacks=%ld stop=%s high_order_7plus=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld\n",
+	printf("FRAGMENT_BUDDY ready=1 chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 groups=%ld buddy_order2=%ld stop=%s high_order_7plus=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld\n",
 	       got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages, freed_pages,
 	       locked, pairs, want, FRAG_HOLE_CAP, chase, chase_holes,
 	       chase_pairs, unsplit_at_stop, high_after == 0 ? 1L : 0L,
-	       order2_groups, stop_reason, high_before, high_locked, high_after,
+	       order2_groups, order2_buddy, stop_reason, high_before,
+	       high_locked, high_after,
 	       floor_kb, wmark_kb, free_kb);
 	fflush(stdout);
 
