@@ -425,7 +425,7 @@ Emerson Busson (9):
   hv: netvsc: allocate RNDIS request descriptors with kvzalloc_obj()
   hv: netvsc: handle a NULL request address on empty completions
 
- drivers/hv/channel.c              | 1504 +++++++++++++++++++++++++++++++------
+ drivers/hv/channel.c              | 1506 +++++++++++++++++++++++++++++++------
  drivers/hv/channel_mgmt.c         |   36 +-
  drivers/hv/hyperv_vmbus.h         |    7 +-
  drivers/hv/ring_buffer.c          |    9 +-
@@ -435,7 +435,7 @@ Emerson Busson (9):
  drivers/net/hyperv/rndis_filter.c |   19 +-
  drivers/uio/uio_hv_generic.c      |  419 +++++++++--
  include/linux/hyperv.h            |   48 +-
- 10 files changed, 1825 insertions(+), 358 deletions(-)
+ 10 files changed, 1826 insertions(+), 359 deletions(-)
 
 --
 2.43.0

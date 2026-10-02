@@ -69,14 +69,14 @@ host-revoke state, mapping references and repeated owner release.
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c         | 888 +++++++++++++++++++++++++++--------
- drivers/hv/channel_mgmt.c    |  36 +-
+ drivers/hv/channel.c         | 911 +++++++++++++++++++++++++++++--------
+ drivers/hv/channel_mgmt.c    |  36 ++-
  drivers/hv/hyperv_vmbus.h    |   3 +
  drivers/hv/vmbus_drv.c       |  14 +-
- drivers/net/hyperv/netvsc.c  |  52 +-
- drivers/uio/uio_hv_generic.c | 384 +++++++++++++--
+ drivers/net/hyperv/netvsc.c  |  52 +--
+ drivers/uio/uio_hv_generic.c | 384 ++++++++++++++--
  include/linux/hyperv.h       |  32 +-
- 7 files changed, 1141 insertions(+), 268 deletions(-)
+ 7 files changed, 1166 insertions(+), 266 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index 6b1e1fd..ffb3ead 100644
@@ -1186,12 +1186,10 @@ index 6b1e1fd..ffb3ead 100644
  
  	info = kzalloc(sizeof(*info) +
  		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
--	if (!info) {
-+	if (!info)
+ 	if (!info) {
  		gpadl->leak = true;
-+	if (!info)
  		return -ENOMEM;
--	}
+ 	}
  
  	init_completion(&info->waitevent);
  	info->waiting_channel = channel;
