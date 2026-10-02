@@ -95,12 +95,14 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
 	 * fragmentation -- the same failure this series removes from the
 	 * rings and the requestor array. The request is a control-path
 	 * object copied into the VMBus ring and never DMA-mapped from
-	 * this allocation, so vmalloc backing is fine. kvmalloc() tries
-	 * the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it
-	 * neither fails hard nor reaches the OOM killer when no
-	 * compound page is available.
+	 * this allocation, so vmalloc backing is fine. kvzalloc() keeps
+	 * the zeroing kzalloc() provided and tries the kmalloc path with
+	 * __GFP_NORETRY|__GFP_NOWARN first, so it neither fails hard nor
+	 * reaches the OOM killer when no compound page is available. The
+	 * zeroing is load bearing: response_ext and request_ext are read
+	 * by the protocol after a response arrives.
 	 */
-	request = kvmalloc(sizeof(*request), GFP_KERNEL);
+	request = kvzalloc(sizeof(*request), GFP_KERNEL);
 	if (!request)
 		return NULL;
 
@@ -137,7 +139,7 @@ static void put_rndis_request(struct rndis_device *dev,
 	list_del(&req->list_ent);
 	spin_unlock_irqrestore(&dev->request_lock, flags);
 
-	/* Paired with the kvmalloc() in get_rndis_request(). */
+	/* Paired with the kvzalloc() in get_rndis_request(). */
 	kvfree(req);
 }
 

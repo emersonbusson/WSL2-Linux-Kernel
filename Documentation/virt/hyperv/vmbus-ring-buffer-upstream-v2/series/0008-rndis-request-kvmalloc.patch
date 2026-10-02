@@ -1,18 +1,18 @@
-From 82a14d43efb8b0852a2a5a394ba348c7c327b8d4 Mon Sep 17 00:00:00 2001
+From 2c70c59cdc0eb25015aae55f724af6ec08465aef Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 21:40:00 -0300
 Subject: [PATCH v2 8/8] netvsc: allocate RNDIS request descriptors with
- kvmalloc()
+ kvzalloc_obj()
 
-struct rndis_request embeds two RNDIS_EXT_LEN tails. RNDIS_EXT_LEN is
-HV_HYP_PAGE_SIZE, so the two tails alone are 8 KiB and the struct is
-just over KMALLOC_MAX_CACHE_SIZE. get_rndis_request() therefore falls
-through kzalloc() to kmalloc_large(), which asks for an order-2
-compound page on every RNDIS control request.
+struct rndis_request embeds two RNDIS_EXT_LEN protocol tails.
+RNDIS_EXT_LEN is HV_HYP_PAGE_SIZE, so the two tails alone are 8 KiB and
+the struct is just over KMALLOC_MAX_CACHE_SIZE. get_rndis_request()
+therefore falls through kzalloc_obj() to kmalloc_large(), which asks for
+an order-2 compound page on every RNDIS control request.
 
 That is a high-order allocation on the subchannel open path. The
-fragmentation drill of this series reproduces it: with the buddy
-holding a single order-2 block, the hv_netvsc rebind reaches
+fragmentation drill of this series reproduces it: with the buddy holding
+a single order-2 block, the hv_netvsc rebind reaches
 
   kworker/0:1 invoked oom-killer:
     gfp_mask=0x40dc0(GFP_KERNEL|__GFP_ZERO|__GFP_COMP), order=2
@@ -28,69 +28,73 @@ holding a single order-2 block, the hv_netvsc rebind reaches
 
 Patch 7/8 removes the order-7 requestor array from that path. This
 removes the order-2 request descriptor, which is the last high-order
-allocation between the rebind and the ring. Without it the series does
-not deliver the symptom it is written against.
+allocation on the subchannel open path.
 
-kvmalloc() is the right allocator here rather than a smaller object.
-The two RNDIS_EXT_LEN tails are protocol capacity -- a QUERY response
-is copied into response_ext and checked against
-sizeof(struct rndis_message) + RNDIS_EXT_LEN -- so shrinking them is a
-behaviour change, not a cleanup. The request is a control-path object
-copied into the VMBus ring; it is never DMA-mapped from this
-allocation, so vmalloc backing is fine and is the same idiom patch 7/8
-already uses for the requestor array. kvmalloc() attempts the kmalloc
-path with __GFP_NORETRY|__GFP_NOWARN first, so it neither fails hard
-nor reaches the OOM killer when no compound page is free -- which is
-also what removes the oom-kill of the drill shell above.
+The two tails are protocol capacity, not padding: an RNDIS response is
+memcpy'd into &request->response_msg and may spill contiguously into
+response_ext, guarded by
 
-Free side is put_rndis_request(), the single kfree() of the object,
-and it becomes kvfree().
+  resp->msg_len <= sizeof(struct rndis_message) + RNDIS_EXT_LEN
 
-Rollback trigger: revert this patch if an RNDIS control path begins to
-require the request descriptor to be direct-mapped or DMA-mapped, or
-if a vmalloc-backed request introduces a measurable control-path
-regression.
+so shrinking them would be a behaviour change and is not what this
+patch does.
+
+The request is a control-path descriptor copied into the VMBus ring and
+is never DMA-mapped from this allocation, so vmalloc backing carries no
+Confidential Computing implication -- the same reasoning as the
+kvcalloc() requestor array in 7/8. kvzalloc_obj() is the type-safe
+counterpart of kzalloc_obj() that keeps the zeroing, and it tries the
+kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it neither fails
+hard nor reaches the OOM killer when no compound page is available. The
+zeroing is load bearing and is not dropped: response_ext and request_ext
+are read by the protocol after a response arrives, and an uninitialised
+tail would be an information leak.
+
+Free side is kfree(req) in put_rndis_request(); it must become kvfree()
+because the allocation may now come from vmalloc.
+
+Rollback trigger: revert this patch if rndis_set_subchannel() or
+netvsc_subchan_work() reports -ENOMEM from get_rndis_request() again,
+if a page-allocation-failure call trace reaches get_rndis_request, or
+if any path begins to treat the request descriptor as host-visible or
+direct-mapped memory.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
----
- drivers/net/hyperv/rndis_filter.c | 18 ++++++++++++++++--
- 1 file changed, 16 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
-index c35f9685b6bf..82a14d43efb8 100644
+index 9b6c44979..2c70c59cd 100644
 --- a/drivers/net/hyperv/rndis_filter.c
 +++ b/drivers/net/hyperv/rndis_filter.c
-@@ -87,7 +87,20 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
+@@ -87,7 +87,21 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
  	struct rndis_set_request *set;
  	unsigned long flags;
  
--	request = kzalloc(sizeof(struct rndis_request), GFP_KERNEL);
+-	request = kzalloc_obj(struct rndis_request);
 +	/*
-+	 * struct rndis_request embeds two RNDIS_EXT_LEN (4 KiB) tails and
-+	 * is larger than KMALLOC_MAX_CACHE_SIZE, so kzalloc() would hand
-+	 * back an order-2 compound page. That is a high-order allocation
-+	 * on the subchannel open path and it fails under buddy
-+	 * fragmentation -- the same failure this series removes from the
-+	 * rings and the requestor array. The request is a control-path
-+	 * object copied into the VMBus ring and never DMA-mapped from
-+	 * this allocation, so vmalloc backing is fine. kvmalloc() tries
-+	 * the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it
-+	 * neither fails hard nor reaches the OOM killer when no
++	 * struct rndis_request embeds two RNDIS_EXT_LEN (4 KiB) protocol
++	 * tails and is larger than KMALLOC_MAX_CACHE_SIZE, so
++	 * kzalloc_obj() hands back an order-2 compound page. That is a
++	 * high-order allocation on the subchannel open path and it fails
++	 * under buddy fragmentation -- the same failure this series
++	 * removes from the rings and the requestor array. The request is
++	 * a control-path object copied into the VMBus ring and is never
++	 * DMA-mapped from this allocation, so vmalloc backing is fine.
++	 * kvzalloc_obj() keeps the zeroing kzalloc_obj() provided and
++	 * tries the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first,
++	 * so it neither fails hard nor reaches the OOM killer when no
 +	 * compound page is available.
 +	 */
-+	request = kvmalloc(sizeof(*request), GFP_KERNEL);
++	request = kvzalloc_obj(struct rndis_request);
  	if (!request)
  		return NULL;
  
-@@ -124,7 +137,8 @@ static void put_rndis_request(struct rndis_device *dev,
+@@ -124,7 +138,8 @@ static void put_rndis_request(struct rndis_device *dev,
  	list_del(&req->list_ent);
  	spin_unlock_irqrestore(&dev->request_lock, flags);
  
 -	kfree(req);
-+	/* Paired with the kvmalloc() in get_rndis_request(). */
++	/* Paired with the kvzalloc_obj() in get_rndis_request(). */
 +	kvfree(req);
  }
  
  static void dump_rndis_message(struct net_device *netdev,
--- 
-2.43.0

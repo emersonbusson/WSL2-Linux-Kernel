@@ -102,14 +102,17 @@ What changed
   vmalloc backing has no Confidential Computing implication.
 
 - struct rndis_request is larger than KMALLOC_MAX_CACHE_SIZE because it
-  embeds two RNDIS_EXT_LEN (4 KiB) protocol tails, so kzalloc() hands
-  back an order-2 compound page on every RNDIS control request. That
+  embeds two RNDIS_EXT_LEN (4 KiB) protocol tails, so kzalloc_obj()
+  hands back an order-2 compound page on every RNDIS control request. That
   runs on the subchannel open path (netvsc_subchan_work ->
   get_rndis_request) and is the second high-order allocation there.
   Those tails are protocol capacity, not padding -- a response is
   memcpy'd into &request->response_msg and may spill into response_ext
-  -- so the descriptor is not shrunk. It is allocated with kvmalloc()
-  instead: the object is a control-path descriptor copied into the
+  -- so the descriptor is not shrunk. It is allocated with
+  kvzalloc_obj() instead: that keeps the zeroing kzalloc_obj()
+  provided -- response_ext and request_ext are read after a response
+  arrives, so an uninitialised tail would be an information leak --
+  and the object is a control-path descriptor copied into the
   VMBus ring and is never DMA-mapped from this allocation, so vmalloc
   backing has no Confidential Computing implication, and kvmalloc()
   tries the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first so it
@@ -164,7 +167,7 @@ The measurements below were taken on the seven-patch bytes of run
 36943904717. The eight-patch series differs in two places the runtime
 path can see: 0006 now cancels timer-pending delayed_work before
 destroy_workqueue() (module-exit only, not on the rebind path), and 0008
-allocates the RNDIS request descriptor with kvmalloc() (on the rebind
+allocates the RNDIS request descriptor with kvzalloc_obj() (on the rebind
 and subchannel-open path). The eight-patch bytes are being re-measured
 and the numbers below will be restated against them before this is
 sent. The structural claims -- zero splats, zero accept4 failures,
@@ -266,19 +269,19 @@ Emerson Busson (8):
   hv: vmbus: retain buffer ownership until GPADL and page state are
     resolved
   hv: vmbus: allocate the requestor array with kvcalloc()
-  hv: netvsc: allocate RNDIS request descriptors with kvmalloc()
+  hv: netvsc: allocate RNDIS request descriptors with kvzalloc_obj()
 
- drivers/hv/channel.c              | 1676 ++++++++++++++++++++++++++++++++++--------
- drivers/hv/channel_mgmt.c         |   36 +
- drivers/hv/hyperv_vmbus.h         |    7 +
- drivers/hv/ring_buffer.c          |    9 +
- drivers/hv/vmbus_drv.c            |   14 +
- drivers/net/hyperv/hyperv_net.h   |   10 -
- drivers/net/hyperv/netvsc.c       |  112 +--
- drivers/net/hyperv/rndis_filter.c |   18 +
- drivers/uio/uio_hv_generic.c      |  495 ++++++++++--
- include/linux/hyperv.h            |   52 +
- 10 files changed, 1936 insertions(+), 493 deletions(-)
+ drivers/hv/channel.c              | 1504 +++++++++++++++++++++++++++++++------
+ drivers/hv/channel_mgmt.c         |   36 +-
+ drivers/hv/hyperv_vmbus.h         |    7 +-
+ drivers/hv/ring_buffer.c          |    9 +-
+ drivers/hv/vmbus_drv.c            |   14 +-
+ drivers/net/hyperv/hyperv_net.h   |   10 +-
+ drivers/net/hyperv/netvsc.c       |   56 +-
+ drivers/net/hyperv/rndis_filter.c |   19 +-
+ drivers/uio/uio_hv_generic.c      |  419 +++++++++--
+ include/linux/hyperv.h            |   48 +-
+ 10 files changed, 1783 insertions(+), 339 deletions(-)
 
 --
 2.43.0
