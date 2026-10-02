@@ -24,11 +24,11 @@ guest the failure prints as
   hv_netvsc ... eth0: sub channel open failed: -12
 
 The rings themselves already come from vmbus_alloc_buffer() (patch
-1/8), so this removes the order-7 allocation from the open path. A
+1/9), so this removes the order-7 allocation from the open path. A
 second, smaller high-order allocation remains there: the RNDIS
 request descriptor in rndis_filter.c is larger than
 KMALLOC_MAX_CACHE_SIZE and takes an order-2 compound page. That one
-is removed in patch 8/8.
+is removed in patch 8/9.
 
 The requestor array is guest-private bookkeeping: it stores request
 ids the guest hands out and never reaches the host, so it is not

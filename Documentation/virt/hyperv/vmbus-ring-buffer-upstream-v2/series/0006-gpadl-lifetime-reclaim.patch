@@ -21,12 +21,12 @@ baseline. A create or teardown with an uncertain outcome retains the
 owner rather than freeing, so a partial post can never release pages the
 host may still map.
 
-The shared-page test that 2/8 grew is pulled into
+The shared-page test that 2/9 grew is pulled into
 vmbus_needs_shared_pages() here, so the three inputs -- Hyper-V
 isolation, guest-memory encryption through CC_ATTR_GUEST_MEM_ENCRYPT,
 and the per-buffer confidential flag -- are named at the call site
 instead of composed inline. That is also what lets KUnit pin the
-private-versus-shared selection without a live host. See 2/8 for why
+private-versus-shared selection without a live host. See 2/9 for why
 the condition is not a bare hv_is_isolation_supported() test.
 
 Distinguish host rescind from local unload, since both previously set
@@ -39,7 +39,7 @@ In-tree migrated callers use descriptor-aware _owned entry points. The
 previously exported allocator, free, GPADL establish, caller-decrypted
 establish and teardown signatures are preserved through adapters, so
 external consumers are unaffected. This is also where
-vmbus_alloc_buffer() gets its four-argument prototype back: 1/8
+vmbus_alloc_buffer() gets its four-argument prototype back: 1/9
 temporarily widened it with a bool confidential argument, which now
 lives only on vmbus_alloc_buffer_owned().
 

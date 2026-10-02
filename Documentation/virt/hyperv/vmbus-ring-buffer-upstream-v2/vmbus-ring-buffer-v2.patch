@@ -19,8 +19,9 @@ into a virtually contiguous range via vmap().
 Convert vmbus_alloc_ring() and vmbus_free_ring() to use
 vmbus_alloc_buffer() and encapsulate the buffer address, page pointers,
 chunks and GPADL state in struct vmbus_buffer. This lets a ring still be
-created when one high-order block is unavailable, and retains chunk-based
-CoCo handling. Platform support still requires hardware validation.
+created when one high-order block is unavailable, and retains
+chunk-based CoCo handling. Platform support still requires hardware
+validation.
 
 vmbus_alloc_buffer() currently decides host-visibility from
 channel->co_external_memory alone. A ring buffer on the same channel
@@ -29,11 +30,11 @@ be able to name which policy applies to the buffer it is allocating.
 This patch adds a bool confidential argument for that.
 
 That argument temporarily widens an exported prototype: it is present
-from 1/8 through 5/8. 6/8 moves it onto the new
+from 1/9 through 5/9. 6/9 moves it onto the new
 vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer() to the
 four-argument form mainline has now, so the merged tree keeps the
 existing external surface unchanged. Read this patch together with
-6/8 for the final shape.
+6/9 for the final shape.
 
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
@@ -1251,10 +1252,11 @@ Date: Fri, 25 Sep 2026 10:30:00 -0300
 Subject: [PATCH v2 4/9] hv: vmbus: add KUnit tests for GPADL post failure
  injection
 
-Route GPADL message posting through a private callback so KUnit can inject
-header, each body, and teardown post failures without a live host. Exercise
-uncertain host ownership after failed posts, host rejection, and channel
-rescind response handling through the same helpers used by production.
+Route GPADL message posting through a private callback so KUnit can
+inject header, each body, and teardown post failures without a live
+host. Exercise uncertain host ownership after failed posts, host
+rejection, and channel rescind response handling through the same
+helpers used by production.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
@@ -1676,9 +1678,10 @@ Date: Fri, 25 Sep 2026 11:05:00 -0300
 Subject: [PATCH v2 5/9] hv: vmbus: add KUnit test for order-zero allocation
  fallback
 
-Factor the order-descent allocation loop so KUnit can inject failures for
-orders above zero while retaining a real order-zero allocation in the test
-path. Also verify clean exhaustion when the order-zero attempt fails.
+Factor the order-descent allocation loop so KUnit can inject failures
+for orders above zero while retaining a real order-zero allocation in
+the test path. Also verify clean exhaustion when the order-zero attempt
+fails.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
@@ -1864,12 +1867,12 @@ baseline. A create or teardown with an uncertain outcome retains the
 owner rather than freeing, so a partial post can never release pages the
 host may still map.
 
-The shared-page test that 2/8 grew is pulled into
+The shared-page test that 2/9 grew is pulled into
 vmbus_needs_shared_pages() here, so the three inputs -- Hyper-V
 isolation, guest-memory encryption through CC_ATTR_GUEST_MEM_ENCRYPT,
 and the per-buffer confidential flag -- are named at the call site
 instead of composed inline. That is also what lets KUnit pin the
-private-versus-shared selection without a live host. See 2/8 for why
+private-versus-shared selection without a live host. See 2/9 for why
 the condition is not a bare hv_is_isolation_supported() test.
 
 Distinguish host rescind from local unload, since both previously set
@@ -1882,7 +1885,7 @@ In-tree migrated callers use descriptor-aware _owned entry points. The
 previously exported allocator, free, GPADL establish, caller-decrypted
 establish and teardown signatures are preserved through adapters, so
 external consumers are unaffected. This is also where
-vmbus_alloc_buffer() gets its four-argument prototype back: 1/8
+vmbus_alloc_buffer() gets its four-argument prototype back: 1/9
 temporarily widened it with a bool confidential argument, which now
 lives only on vmbus_alloc_buffer_owned().
 
@@ -4035,11 +4038,11 @@ guest the failure prints as
   hv_netvsc ... eth0: sub channel open failed: -12
 
 The rings themselves already come from vmbus_alloc_buffer() (patch
-1/8), so this removes the order-7 allocation from the open path. A
+1/9), so this removes the order-7 allocation from the open path. A
 second, smaller high-order allocation remains there: the RNDIS
 request descriptor in rndis_filter.c is larger than
 KMALLOC_MAX_CACHE_SIZE and takes an order-2 compound page. That one
-is removed in patch 8/8.
+is removed in patch 8/9.
 
 The requestor array is guest-private bookkeeping: it stores request
 ids the guest hands out and never reaches the host, so it is not
@@ -4136,7 +4139,7 @@ a single order-2 block, the hv_netvsc rebind reaches
   sh: page allocation failure: order:2, ...
   Kernel panic - not syncing: System is deadlocked on memory
 
-Patch 7/8 removes the order-7 requestor array from that path. This
+Patch 7/9 removes the order-7 requestor array from that path. This
 removes the order-2 request descriptor, which is the last high-order
 allocation on the subchannel open path.
 
@@ -4152,7 +4155,7 @@ patch does.
 The request is a control-path descriptor copied into the VMBus ring and
 is never DMA-mapped from this allocation, so vmalloc backing carries no
 Confidential Computing implication -- the same reasoning as the
-kvcalloc() requestor array in 7/8. kvzalloc_obj() is the type-safe
+kvcalloc() requestor array in 7/9. kvzalloc_obj() is the type-safe
 counterpart of kzalloc_obj() that keeps the zeroing, and it tries the
 kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it neither fails
 hard nor reaches the OOM killer when no compound page is available. The
@@ -4245,9 +4248,11 @@ survives buddy fragmentation: control RNDIS traffic proceeds where it
 used to fail with -ENOMEM, and an empty completion for one of those
 requests takes the unguarded path.
 
-Rollback trigger: a netvsc TX stall, an "Invalid transaction ID"
-flood, or a regression in RNDIS control exchange (subchannel setup,
-OID query) after reverts to the single-sentinel check.
+Revert this patch if an empty completion with a NULL request address
+dereferences again, if a netvsc TX stall or an "Invalid transaction
+ID" flood appears under this patch, or if a SWITCH_DATA_PATH
+completion is shown to be dropped instead of taken through its
+nvsp_message path.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---

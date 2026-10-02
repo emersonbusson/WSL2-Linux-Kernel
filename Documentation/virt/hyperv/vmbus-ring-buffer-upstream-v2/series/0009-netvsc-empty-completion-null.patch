@@ -31,9 +31,11 @@ survives buddy fragmentation: control RNDIS traffic proceeds where it
 used to fail with -ENOMEM, and an empty completion for one of those
 requests takes the unguarded path.
 
-Rollback trigger: a netvsc TX stall, an "Invalid transaction ID"
-flood, or a regression in RNDIS control exchange (subchannel setup,
-OID query) after reverts to the single-sentinel check.
+Revert this patch if an empty completion with a NULL request address
+dereferences again, if a netvsc TX stall or an "Invalid transaction
+ID" flood appears under this patch, or if a SWITCH_DATA_PATH
+completion is shown to be dropped instead of taken through its
+nvsp_message path.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
