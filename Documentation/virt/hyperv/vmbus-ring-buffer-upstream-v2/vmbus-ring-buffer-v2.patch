@@ -22,6 +22,19 @@ chunks and GPADL state in struct vmbus_buffer. This lets a ring still be
 created when one high-order block is unavailable, and retains chunk-based
 CoCo handling. Platform support still requires hardware validation.
 
+vmbus_alloc_buffer() currently decides host-visibility from
+channel->co_external_memory alone. A ring buffer on the same channel
+is governed by channel->co_ring_buffer instead, so the caller has to
+be able to name which policy applies to the buffer it is allocating.
+This patch adds a bool confidential argument for that.
+
+That argument temporarily widens an exported prototype: it is present
+from 1/8 through 5/8. 6/8 moves it onto the new
+vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer() to the
+four-argument form mainline has now, so the merged tree keeps the
+existing external surface unchanged. Read this patch together with
+6/8 for the final shape.
+
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
