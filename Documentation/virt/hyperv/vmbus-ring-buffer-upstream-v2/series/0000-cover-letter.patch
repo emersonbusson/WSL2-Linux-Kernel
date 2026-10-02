@@ -219,27 +219,43 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-Every diff hunk in this revision is what eight runs across four
-pairs built and drilled: 36970357736 and 36970357645, then
-36972315239 and 36972315260, then 36975012643 and 36975012655,
-then 36978224379 and 36978224340. The left-hand run of each pair is
-build, checkpatch and KUnit on x86_64, arm64 and the WSL 6.18.40.1
-backport; the right-hand run is the Hyper-V runtime on both hosted
-guests. The first three pairs pinned one set of nine patch bytes
-against series/SHA256SUMS, and across those three only the cover
-letter differed.
+Eight runs across four pairs are the census for this revision:
+36970357736 and 36970357645, then 36972315239 and 36972315260,
+then 36975012643 and 36975012655, then 36978224379 and
+36978224340. The left-hand run of each pair is build, checkpatch
+and KUnit on x86_64, arm64 and the WSL 6.18.40.1 backport; the
+right-hand run is the Hyper-V runtime on both hosted guests. The
+first three pairs pinned one set of nine patch bytes against
+series/SHA256SUMS, and across those three only the cover letter
+differed.
 
-The fourth pair pinned the same diff hunks under the revised commit
-messages, and 36978224379 and 36978224340 are the byte-exact pair
-for the patch files as they now read. Only the commit-message text
-above seven of the diffs changed after the first three pairs --
-1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9 -- and no diff hunk moved.
+The fourth pair pinned the same diff hunks under the revised
+commit messages. Only the commit-message text above seven of the
+diffs changed after the first three pairs -- 1/9, 4/9, 5/9, 6/9,
+7/9, 8/9 and 9/9 -- and no diff hunk moved at that point.
 Cross-references that still named an eight-patch series are
 renumbered to nine, 9/9's rollback wording is rewritten as the
 plain revert condition its neighbours already use, and 1/9, 4/9
 and 5/9 are rewrapped to 72 columns. series/SHA256SUMS records
 those message changes. The cover letter itself is not in
 series/SHA256SUMS and CI never applies it.
+
+36978224379 and 36978224340 pin the patch files as those runs read
+them, not as they read now. After that pair, 5/9's diff hunks
+changed. The factoring of the order-descent loop in 5/9 reused one
+gfp across the whole descent, which left __GFP_NORETRY |
+__GFP_NOWARN set on the order-0 attempt. The loop it replaces
+recomputed gfp every iteration, so order 0 fell back to the plain
+GFP_KERNEL | __GFP_ZERO last resort that is allowed to try harder.
+5/9 now applies the per-order policy inside
+vmbus_alloc_pages_with_fallback() and discloses the invariant in
+its commit message. 0001-0004 and 0006-0009 are byte-identical to
+what that pair executed. 0005 as it now reads has been applied on
+top of 0001-0004 with 0006-0009 following cleanly, and checkpatch
+--strict reports 0 errors and 0 warnings on it. It has not yet
+been through a build, KUnit or Hyper-V pair, so it is not covered
+by the runs above and this revision does not yet carry a
+byte-exact pin. series/SHA256SUMS records the new 5/9.
 
 One diff changed after the seven early drill runs named further
 below. 6/9 used to reformat the allocation-failure path in
