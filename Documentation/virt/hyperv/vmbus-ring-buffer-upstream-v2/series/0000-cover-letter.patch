@@ -478,7 +478,12 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   what the post-ready path trusts.
 
   A green drill job is not by itself a gate closure -- the gate is the
-  RESULT, VERDICT and MMAP_HOLD lines in the guest console.
+  RESULT, VERDICT and MMAP_HOLD lines in the guest console. The
+  converse also holds: a hosted runner that starves one guest reddens
+  the job with a clean fragmentation half and a lifecycle that never
+  reaches cycle 10, which is a failed measurement rather than a code
+  failure. Both halves are read from the console before a run is
+  called anything.
 
   An earlier run against a build that still carried a second high-order
   allocation on the subchannel-open path -- the RNDIS request
