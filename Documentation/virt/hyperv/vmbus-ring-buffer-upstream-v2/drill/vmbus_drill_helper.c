@@ -1076,6 +1076,26 @@ static int do_fragment_buddy(int argc, char **argv)
 		}
 		for (off = 0; off < FRAG_CHUNK; off += FRAG_PAGE)
 			m[off] = 1;
+		/*
+		 * Pin before the next order-7 measurement, not after the
+		 * loop. mlock() can compact, and compaction coalesces free
+		 * pages back into high-order blocks. Measuring first and
+		 * pinning afterwards let the loop break with
+		 * stop=order7-depleted while the pin itself rebuilt order-7
+		 * blocks -- runs reached ready=1 with
+		 * high_order_7plus=0->26->1 and exhausted=0, so the two
+		 * flags disagreed and the drill flapped between PASS and
+		 * INCONCLUSIVE on the same bytes. Locking here means the
+		 * next iteration's buddy check sees exactly the state this
+		 * chunk left behind, and a loop that ends with
+		 * stop=order7-depleted is a state that still holds.
+		 *
+		 * The pin also has to stay for the hole punch: compaction
+		 * must not migrate survivors into the gaps and rebuild high
+		 * orders under us.
+		 */
+		if (mlock(m, FRAG_CHUNK) == 0)
+			locked++;
 		maps[i] = m;
 		got++;
 	}
@@ -1083,15 +1103,6 @@ static int do_fragment_buddy(int argc, char **argv)
 	if (stopped == 0 && buddy_blocks_at_or_above(7) == 0) {
 		stopped = 1;
 		stop_reason = "order7-depleted";
-	}
-
-	/*
-	 * Pin the pages before punching holes so compaction cannot migrate
-	 * survivors into the gaps and rebuild high orders under us.
-	 */
-	for (i = 0; i < got; i++) {
-		if (mlock(maps[i], FRAG_CHUNK) == 0)
-			locked++;
 	}
 	high_locked = buddy_blocks_at_or_above(7);
 	printf("FRAGMENT_BUDDY allocated chunks=%ld high_order_7plus=%ld->%ld locked=%ld stop=%s\n",
@@ -1434,9 +1445,13 @@ static int do_fragment_buddy(int argc, char **argv)
 	fflush(stdout);
 
 	/*
-	 * exhausted=1 means the measured condition holds: no free block of
-	 * order 7 or above. It is not "the loop stopped", which is true of
-	 * every floor and every refusal as well.
+	 * exhausted=1 means the measured condition holds now: no free
+	 * block of order 7 or above. It is not "the loop stopped", which
+	 * is true of every floor and every refusal as well. stop= names
+	 * why the loop ended and is measured at that moment; exhausted=
+	 * is measured here. They agree by construction now that each
+	 * chunk is pinned before the next buddy check, but exhausted= is
+	 * still the authoritative one and the drill gates on it.
 	 */
 	printf("FRAGMENT_BUDDY ready=1 chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 groups=%ld buddy_order2=%ld stop=%s high_order_7plus=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld\n",
 	       got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages, freed_pages,
