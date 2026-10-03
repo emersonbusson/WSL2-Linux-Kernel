@@ -1,4 +1,4 @@
-From a51042c864424650bed9d5c5aab02bdb4da51461 Mon Sep 17 00:00:00 2001
+From 8763ddd3b3705794622f8c60c7ee789d712750e7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 21:34:10 -0300
 Subject: [PATCH v2 08/13] hv: vmbus: retain buffer ownership across GPADL and
@@ -40,19 +40,23 @@ each wraps its _owned form and detaches the owner before returning.
 
 Add five KUnit cases to vmbus_buffer_test.c covering the reclaim
 gate, the schedule gate, host-revoke state transitions, mapping
-reference counting, and repeated release of one owner. The helpers
-they need are declared in hyperv_vmbus.h and stay unexported; the
-tests are built into the hv_vmbus object with the other cases.
+reference counting, and repeated release of one owner. The
+host-revoke case drives the pure two-field mutator rather than
+vmbus_buffer_mark_host_revoked(), which would schedule reclaim on
+the production workqueue through a stack fixture's uninitialized
+work item. The helpers the cases need are declared in
+hyperv_vmbus.h and stay unexported; the tests are built into the
+hv_vmbus object with the other cases.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/channel.c           | 716 +++++++++++++++++++++++++++------
  drivers/hv/channel_mgmt.c      |   5 +
  drivers/hv/hyperv_vmbus.h      |  41 ++
- drivers/hv/vmbus_buffer_test.c | 111 ++++-
+ drivers/hv/vmbus_buffer_test.c | 117 +++++-
  drivers/hv/vmbus_drv.c         |   1 +
  include/linux/hyperv.h         |  18 +
- 6 files changed, 772 insertions(+), 120 deletions(-)
+ 6 files changed, 778 insertions(+), 120 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index a44903627068..3f8ff6e30bc4 100644
@@ -1123,10 +1127,10 @@ index e4bb33548b98..8035a231a288 100644
   * GPADL post and response helpers, also shared with vmbus_buffer_test.c.
   * Same deal as the sizing helpers above: defined in channel.c, built into
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
-index 515fc14dc708..947a41c0aa1d 100644
+index 515fc14dc708..8bee402ccd78 100644
 --- a/drivers/hv/vmbus_buffer_test.c
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -57,6 +57,110 @@ static void vmbus_buffer_private_shared_selection_test(struct kunit *test)
+@@ -57,6 +57,116 @@ static void vmbus_buffer_private_shared_selection_test(struct kunit *test)
  			   vmbus_needs_shared_pages(true, true, true));
  }
  
@@ -1187,7 +1191,13 @@ index 515fc14dc708..947a41c0aa1d 100644
 +		.host_may_own = true,
 +	};
 +
-+	vmbus_buffer_mark_host_revoked(&owner);
++	/*
++	 * State only. vmbus_buffer_mark_host_revoked() also schedules
++	 * reclaim on the production workqueue through the stack fixture's
++	 * uninitialized reclaim_work, so this case must exercise the pure
++	 * two-field mutator instead.
++	 */
++	vmbus_buffer_mark_host_revoked_locked(&owner);
 +	KUNIT_EXPECT_TRUE(test, owner.host_revoked);
 +	KUNIT_EXPECT_FALSE(test, owner.host_may_own);
 +	KUNIT_EXPECT_TRUE(test, vmbus_buffer_owner_can_reclaim(&owner));
@@ -1237,7 +1247,7 @@ index 515fc14dc708..947a41c0aa1d 100644
  static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
  {
  	unsigned int order;
-@@ -256,7 +360,7 @@ static void vmbus_gpadl_response_state_test(struct kunit *test)
+@@ -256,7 +366,7 @@ static void vmbus_gpadl_response_state_test(struct kunit *test)
  	posted = true;
  	KUNIT_EXPECT_EQ(test,
  			vmbus_gpadl_response_status(0, true, &posted), -ENODEV);
@@ -1246,7 +1256,7 @@ index 515fc14dc708..947a41c0aa1d 100644
  }
  
  static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
-@@ -342,7 +446,12 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+@@ -342,7 +452,12 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_buffer_private_shared_selection_test),
  	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
  	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),

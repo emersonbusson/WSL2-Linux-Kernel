@@ -1,4 +1,4 @@
-From 5a291e903f3e568bd74a9c7f981433f13889e357 Mon Sep 17 00:00:00 2001
+From 623c76cc879601d6eb7c61c3fceda3ef867c8cf9 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 11/13] hv: vmbus: allocate the requestor array with
@@ -52,10 +52,10 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  1 file changed, 11 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index cfc435424d73..735377253717 100644
+index 4f73f0e50537..d71291b95148 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -1398,6 +1398,14 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
+@@ -1407,6 +1407,14 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
   * keeps track of the next available slot in the array. Initially, each
   * slot points to the next one (as in a Linked List). The last slot
   * does not point to anything, so its value is U64_MAX by default.
@@ -70,7 +70,7 @@ index cfc435424d73..735377253717 100644
   * @size: The size of the array
   */
  static u64 *request_arr_init(u32 size)
-@@ -1405,7 +1413,7 @@ static u64 *request_arr_init(u32 size)
+@@ -1414,7 +1422,7 @@ static u64 *request_arr_init(u32 size)
  	int i;
  	u64 *req_arr;
  
@@ -79,7 +79,7 @@ index cfc435424d73..735377253717 100644
  	if (!req_arr)
  		return NULL;
  
-@@ -1434,7 +1442,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1443,7 +1451,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  
  	bitmap = bitmap_zalloc(size, GFP_KERNEL);
  	if (!bitmap) {
@@ -88,7 +88,7 @@ index cfc435424d73..735377253717 100644
  		return -ENOMEM;
  	}
  
-@@ -1453,7 +1461,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1462,7 +1470,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
   */
  static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
  {

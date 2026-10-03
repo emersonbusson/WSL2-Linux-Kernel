@@ -1,4 +1,4 @@
-From d565daef6b6d19175fed38ac0c7d269830cec43e Mon Sep 17 00:00:00 2001
+From eae33ea646b779786b99cd0244c1df7e402d9f9d Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
 Subject: [PATCH v2 01/13] hv: vmbus: convert ring buffer allocation to

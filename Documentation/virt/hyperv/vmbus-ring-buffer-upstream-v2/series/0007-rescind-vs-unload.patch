@@ -1,4 +1,4 @@
-From 61ebcf4cd92151c85e980b50ea437a95ae07bffc Mon Sep 17 00:00:00 2001
+From 9a68feb7cc0064e6ec91b019b835ed9220961bc7 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 20:53:00 -0300
 Subject: [PATCH v2 07/13] hv: vmbus: distinguish host rescind from local
