@@ -278,6 +278,9 @@ fi
 
 # --- phase 3: reconciliation -------------------------------------------------
 say "=== PHASE 3: reconciliation ==="
+# Sampled the instant the hold helpers have been reaped. This is the racy
+# window: the pins are already down, but the reclaim worker may not have
+# run yet. Kept as evidence of that race, not as the verdict input.
 FINAL_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
 say "FINAL $FINAL_MAPS"
 say "BASELINE $BASE_MAPS"
@@ -308,13 +311,44 @@ maps_tuple() {
 	'
 }
 
+# Reclaim is asynchronous. vmbus_release_buffer() hands the buffer to
+# delayed work, and vmbus_buffer_unpin_pages() only drops the folio ref --
+# it does not wake the worker. The free can therefore land up to
+# VMBUS_BUFFER_RECLAIM_RETRY_MS (1000 ms) after the last pin drops, so a
+# tuple sampled in the same breath as wait() reports a healthy buffer that
+# is simply still queued as a leak. Poll until the tuple reaches baseline
+# or the settle budget expires. The budget is a few retry intervals, not an
+# unbounded wait: a tuple that still differs afterwards is a real
+# accounting failure and must stay a FAIL.
+SETTLE_BUDGET_S=5
+SETTLE_TRIES=0
+SETTLE_TUPLE=""
+BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
+if [ -n "$BASE_TUPLE" ]; then
+	while [ "$SETTLE_TRIES" -le "$SETTLE_BUDGET_S" ]; do
+		SETTLE_NOW="$(vmbus_maps || echo 'MAPS unavailable')"
+		SETTLE_TUPLE="$(maps_tuple "$SETTLE_NOW")" || SETTLE_TUPLE=""
+		say "SETTLE try=$SETTLE_TRIES $SETTLE_NOW"
+		if [ -n "$SETTLE_TUPLE" ] && [ "$SETTLE_TUPLE" = "$BASE_TUPLE" ]; then
+			break
+		fi
+		SETTLE_TRIES=$((SETTLE_TRIES + 1))
+		if [ "$SETTLE_TRIES" -gt "$SETTLE_BUDGET_S" ]; then
+			break
+		fi
+		sleep 1
+	done
+fi
+SETTLE_MAPS="${SETTLE_NOW:-$FINAL_MAPS}"
+
 # Scoring. A green exit means the exercise actually ran and reconciled:
 #   - every bind/unbind step succeeded, and
 #   - at least one mapping was alive while restore_nic freed the ring
 #     (MMAP_HOLD ... maps>0 observed before teardown returned), so the
 #     BUG-3 window was open rather than merely prepared, and
 #   - the vmbus_alloc_buffer map accounting returned to its own baseline
-#     (count, bytes and pages), so 100 cycles left no unexplained growth.
+#     (count, bytes and pages) once the reclaim worker had drained, so 100
+#     cycles and the held teardown left no unexplained growth.
 # Reporting success after a silent skip -- or after a mapping that was
 # already released -- is how a broken dynid registration looked green for
 # thirty cycles and how a closed window looked like a hold-in-mmap pass.
@@ -336,25 +370,33 @@ fi
 
 BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
 FINAL_TUPLE="$(maps_tuple "$FINAL_MAPS")" || FINAL_TUPLE=""
-if [ -z "$BASE_TUPLE" ] || [ -z "$FINAL_TUPLE" ]; then
+SETTLE_TUPLE="$(maps_tuple "$SETTLE_MAPS")" || SETTLE_TUPLE=""
+if [ -z "$BASE_TUPLE" ] || [ -z "$SETTLE_TUPLE" ]; then
 	say "LIFECYCLE_VERDICT=PARTIAL map accounting unavailable"
 	say "  baseline='$BASE_MAPS'"
 	say "  final='$FINAL_MAPS'"
+	say "  settle='$SETTLE_MAPS'"
 	say "  absent map accounting is unqualified, not balanced"
 	say "=== END vmbus-lifecycle-drill ==="
 	say "log=$LOG"
 	exit 3
 fi
-if [ "$BASE_TUPLE" != "$FINAL_TUPLE" ]; then
+# The settled tuple is the verdict input. The immediate FINAL tuple is
+# reported alongside it so a run that reconciled only after the reclaim
+# worker woke stays distinguishable from one that reconciled at once.
+if [ "$BASE_TUPLE" != "$SETTLE_TUPLE" ]; then
 	say "LIFECYCLE_VERDICT=FAIL map accounting did not return to baseline"
 	say "  baseline=$BASE_TUPLE"
 	say "  final=$FINAL_TUPLE"
+	say "  settle=$SETTLE_TUPLE tries=$SETTLE_TRIES"
 	say "=== END vmbus-lifecycle-drill ==="
 	say "log=$LOG"
 	exit 1
 fi
 
-say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN maps=($BASE_TUPLE)"
+say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN maps=($BASE_TUPLE) settle_tries=$SETTLE_TRIES"
+say "  final=$FINAL_TUPLE"
+say "  settle=$SETTLE_TUPLE"
 say "=== END vmbus-lifecycle-drill ==="
 say "log=$LOG"
 exit 0
