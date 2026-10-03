@@ -1,4 +1,4 @@
-From cffac8e7545ca4047f5d0d0436b20fdb1d5b9bbb Mon Sep 17 00:00:00 2001
+From 30035add57baf77ac800d63fd1ac8153cbdb312f Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 01:18:44 -0300
 Subject: [PATCH v2 13/13] hv: netvsc: handle a NULL request address on empty

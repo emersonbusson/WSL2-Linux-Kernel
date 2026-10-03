@@ -380,7 +380,13 @@ jobs:
             hv_uio_mmap_region_select_test \
             hv_uio_mmap_prepare_test \
             hv_uio_pin_lifetime_test \
-            hv_uio_pin_close_before_mapped_test; do
+            hv_uio_pin_close_before_mapped_test \
+            sysfs_ring_mmap_ops_have_no_close \
+            uio_buffer_mmap_success \
+            sysfs_mmap_prepare_failure_releases_pin \
+            sysfs_mmap_partial_insert_failure_releases_pin \
+            sysfs_mmap_release_during_insert_keeps_pages_alive \
+            ring_mmap_release_preserves_protection_snapshot; do
             grep -R -q "KUNIT_CASE($case_name)" linux/drivers/hv linux/drivers/uio || {
               echo "Missing required KUnit case: $case_name" | tee -a vmbus-artifacts/kunit.log
               exit 1
@@ -404,7 +410,7 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'hyperv-uio-mmap \(6 subtests\)' \
+          grep -Eq 'hyperv-uio-mmap \(12 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
@@ -430,7 +436,13 @@ jobs:
             hv_uio_mmap_region_select_test \
             hv_uio_mmap_prepare_test \
             hv_uio_pin_lifetime_test \
-            hv_uio_pin_close_before_mapped_test; do
+            hv_uio_pin_close_before_mapped_test \
+            sysfs_ring_mmap_ops_have_no_close \
+            uio_buffer_mmap_success \
+            sysfs_mmap_prepare_failure_releases_pin \
+            sysfs_mmap_partial_insert_failure_releases_pin \
+            sysfs_mmap_release_during_insert_keeps_pages_alive \
+            ring_mmap_release_preserves_protection_snapshot; do
             grep -Eq "\\[PASSED\\] ${case_name}([[:space:]]|$)" \
               vmbus-artifacts/kunit.log
           done
