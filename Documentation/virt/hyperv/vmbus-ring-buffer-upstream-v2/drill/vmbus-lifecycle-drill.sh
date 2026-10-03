@@ -615,9 +615,10 @@ PRE_INSTANT_TUPLE="$(maps_tuple "${PRE_UIO_INSTANT:-}")" || PRE_INSTANT_TUPLE="$
 PHASE2_TUPLE="$(maps_tuple "${PHASE2_MAPS:-}")" || PHASE2_TUPLE=""
 # gap_retained is what the end state holds above the settled pre-UIO tuple.
 # With rebind=no that is the ring set the UIO probe re-establishes and the
-# hv_uio_remove gap retains; it must sit inside the ring-retention budget.
-# With rebind=yes the end is the boot baseline and the delta is zero by
-# construction.
+# hv_uio_remove gap retains, and it must sit inside the ring-retention
+# budget. With rebind=yes the end is the boot baseline and the delta is
+# informational only -- the band check there is the exact baseline match --
+# but it is printed in both cases so one log format covers both runs.
 GAP_N=0
 GAP_B=0
 GAP_P=0
