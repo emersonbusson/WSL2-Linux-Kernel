@@ -256,10 +256,10 @@ Testing
 -------
 
 The build, checkpatch and KUnit leg for these thirteen bytes is
-run 37089084420; the Hyper-V runtime drill leg is run 37089084375.
-Both ran on fork commit 1f788edba152 against pinned mainline base
+run 37138227430; the Hyper-V runtime drill leg is run 37138227398.
+Both ran on fork commit 024849b3af07 against pinned mainline base
 93f51579e7df ("Linux 7.3-rc4"), with all thirteen series/SHA256SUMS
-entries verified before build. 37089084420 applied all thirteen
+entries verified before build. 37138227430 applied all thirteen
 stages on x86_64 and arm64, reported 0 ERROR / 0 WARNING from
 scripts/checkpatch.pl --strict --no-tree at every stage, passed W=1
 with Sparse clean on both arches, passed 24 of 24 named KUnit cases
@@ -267,7 +267,7 @@ on x86_64 (hyperv-vmbus-buffer 16 subtests, hyperv-uio-mmap 4
 subtests, refcount_interrupt 4 subtests) and rejected all three CoCo
 gate self-test injections on both arches. Its wsl-backport job
 passed 15 of 15 named cases (hyperv-vmbus-gpadl-lifetime 12,
-hyperv-uio-hv-generic-mmap 3) on the same patch text. 37089084375
+hyperv-uio-hv-generic-mmap 3) on the same patch text. 37138227398
 booted the same bytes as a Gen2 guest on both hosted guests, and
 both legs printed HYPERV_DRILL_RESULT status=PASS with
 scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation and
@@ -280,6 +280,18 @@ high_order_7plus to zero with exhausted=1,
 high_order_7plus_blocks=0 (reread=0) and
 order7_dmesg=0 accept4_failures=0 oops=0.
 
+Runs 37089084420 and 37089084375 pinned these same diff hunks under
+the previous revision of the commit messages. After that pair the
+message text above four of the diffs changed -- 1/13, 4/13, 11/13
+and 12/13 -- and no diff hunk moved. 1/13 now names its real
+neighbour 9/13 instead of 6/9 for the prototype it widens, 11/13
+and 12/13 point at 12/13 and 11/13 instead of 8/9 and 7/9, and 4/13
+keeps vmbus_post_gpadl_messages() whole on one line. The cover's
+granularity figures for 8/13 and the twelve smaller patches are
+corrected to the measured ones. series/SHA256SUMS records those
+message changes. The cover letter itself is not in series/SHA256SUMS
+and CI never applies it.
+
 Both hosted guests print
 VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION in addition to the
 HYPERV_DRILL_RESULT line above. Neither leg reports PARTIAL and
@@ -290,7 +302,7 @@ discloses, not a drill defect.
 
 That 0/0 is the CI shape of the check: scripts/checkpatch.pl
 --strict --no-tree reading the cumulative git diff after each apply,
-which is what 37089084420 runs. Read as a mail patch instead, the two
+which is what 37138227430 runs. Read as a mail patch instead, the two
 commits that add a test file (2/13 and 10/13) each print one
 FILE_PATH_CHANGES warning asking whether MAINTAINERS needs updating.
 No MAINTAINERS change is needed: drivers/hv/vmbus_buffer_test.c is
