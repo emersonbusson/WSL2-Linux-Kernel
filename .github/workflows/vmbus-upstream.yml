@@ -330,6 +330,28 @@ jobs:
           echo "gate self-test OK: missing compat re-encryption rejected"
 
           restore_sources
+
+          # KCA-04 shape: a clean direct-map declaration followed by a
+          # reassignment to something that is not page_address(). A checker
+          # that only reads declarations accepts this and then hands a
+          # non-direct-map address to set_memory_encrypted(). Rejecting only
+          # the spelling of the first write is not a gate.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("linux/drivers/hv/channel.c")
+          s = p.read_text()
+          needle = "\t\tunsigned int order = folio_order(page_folio(chunks[i]));\n"
+          assert needle in s, "vmbus_free_buffer order declaration not found"
+          p.write_text(s.replace(needle,
+              needle + "\t\tvaddr = (unsigned long)addr;\n", 1))
+          PY
+          if python3 "$CHECKER" --tree linux; then
+            echo "gate self-test FAILED: reassigned direct-map alias was not rejected" >&2
+            exit 1
+          fi
+          echo "gate self-test OK: reassigned direct-map alias rejected"
+
+          restore_sources
           trap - EXIT
           python3 "$CHECKER" --tree linux | tee -a vmbus-artifacts/coco-static-invariants.log
       - name: Require and run VMBus KUnit cases
@@ -356,7 +378,9 @@ jobs:
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \
-            hv_uio_mmap_prepare_test; do
+            hv_uio_mmap_prepare_test \
+            hv_uio_pin_lifetime_test \
+            hv_uio_pin_close_before_mapped_test; do
             grep -R -q "KUNIT_CASE($case_name)" linux/drivers/hv linux/drivers/uio || {
               echo "Missing required KUnit case: $case_name" | tee -a vmbus-artifacts/kunit.log
               exit 1
@@ -380,7 +404,7 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'hyperv-uio-mmap \(4 subtests\)' \
+          grep -Eq 'hyperv-uio-mmap \(6 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
@@ -404,7 +428,9 @@ jobs:
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \
-            hv_uio_mmap_prepare_test; do
+            hv_uio_mmap_prepare_test \
+            hv_uio_pin_lifetime_test \
+            hv_uio_pin_close_before_mapped_test; do
             grep -Eq "\\[PASSED\\] ${case_name}([[:space:]]|$)" \
               vmbus-artifacts/kunit.log
           done

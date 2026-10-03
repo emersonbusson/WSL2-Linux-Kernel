@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """Machine-check the CoCo static invariants of the VMBus ring-buffer v2 series.
 
-Static negative proof: the guest-fatal pattern Michael Kelley named
-(set_memory_decrypted() on a vmalloc()/vmap() virtual range) has no code path
-in any allocation this series introduces. Run against the candidate tree after
-all thirteen patches are applied.
+Static negative check for the guest-fatal pattern Michael Kelley named
+(set_memory_decrypted() on a vmalloc()/vmap() virtual range): every
+set_memory_*() site in the paths this series allocates receives a
+page_address() direct-map chunk, an accepted legacy argument, or the file is
+rejected. Run against the candidate tree after all thirteen patches are
+applied.
 
   python3 coco-static-invariants.py --tree <linux-tree>
+
+What this does establish: no set_memory_*() call site this series introduces
+or moves takes a non-direct-map argument, and INV-2/3/6 hold as written.
+
+What this does not establish: reachability. The checks are syntactic. INV-4
+in particular compares the textual order of vzalloc() and set_memory_*() inside
+vmbus_alloc_buffer_owned(); it is not a control-flow proof that the private
+path returns before an encryption transition. Treat the result as a
+necessary static condition, not as a closed COCO row.
 
 Exit 0 = every invariant holds. Exit 1 = at least one invariant is violated,
 with the exact site printed. This step must never be silenced to land a patch.
@@ -46,6 +57,19 @@ NETVSC = Path("drivers/net/hyperv/netvsc.c")
 # Rejecting the temporary would reject mainline. Accepting any bare identifier
 # would hide a vmalloc() temporary. So accept a local only when every assignment
 # to that name in the file derives from page_address().
+#
+# "Every assignment" means every assignment, not every declaration. A clean
+# declaration followed by a reassignment hands set_memory_*() whatever the last
+# write put there, and a checker that only reads declarations accepts it:
+#
+#   unsigned long vaddr = (unsigned long)page_address(chunks[i]);
+#   unsigned int order = folio_order(page_folio(chunks[i]));
+#   vaddr = (unsigned long)addr;           /* not page_address() */
+#   if (set_memory_encrypted(vaddr, 1U << order))
+#
+# This is an aliasing hole, not a spelling quirk, so the gate rejects a name as
+# soon as anything other than a page_address() derivation is assigned to it --
+# including compound assignment and increment, which also move the address.
 LEGACY_DECRYPT_ARG = "kbuffer"
 LEGACY_ENCRYPT_ARG = "owner->addr"
 LEGACY_COMPAT_ENCRYPT_ARG = "gpadl->buffer"
@@ -158,10 +182,12 @@ def unwrap_cast(expr: str) -> str:
         expr = expr[match.end():].strip()
 
 
-# A simple local holding a direct-map address: `T name = [cast] page_address(`.
-DIRECT_MAP_LOCAL = re.compile(
+# A direct-map address local: `T name = [cast] page_address(`.
+DIRECT_MAP_DECL = re.compile(
     r"\b(?:unsigned\s+long(?:\s+int)?|u64|uintptr_t)\s+(\w+)\s*=\s*"
 )
+# A write to a bare identifier, with no -> or . member access in front of it.
+BARE_WRITE = re.compile(r"(?<![\w.>])(\w+)\s*(\+\+|--|<<=|>>=|[+\-*/%|&^]?=)(?!=)")
 
 
 def direct_map_locals(code: str) -> set[str]:
@@ -171,17 +197,43 @@ def direct_map_locals(code: str) -> set[str]:
     and passes that local to set_memory_encrypted(). The invariant is about the
     range, not the spelling, so a local qualifies only when nothing ever
     assigns it a non-page_address value.
+
+    Both the declaration and any later write count. Collecting declarations
+    alone is how a reassignment of a clean temporary slipped past this gate.
     """
-    assigned: dict[str, list[str]] = {}
-    for match in DIRECT_MAP_LOCAL.finditer(code):
+    rhss: dict[str, list[str]] = {}
+    for match in DIRECT_MAP_DECL.finditer(code):
         rhs = code[match.end():].split(";", 1)[0]
-        assigned.setdefault(match.group(1), []).append(
+        rhss.setdefault(match.group(1), []).append(
             unwrap_cast(re.sub(r"\s+", " ", rhs.strip()))
         )
+    if not rhss:
+        return set()
+
+    decl_tail = re.compile(
+        r"(?:unsigned\s+long(?:\s+int)?|u64|uintptr_t)\s+$"
+    )
+    for name in list(rhss):
+        for match in BARE_WRITE.finditer(code):
+            if match.group(1) != name:
+                continue
+            before = code[max(0, match.start() - 40):match.start()]
+            if decl_tail.search(before):
+                continue  # already recorded from the declaration
+            op = match.group(2)
+            if op == "=":
+                rhs = code[match.end():].split(";", 1)[0]
+                rhss[name].append(
+                    unwrap_cast(re.sub(r"\s+", " ", rhs.strip()))
+                )
+            else:
+                # ++, --, += and friends move the address without deriving it.
+                rhss[name].append(f"<compound-assignment:{op}>")
+
     return {
         name
-        for name, rhss in assigned.items()
-        if rhss and all(r.startswith("page_address(") for r in rhss)
+        for name, assigns in rhss.items()
+        if assigns and all(r.startswith("page_address(") for r in assigns)
     }
 
 
@@ -423,7 +475,13 @@ def scan_retain(src: str, path: Path) -> None:
 
 
 def scan_private_path(src: str, path: Path) -> None:
-    """INV-4: guest-private / non-isolated buffers never touch encryption."""
+    """INV-4: the private allocation is textually free of encryption calls.
+
+    Checks ordering only: vzalloc() appears in vmbus_alloc_buffer_owned()
+    before any set_memory_*() in that body, and the shared-page selector does
+    not itself touch encryption state. This is not a reachability proof that
+    the private path returns before a transition.
+    """
     code = strip_comments(src)
     alloc = function_body(code, "vmbus_alloc_buffer_owned")
     if alloc is None:
@@ -523,10 +581,11 @@ def main() -> int:
     print("INV-1 direct-map chunk encryption ............ PASS")
     print("INV-2 prepared GPADL does not re-decrypt ...... PASS")
     print("INV-3 unknown page state retained ............. PASS")
-    print("INV-4 private path never touches encryption ... PASS")
+    print("INV-4 private alloc ordering, not reachability  PASS")
     print("INV-5 UIO never transitions encryption ........ PASS")
     print("INV-6 consumers avoid legacy decrypt path ..... PASS")
     print("COCO-STATIC-PROOF: all invariants hold.")
+    print("scope: syntactic necessary condition, not a closed COCO row.")
     return 0
 
 
