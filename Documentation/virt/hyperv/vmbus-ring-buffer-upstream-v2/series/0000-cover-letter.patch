@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 22:15:00 -0300
-Subject: [PATCH v2 0/9] hv: vmbus: make rings and host-visible buffers
+Subject: [PATCH v2 0/13] hv: vmbus: make rings and host-visible buffers
  survive fragmentation without breaking CoCo
 
 This is v2 of the VMBus ring-allocation series. v1 was posted
@@ -29,7 +29,7 @@ References
   on, Message-ID stem 2026081160447.2529876-1.
 
   Michael Kelley's review of v1, 2026-09-22. It is the source of the
-  five points mapped below and of Suggested-by on 1/9 and 6/9.
+  five points mapped below and of Suggested-by on 1/13 and 6/13.
 
 Problem
 -------
@@ -124,12 +124,12 @@ What changed
   returning. The establish and teardown adapters build an owner-less
   stack buffer instead, so decrypt and re-encryption happen inline
   and the compat surface stays synchronous and self-contained.
-  There is one intermediate shape worth naming: 1/9 gives
+  There is one intermediate shape worth naming: 1/13 gives
   vmbus_alloc_buffer() a bool confidential argument. The mainline
   function decides host-visibility from channel->co_external_memory
   alone, while a ring buffer on the same channel is governed by
   channel->co_ring_buffer, so the caller has to say which policy
-  applies to the buffer it is allocating. 6/9 folds that argument
+  applies to the buffer it is allocating. 9/13 folds that argument
   into vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer()
   to the exact four-argument prototype mainline has today.
   vmbus_alloc_buffer_owned(), vmbus_establish_gpadl_owned(),
@@ -227,7 +227,7 @@ Mapping to the 2026-09-22 review
      channel->ringbuffer_gpadlhandle and channel->ringbuffer_page are
      replaced by channel->ringbuffer, whose GPADL is embedded as
      buffer->gpadl and is released by vmbus_release_buffer() as one
-     unit, 0001 and 0006. The struct vmbus_gpadl type survives as the
+     unit, 0001 and 0008. The struct vmbus_gpadl type survives as the
      argument of the three previously exported establish/teardown
      prototypes; nothing that used to allocate it separately still
      does.
@@ -235,7 +235,7 @@ Mapping to the 2026-09-22 review
   4. "A leak flag when GPADL or CoCo re-encryption cannot be proven."
      gpadl.leak and buffer.leak are set when a GPADL message may have
      reached the host but completion is uncertain, so the backing pages
-     are retained instead of handed back, 0001 and 0006.
+     are retained instead of handed back, 0001 and 0008.
 
   5. "Eliminate redundant HV_GPADL_* types once vmbus_alloc_buffer() is
      universal." HV_GPADL_BUFFER_DECRYPTED is gone. The caller-decrypted
@@ -245,7 +245,62 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-Twelve runs across six pairs are the census for this revision:
+These thirteen patch files have not been measured yet. Every run
+named below was taken on the previous nine-patch revision of the
+same work, before the series was split and before the KUnit cases
+were moved out of channel.c and uio_hv_generic.c into
+drivers/hv/vmbus_buffer_test.c and
+drivers/uio/uio_hv_generic_mmap_test.c. The measurements are kept
+because they are real and because they describe the design these
+patches implement. They are not evidence about the bytes posted
+here.
+
+The split is a re-cut, not a rewrite. On the same pinned base,
+93f51579e7df ("Linux 7.3-rc4"), the previous revision and this
+one produce trees in which seven of the ten files the previous
+revision touched are byte-identical: channel_mgmt.c,
+ring_buffer.c, vmbus_drv.c, hyperv_net.h, netvsc.c,
+rndis_filter.c and include/linux/hyperv.h. The three that move
+are channel.c, hyperv_vmbus.h and uio_hv_generic.c. This
+revision additionally touches drivers/hv/Kconfig,
+drivers/hv/Makefile and drivers/uio/Kconfig for the two test
+options, and adds drivers/hv/vmbus_buffer_test.c and
+drivers/uio/uio_hv_generic_mmap_test.c.
+
+channel.c loses its KUnit block and its kunit/test.h include;
+struct vmbus_buffer_retained moves to hyperv_vmbus.h; the helpers
+the test file reaches lose static and are declared there;
+vmbus_free_buffer(), vmbus_buffer_pin_pages() and
+vmbus_buffer_unpin_pages() move earlier in the file; three
+exported functions gain kernel-doc. The twenty-six
+EXPORT_SYMBOL_GPL names in channel.c are the same set in both
+trees. uio_hv_generic.c loses its KUnit block and gains the
+#if defined(CONFIG_UIO_HV_GENERIC_KUNIT_TEST) seam that includes
+uio_hv_generic_mmap_test.c. One new non-static helper,
+vmbus_buffer_mark_host_revoked(), wraps the lock around the
+_locked form so the test does not have to; its only caller is
+vmbus_buffer_test.c, and production still calls the _locked form
+at the same two sites. No production logic differs.
+
+Patch numbers in the narrative below are the nine-patch
+revision's. They map to the posted series as follows:
+
+  1/9 -> 1/13     convert ring buffer allocation
+  2/9 -> 2/13     validate chunk buffer allocation and cleanup
+  3/9 -> 3/13     uio: allocate host-visible buffers through VMBus
+  4/9 -> 4/13     GPADL post failure injection tests
+  5/9 -> 5/13     order-zero allocation fallback test
+  6/9 -> 6/13, 7/13, 8/13, 9/13 and 10/13
+  7/9 -> 11/13    requestor array with kvcalloc()
+  8/9 -> 12/13    RNDIS request descriptors with kvzalloc_obj()
+  9/9 -> 13/13    NULL request address on empty completions
+
+The build, KUnit and drill pair for these thirteen bytes is not
+in this letter yet. It will be named here when it has run and
+both drill legs have been read.
+
+For the previous nine-patch revision, twelve runs across six
+pairs are the census:
 36970357736 and 36970357645, then 36972315239 and 36972315260,
 then 36975012643 and 36975012655, then 36978224379 and
 36978224340, then 37022258445 and 37022259049, then 37025110180
@@ -308,8 +363,8 @@ schedule, retry and workqueue constants. The two KUnit tests that
 fed a NULL page array now allocate real pages, because pin
 dereferences the array. 1/9 through 5/9 are byte-identical to
 what those four runs executed. The fresh build + KUnit +
-both-drill-legs pair on the posted bytes is now measured:
-37058078668 and 37058079485. 37058078668 applied all nine stages,
+both-drill-legs pair on those nine bytes is 37058078668 and
+37058079485. 37058078668 applied all nine stages,
 passed 24 of 24 KUnit cases on x86_64 and 15 of 15 on the WSL
 6.18.40.1 backport, and cleared CoCo static invariants on x86_64
 and arm64 with all three gate self-tests rejecting their
@@ -391,11 +446,11 @@ KUnit (hosted, no Hyper-V required):
   build passes its own 15 named cases in two differently named suites --
   hyperv-vmbus-gpadl-lifetime 12 and hyperv-uio-hv-generic-mmap 3 --
   covering GPADL rescind and re-encrypt lifetime plus UIO mmap. Only
-  vmbus_buffer_size_rounding_test is shared by name. 0008 touches
-  rndis_filter.c and 0009 touches netvsc.c completion paths, neither of
-  which a named case covers; the named cases are the ones this series
-  adds, and they pass on these bytes. 0009 adds no named case of its
-  own.
+  vmbus_buffer_size_rounding_test is shared by name. In the posted
+  series 0011, 0012 and 0013 add no named case of their own: 0012
+  touches rndis_filter.c and 0013 touches netvsc.c completion paths,
+  neither of which a named case covers. The named cases are the ones
+  this series adds.
 
 Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
@@ -543,7 +598,7 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
 
   36982941081 and 37043082886, both windows-2025, both print
   PRE-OPEN 12 maps and then this at 4.1s of guest time, and neither
-  reaches POST-OPEN. 0007 and 0008 have already taken the order-7
+  reaches POST-OPEN. 0011 and 0012 have already taken the order-7
   requestor array and the order-2 RNDIS descriptor off this path;
   what is left is an ordinary SLUB new-slab page for a small
   __kmalloc, and with the hog holding about 1.9 GiB unevictable and
@@ -590,9 +645,9 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   allocation failure: order:2" and an oom-kill of the drill shell. In
   the census above the runs reach a tighter buddy than that
   (buddy_order2=0 on 36949824155) and the subchannel open survived.
-  That is the failure mode 0008 removes, shown absent on the bytes
+  That is the failure mode 0012 removes, shown absent on the bytes
   that remove it. The SLUB wall named further up is a different
-  failure mode, and is not what 0008 addresses.
+  failure mode, and is not what 0012 addresses.
 
   A later run against the same eight-patch bytes failed differently,
   and 9/9 is the response. Run 36960219285 panicked in netvsc_poll
@@ -626,7 +681,7 @@ Runtime on ordinary x86_64 Hyper-V (not CoCo):
   this is the surface that failed in 36960219285, shown surviving.
 
   One observation from a different surface, which is not evidence
-  about these nine patches. A WSL 6.18 development tree carrying
+  about these thirteen patches. A WSL 6.18 development tree carrying
   this design -- a different base from 7.3-rc4 and a different code
   shape, folding buffer release into vmbus_free_buffer() rather
   than exporting vmbus_release_buffer() -- is installed on a daily
@@ -660,29 +715,37 @@ awaits platform validation.
 The design follows Michael Kelley's review of the v1 series. Comments
 welcome.
 
-Emerson Busson (9):
+Emerson Busson (13):
   hv: vmbus: convert ring buffer allocation to vmbus_alloc_buffer()
   hv: vmbus: validate chunk buffer allocation and cleanup
   uio: hv_generic: allocate host-visible buffers through VMBus
   hv: vmbus: add KUnit tests for GPADL post failure injection
   hv: vmbus: add KUnit test for order-zero allocation fallback
-  hv: vmbus: retain buffer ownership until GPADL and page state are
-    resolved
+  hv: vmbus: name the shared-page test in vmbus_needs_shared_pages()
+  hv: vmbus: distinguish host rescind from local channel unload
+  hv: vmbus: retain buffer ownership across GPADL and page state
+  hv: vmbus: restore the vmbus_alloc_buffer() prototype and adopt _owned
+  hv: vmbus: pin buffer pages across UIO mmap to close the reclaim race
   hv: vmbus: allocate the requestor array with kvcalloc()
   hv: netvsc: allocate RNDIS request descriptors with kvzalloc_obj()
   hv: netvsc: handle a NULL request address on empty completions
 
- drivers/hv/channel.c              | 1506 +++++++++++++++++++++++++++++++------
- drivers/hv/channel_mgmt.c         |   36 +-
- drivers/hv/hyperv_vmbus.h         |    7 +-
- drivers/hv/ring_buffer.c          |    9 +-
- drivers/hv/vmbus_drv.c            |   14 +-
- drivers/net/hyperv/hyperv_net.h   |   10 +-
- drivers/net/hyperv/netvsc.c       |  117 ++--
- drivers/net/hyperv/rndis_filter.c |   19 +-
- drivers/uio/uio_hv_generic.c      |  419 +++++++++--
- include/linux/hyperv.h            |   48 +-
- 10 files changed, 1826 insertions(+), 359 deletions(-)
+ drivers/hv/Kconfig                     |   11 +
+ drivers/hv/Makefile                    |    1 +
+ drivers/hv/channel.c                   | 1101 ++++++++++++++++++++++++++------
+ drivers/hv/channel_mgmt.c              |   36 +-
+ drivers/hv/hyperv_vmbus.h              |   91 ++-
+ drivers/hv/ring_buffer.c               |    9 +-
+ drivers/hv/vmbus_buffer_test.c         |  468 ++++++++++++++
+ drivers/hv/vmbus_drv.c                 |   14 +-
+ drivers/net/hyperv/hyperv_net.h        |   10 +-
+ drivers/net/hyperv/netvsc.c            |  119 ++--
+ drivers/net/hyperv/rndis_filter.c      |   19 +-
+ drivers/uio/Kconfig                    |   11 +
+ drivers/uio/uio_hv_generic.c           |  236 +++++--
+ drivers/uio/uio_hv_generic_mmap_test.c |  246 +++++++
+ include/linux/hyperv.h                 |   53 +-
+ 15 files changed, 2090 insertions(+), 335 deletions(-)
 
 --
 2.43.0

@@ -1,0 +1,625 @@
+From fab3abaab641269a7ce7de80db366061704dd8f8 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Fri, 2 Oct 2026 22:05:31 -0300
+Subject: [PATCH v2 10/13] hv: vmbus: pin buffer pages across UIO mmap to close
+ the reclaim race
+
+UIO maps the channel ring, the send/receive buffers, the interrupt
+page and the monitor page directly into userspace. Those maps are
+built from page arrays that the reclaim worker can free once the
+buffer owner is released: the snapshot taken in the mmap path and
+the moment the new VMA holds its own references are not the same
+instant, so a reclaim in that window frees pages a mapping is about
+to publish.
+
+Add vmbus_buffer_pin_pages() and vmbus_buffer_unpin_pages(). Pinning
+takes a reference on every page of a vmbus_buffer and refuses to
+start once reclaiming has begun or the owner leaked for good. The
+UIO mmap paths pin before they hand pages to the VMA and unpin after,
+so the mapping either has its own references or fails closed.
+
+The ring-buffer sysfs mmap and the UIO mmap_prepare hook share one
+page-selection and validation path. The interrupt and monitor pages
+are snapshot as struct page * at probe, where the backing is
+guaranteed to still exist. The four KUnit cases cover the range
+check, the ring mmap path, the per-map region selection and the
+mmap_prepare hook. They are included from uio_hv_generic.c so they
+can reach the static helpers without exporting them.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c                   |  64 +++++++
+ drivers/uio/Kconfig                    |  11 ++
+ drivers/uio/uio_hv_generic.c           | 165 ++++++++++++++++-
+ drivers/uio/uio_hv_generic_mmap_test.c | 246 +++++++++++++++++++++++++
+ include/linux/hyperv.h                 |   5 +
+ 5 files changed, 483 insertions(+), 8 deletions(-)
+ create mode 100644 drivers/uio/uio_hv_generic_mmap_test.c
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index ee1b132d2649..cfc435424d73 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -1160,6 +1160,70 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+ }
+ EXPORT_SYMBOL_GPL(vmbus_release_buffer);
+ 
++/**
++ * vmbus_buffer_pin_pages - snapshot a buffer's pages and hold references
++ * @buffer: buffer whose pages the caller is about to map
++ * @pages: out parameter for the page array owned by @buffer
++ * @page_count: out parameter for the number of pages in @pages
++ *
++ * Take a reference on every page of @buffer and hand back the array
++ * that describes them. The references close the window between the
++ * snapshot and the point where a new mapping holds its own: the
++ * reclaim worker refuses to free pages whose folio reference count
++ * is above one, and refuses to start at all once it has begun
++ * reclaiming. Call vmbus_buffer_unpin_pages() after the mapping
++ * holds its own references.
++ *
++ * Return: 0 on success, -ENODEV if the pages are gone or reclaim
++ * has already taken ownership of them.
++ */
++int vmbus_buffer_pin_pages(struct vmbus_buffer *buffer, struct page ***pages,
++			   unsigned long *page_count)
++{
++	struct vmbus_buffer_retained *owner = buffer->owner;
++	u32 i;
++
++	if (!buffer->pages || !buffer->page_cnt)
++		return -ENODEV;
++
++	mutex_lock(&vmbus_buffer_owners_lock);
++	if (owner && (owner->reclaiming || owner->permanent_leak)) {
++		mutex_unlock(&vmbus_buffer_owners_lock);
++		return -ENODEV;
++	}
++
++	for (i = 0; i < buffer->page_cnt; i++) {
++		if (WARN_ON_ONCE(!buffer->pages[i])) {
++			while (i--)
++				put_page(buffer->pages[i]);
++			mutex_unlock(&vmbus_buffer_owners_lock);
++			return -ENODEV;
++		}
++		get_page(buffer->pages[i]);
++	}
++
++	*pages = buffer->pages;
++	*page_count = buffer->page_cnt;
++	mutex_unlock(&vmbus_buffer_owners_lock);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(vmbus_buffer_pin_pages);
++
++/**
++ * vmbus_buffer_unpin_pages - drop references taken by vmbus_buffer_pin_pages
++ * @pages: page array returned by vmbus_buffer_pin_pages
++ * @page_count: number of pages in @pages
++ */
++void vmbus_buffer_unpin_pages(struct page **pages, unsigned long page_count)
++{
++	unsigned long i;
++
++	for (i = 0; i < page_count; i++)
++		put_page(pages[i]);
++}
++EXPORT_SYMBOL_GPL(vmbus_buffer_unpin_pages);
++
+ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+ 					   gfp_t gfp,
+ 					   unsigned int order)
+diff --git a/drivers/uio/Kconfig b/drivers/uio/Kconfig
+index 9242e77385c6..0a01906bd6cd 100644
+--- a/drivers/uio/Kconfig
++++ b/drivers/uio/Kconfig
+@@ -148,6 +148,17 @@ config UIO_HV_GENERIC
+ 
+ 	  If you compile this as a module, it will be called uio_hv_generic.
+ 
++config UIO_HV_GENERIC_KUNIT_TEST
++	bool "Tests for the UIO Hyper-V generic mmap" if !KUNIT_ALL_TESTS
++	depends on UIO_HV_GENERIC && KUNIT=y
++	default KUNIT_ALL_TESTS
++	help
++	  Enable KUnit tests for the UIO Hyper-V generic mmap paths.
++	  The tests are included from uio_hv_generic.c so they can
++	  reach the static page-selection helpers. Select this option
++	  only if you will boot the kernel for the purpose of running
++	  unit tests (e.g. under UML or qemu). If unsure, say N.
++
+ config UIO_DFL
+ 	tristate "Generic driver for DFL (Device Feature List) bus"
+ 	depends on FPGA_DFL
+diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
+index b40e80e19c6c..39c88cbdeb66 100644
+--- a/drivers/uio/uio_hv_generic.c
++++ b/drivers/uio/uio_hv_generic.c
+@@ -25,6 +25,7 @@
+ #include <linux/uio_driver.h>
+ #include <linux/netdevice.h>
+ #include <linux/if_ether.h>
++#include <linux/mm.h>
+ #include <linux/skbuff.h>
+ #include <linux/hyperv.h>
+ #include <linux/vmalloc.h>
+@@ -55,6 +56,8 @@ struct hv_uio_private_data {
+ 	struct uio_info info;
+ 	struct hv_device *device;
+ 	atomic_t refcnt;
++	struct page *int_pages[1];
++	struct page *monitor_pages[1];
+ 
+ 	struct vmbus_buffer recv_buffer;
+ 	char	recv_name[32];	/* "recv_4294967295" */
+@@ -149,23 +152,165 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
+ }
+ 
+ /* Function used for mmap of the ring buffer sysfs interface. */
++static bool hv_uio_mmap_range_valid(unsigned long map_pages,
++				    pgoff_t offset,
++				    unsigned long pages)
++{
++	return pages && offset < map_pages && pages <= map_pages - offset;
++}
++
++struct hv_uio_mmap_region {
++	struct page **pages;
++	unsigned long page_count;
++	struct vmbus_buffer *buffer;
++	bool decrypted;
++};
++
++static int hv_uio_mmap_get_region(struct hv_uio_private_data *pdata,
++				  unsigned int map_index,
++				  struct hv_uio_mmap_region *region)
++{
++	struct hv_device *dev = pdata->device;
++	struct vmbus_channel *channel = dev->channel;
++	struct vmbus_buffer *buffer;
++
++	if (map_index >= MAX_UIO_MAPS || !pdata->info.mem[map_index].size)
++		return -EINVAL;
++
++	switch (map_index) {
++	case TXRX_RING_MAP:
++		if (channel->state != CHANNEL_OPENED_STATE)
++			return -ENODEV;
++		buffer = &channel->ringbuffer;
++		region->buffer = buffer;
++		region->pages = buffer->pages;
++		region->page_count = buffer->page_cnt;
++		region->decrypted = !!buffer->chunks;
++		break;
++	case INT_PAGE_MAP:
++		region->buffer = NULL;
++		region->pages = pdata->int_pages;
++		region->page_count = ARRAY_SIZE(pdata->int_pages);
++		region->decrypted = false;
++		break;
++	case MON_PAGE_MAP:
++		region->buffer = NULL;
++		region->pages = pdata->monitor_pages;
++		region->page_count = ARRAY_SIZE(pdata->monitor_pages);
++		region->decrypted = true;
++		break;
++	case RECV_BUF_MAP:
++		buffer = &pdata->recv_buffer;
++		region->buffer = buffer;
++		region->pages = buffer->pages;
++		region->page_count = buffer->page_cnt;
++		region->decrypted = !!buffer->chunks;
++		break;
++	case SEND_BUF_MAP:
++		buffer = &pdata->send_buffer;
++		region->buffer = buffer;
++		region->pages = buffer->pages;
++		region->page_count = buffer->page_cnt;
++		region->decrypted = !!buffer->chunks;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	if (!region->pages || !region->page_count)
++		return -EINVAL;
++
++	return 0;
++}
++
++static int hv_uio_mmap_prepare_pages(struct vm_area_desc *desc,
++				     struct page **pages,
++				     unsigned long page_count,
++				     pgoff_t offset,
++				     bool decrypted)
++{
++	unsigned long nr_pages = vma_desc_pages(desc);
++
++	if (!vma_desc_test(desc, VMA_SHARED_BIT))
++		return -EINVAL;
++
++	if (!pages || !hv_uio_mmap_range_valid(page_count, offset, nr_pages))
++		return -EINVAL;
++
++	vma_desc_set_flags(desc, VMA_DONTEXPAND_BIT, VMA_DONTDUMP_BIT);
++	if (decrypted)
++		desc->page_prot = pgprot_decrypted(desc->page_prot);
++
++	mmap_action_map_kernel_pages(desc, desc->start, pages + offset,
++				     nr_pages);
++	return 0;
++}
++
++static int hv_uio_mmap_prepare(struct uio_info *info,
++			       struct vm_area_desc *desc)
++{
++	struct hv_uio_private_data *pdata = info->priv;
++	struct hv_uio_mmap_region region;
++	int ret;
++
++	/* UIO encodes the map index in pgoff; mmap offsets start at the map. */
++	if (desc->pgoff >= MAX_UIO_MAPS)
++		return -EINVAL;
++
++	ret = hv_uio_mmap_get_region(pdata, desc->pgoff, &region);
++	if (ret)
++		return ret;
++
++	/*
++	 * Buffer-backed maps race with the reclaim worker: the page
++	 * array and the pages themselves can be freed between the
++	 * snapshot above and the mapping below. Hold references until
++	 * the VMA holds its own.
++	 */
++	if (region.buffer) {
++		ret = vmbus_buffer_pin_pages(region.buffer, &region.pages,
++					     &region.page_count);
++		if (ret)
++			return ret;
++	}
++
++	ret = hv_uio_mmap_prepare_pages(desc, region.pages,
++					region.page_count, 0,
++					region.decrypted);
++	if (region.buffer)
++		vmbus_buffer_unpin_pages(region.pages, region.page_count);
++
++	return ret;
++}
++
+ static int
+-hv_uio_ring_mmap_prepare(struct vmbus_channel *channel, struct vm_area_desc *desc)
++hv_uio_ring_mmap_prepare(struct vmbus_channel *channel,
++			 struct vm_area_desc *desc)
+ {
+-	unsigned long pages = vma_desc_pages(desc);
++	struct vmbus_buffer *buffer = &channel->ringbuffer;
++	struct page **pages;
++	unsigned long page_count;
+ 	pgoff_t offset = desc->pgoff;
++	int ret;
+ 
+ 	if (channel->state != CHANNEL_OPENED_STATE)
+ 		return -ENODEV;
+-	if (offset >= channel->ringbuffer_pagecount ||
+-	    pages > channel->ringbuffer_pagecount - offset)
+-		return -EINVAL;
+ 
+-	mmap_action_map_kernel_pages(desc, desc->start,
+-				     channel->ringbuffer.pages + offset, pages);
+-	return 0;
++	ret = vmbus_buffer_pin_pages(buffer, &pages, &page_count);
++	if (ret)
++		return ret;
++
++	ret = hv_uio_mmap_prepare_pages(desc, pages, page_count, offset,
++					!!buffer->chunks);
++	vmbus_buffer_unpin_pages(pages, page_count);
++
++	return ret;
+ }
+ 
++#if defined(CONFIG_UIO_HV_GENERIC_KUNIT_TEST)
++#include "uio_hv_generic_mmap_test.c"
++#endif
++
+ /* Callback from VMBUS subsystem when new channel created. */
+ static void
+ hv_uio_new_channel(struct vmbus_channel *new_sc)
+@@ -272,6 +417,7 @@ hv_uio_probe(struct hv_device *dev,
+ 	pdata->info.name = "uio_hv_generic";
+ 	pdata->info.version = DRIVER_VERSION;
+ 	pdata->info.irqcontrol = hv_uio_irqcontrol;
++	pdata->info.mmap_prepare = hv_uio_mmap_prepare;
+ 	pdata->info.open = hv_uio_open;
+ 	pdata->info.release = hv_uio_release;
+ 	pdata->info.irq = UIO_IRQ_CUSTOM;
+@@ -290,12 +436,15 @@ hv_uio_probe(struct hv_device *dev,
+ 		= (uintptr_t)vmbus_connection.int_page;
+ 	pdata->info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
+ 	pdata->info.mem[INT_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
++	pdata->int_pages[0] = virt_to_page(vmbus_connection.int_page);
+ 
+ 	pdata->info.mem[MON_PAGE_MAP].name = "monitor_page";
+ 	pdata->info.mem[MON_PAGE_MAP].addr
+ 		= (uintptr_t)vmbus_connection.monitor_pages[1];
+ 	pdata->info.mem[MON_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
+ 	pdata->info.mem[MON_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
++	pdata->monitor_pages[0] =
++		virt_to_page(vmbus_connection.monitor_pages[1]);
+ 
+ 	if (channel->device_id == HV_NIC) {
+ 		ret = vmbus_alloc_buffer_owned(channel, RECV_BUFFER_SIZE, false,
+diff --git a/drivers/uio/uio_hv_generic_mmap_test.c b/drivers/uio/uio_hv_generic_mmap_test.c
+new file mode 100644
+index 000000000000..4c484ee8caae
+--- /dev/null
++++ b/drivers/uio/uio_hv_generic_mmap_test.c
+@@ -0,0 +1,246 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * KUnit tests for the UIO Hyper-V generic mmap paths.
++ *
++ * This file is included from uio_hv_generic.c so the cases can reach the
++ * static helpers that select, validate and pin the mapped pages.
++ */
++#include <kunit/test.h>
++
++static void hv_uio_ring_mmap_range_test(struct kunit *test)
++{
++	KUNIT_EXPECT_TRUE(test, hv_uio_mmap_range_valid(8, 0, 8));
++	KUNIT_EXPECT_TRUE(test, hv_uio_mmap_range_valid(8, 4, 4));
++	KUNIT_EXPECT_FALSE(test, hv_uio_mmap_range_valid(8, 8, 1));
++	KUNIT_EXPECT_FALSE(test, hv_uio_mmap_range_valid(8, 7, 2));
++	KUNIT_EXPECT_FALSE(test, hv_uio_mmap_range_valid(8, 0, 0));
++	KUNIT_EXPECT_FALSE(test,
++			   hv_uio_mmap_range_valid(8, U64_MAX, 1));
++}
++
++static void hv_uio_ring_mmap_prepare_test(struct kunit *test)
++{
++	struct vmbus_channel channel = {
++		.state = CHANNEL_OPENED_STATE,
++		.ringbuffer = {
++			.page_cnt = 8,
++		},
++	};
++	struct page *pages[8] = {};
++	struct page *chunks[1] = {};
++	struct vm_area_desc desc = {
++		.start = PAGE_SIZE,
++		.end = 5 * PAGE_SIZE,
++		.pgoff = 2,
++		.page_prot = PAGE_SHARED,
++	};
++	unsigned int i;
++	int ret;
++
++	/* Mapping pins real pages; the array cannot hold NULL entries. */
++	for (i = 0; i < ARRAY_SIZE(pages); i++) {
++		pages[i] = alloc_page(GFP_KERNEL);
++		KUNIT_ASSERT_NOT_NULL(test, pages[i]);
++	}
++
++	channel.ringbuffer.pages = pages;
++	channel.ringbuffer.chunks = chunks;
++	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
++	ret = hv_uio_ring_mmap_prepare(&channel, &desc);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_EQ(test, desc.action.type, MMAP_MAP_KERNEL_PAGES);
++	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages, &pages[2]);
++	KUNIT_EXPECT_EQ(test, desc.action.map_kernel.nr_pages, 4UL);
++	KUNIT_EXPECT_TRUE(test, vma_desc_test(&desc, VMA_DONTEXPAND_BIT));
++	KUNIT_EXPECT_TRUE(test, vma_desc_test(&desc, VMA_DONTDUMP_BIT));
++	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
++			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
++
++	desc.vma_flags = EMPTY_VMA_FLAGS;
++	KUNIT_EXPECT_EQ(test, hv_uio_ring_mmap_prepare(&channel, &desc), -EINVAL);
++	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
++
++	desc.start = PAGE_SIZE;
++	desc.end = 3 * PAGE_SIZE;
++	desc.pgoff = 7;
++	KUNIT_EXPECT_EQ(test, hv_uio_ring_mmap_prepare(&channel, &desc), -EINVAL);
++
++	channel.state = CHANNEL_OPEN_STATE;
++	KUNIT_EXPECT_EQ(test, hv_uio_ring_mmap_prepare(&channel, &desc), -ENODEV);
++
++	for (i = 0; i < ARRAY_SIZE(pages); i++)
++		__free_page(pages[i]);
++}
++
++static void hv_uio_mmap_region_select_test(struct kunit *test)
++{
++	struct hv_uio_private_data pdata = {};
++	struct vmbus_channel channel = {
++		.state = CHANNEL_OPENED_STATE,
++	};
++	struct hv_device dev = {
++		.channel = &channel,
++	};
++	struct hv_uio_mmap_region region;
++	struct page *ring_pages[4] = {};
++	struct page *recv_pages[3] = {};
++	struct page *send_pages[2] = {};
++	struct page *chunks[1] = {};
++	int ret;
++
++	pdata.device = &dev;
++	pdata.info.mem[TXRX_RING_MAP].size =
++		ARRAY_SIZE(ring_pages) * PAGE_SIZE;
++	pdata.info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
++	pdata.info.mem[MON_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
++	pdata.info.mem[RECV_BUF_MAP].size =
++		ARRAY_SIZE(recv_pages) * PAGE_SIZE;
++	pdata.info.mem[SEND_BUF_MAP].size =
++		ARRAY_SIZE(send_pages) * PAGE_SIZE;
++	channel.ringbuffer.pages = ring_pages;
++	channel.ringbuffer.page_cnt = ARRAY_SIZE(ring_pages);
++	channel.ringbuffer.chunks = chunks;
++	pdata.int_pages[0] = ring_pages[0];
++	pdata.monitor_pages[0] = ring_pages[1];
++	pdata.recv_buffer.pages = recv_pages;
++	pdata.recv_buffer.page_cnt = ARRAY_SIZE(recv_pages);
++	pdata.recv_buffer.chunks = chunks;
++	pdata.send_buffer.pages = send_pages;
++	pdata.send_buffer.page_cnt = ARRAY_SIZE(send_pages);
++
++	ret = hv_uio_mmap_get_region(&pdata, TXRX_RING_MAP, &region);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &ring_pages[0]);
++	KUNIT_EXPECT_TRUE(test, region.decrypted);
++
++	ret = hv_uio_mmap_get_region(&pdata, INT_PAGE_MAP, &region);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &pdata.int_pages[0]);
++	KUNIT_EXPECT_FALSE(test, region.decrypted);
++
++	ret = hv_uio_mmap_get_region(&pdata, MON_PAGE_MAP, &region);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &pdata.monitor_pages[0]);
++	KUNIT_EXPECT_TRUE(test, region.decrypted);
++
++	ret = hv_uio_mmap_get_region(&pdata, RECV_BUF_MAP, &region);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &recv_pages[0]);
++	KUNIT_EXPECT_TRUE(test, region.decrypted);
++
++	ret = hv_uio_mmap_get_region(&pdata, SEND_BUF_MAP, &region);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, region.pages, &send_pages[0]);
++	KUNIT_EXPECT_FALSE(test, region.decrypted);
++
++	KUNIT_EXPECT_EQ(test,
++			hv_uio_mmap_get_region(&pdata, MAX_UIO_MAPS, &region),
++			-EINVAL);
++	channel.state = CHANNEL_OPEN_STATE;
++	KUNIT_EXPECT_EQ(test,
++			hv_uio_mmap_get_region(&pdata, TXRX_RING_MAP, &region),
++			-ENODEV);
++}
++
++static void hv_uio_mmap_prepare_test(struct kunit *test)
++{
++	struct hv_uio_private_data *pdata;
++	struct vmbus_channel channel = {
++		.state = CHANNEL_OPENED_STATE,
++	};
++	struct hv_device dev = {
++		.channel = &channel,
++	};
++	struct page *pages[4] = {};
++	struct page *chunks[1] = {};
++	struct vm_area_desc desc = {
++		.start = PAGE_SIZE,
++		.end = 3 * PAGE_SIZE,
++		.pgoff = RECV_BUF_MAP,
++		.page_prot = PAGE_SHARED,
++	};
++	unsigned int i;
++	int ret;
++
++	/* Mapping pins real pages; the array cannot hold NULL entries. */
++	for (i = 0; i < ARRAY_SIZE(pages); i++) {
++		pages[i] = alloc_page(GFP_KERNEL);
++		KUNIT_ASSERT_NOT_NULL(test, pages[i]);
++	}
++
++	pdata = kunit_kzalloc(test, sizeof(*pdata), GFP_KERNEL);
++	KUNIT_ASSERT_NOT_NULL(test, pdata);
++	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
++	pdata->device = &dev;
++	pdata->info.priv = pdata;
++	pdata->info.mem[RECV_BUF_MAP].size = ARRAY_SIZE(pages) * PAGE_SIZE;
++	pdata->recv_buffer.pages = pages;
++	pdata->recv_buffer.page_cnt = ARRAY_SIZE(pages);
++	pdata->recv_buffer.chunks = chunks;
++
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_EQ(test, desc.action.type, MMAP_MAP_KERNEL_PAGES);
++	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages, &pages[0]);
++	KUNIT_EXPECT_EQ(test, desc.action.map_kernel.nr_pages, 2UL);
++	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
++			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
++	KUNIT_EXPECT_TRUE(test, vma_desc_test(&desc, VMA_DONTEXPAND_BIT));
++	KUNIT_EXPECT_TRUE(test, vma_desc_test(&desc, VMA_DONTDUMP_BIT));
++
++	desc.vma_flags = EMPTY_VMA_FLAGS;
++	KUNIT_EXPECT_EQ(test, hv_uio_mmap_prepare(&pdata->info, &desc), -EINVAL);
++
++	desc.pgoff = INT_PAGE_MAP;
++	pdata->info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
++	pdata->int_pages[0] = pages[0];
++	desc.end = 2 * PAGE_SIZE;
++	desc.page_prot = PAGE_SHARED;
++	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
++			    &pdata->int_pages[0]);
++	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
++			pgprot_val(PAGE_SHARED));
++
++	desc.pgoff = MON_PAGE_MAP;
++	pdata->info.mem[MON_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
++	pdata->monitor_pages[0] = pages[1];
++	desc.page_prot = PAGE_SHARED;
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
++			    &pdata->monitor_pages[0]);
++	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
++			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
++
++	desc.pgoff = SEND_BUF_MAP;
++	pdata->info.mem[SEND_BUF_MAP].size = PAGE_SIZE;
++	pdata->send_buffer.pages = pages;
++	pdata->send_buffer.page_cnt = ARRAY_SIZE(pages);
++	desc.page_prot = PAGE_SHARED;
++	vma_desc_set_flags(&desc, VMA_SHARED_BIT);
++	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
++	KUNIT_ASSERT_EQ(test, ret, 0);
++	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
++			pgprot_val(PAGE_SHARED));
++
++	for (i = 0; i < ARRAY_SIZE(pages); i++)
++		__free_page(pages[i]);
++}
++
++static struct kunit_case hv_uio_ring_mmap_test_cases[] = {
++	KUNIT_CASE(hv_uio_ring_mmap_range_test),
++	KUNIT_CASE(hv_uio_ring_mmap_prepare_test),
++	KUNIT_CASE(hv_uio_mmap_region_select_test),
++	KUNIT_CASE(hv_uio_mmap_prepare_test),
++	{}
++};
++
++static struct kunit_suite hv_uio_ring_mmap_test_suite = {
++	.name = "hyperv-uio-mmap",
++	.test_cases = hv_uio_ring_mmap_test_cases,
++};
++
++kunit_test_suite(hv_uio_ring_mmap_test_suite);
+diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
+index 0f482ed5c776..dc22c6651d54 100644
+--- a/include/linux/hyperv.h
++++ b/include/linux/hyperv.h
+@@ -1248,6 +1248,11 @@ int vmbus_alloc_buffer_owned(struct vmbus_channel *channel,
+ 
+ void vmbus_release_buffer(struct vmbus_buffer *buffer);
+ 
++int vmbus_buffer_pin_pages(struct vmbus_buffer *buffer, struct page ***pages,
++			   unsigned long *page_count);
++
++void vmbus_buffer_unpin_pages(struct page **pages, unsigned long page_count);
++
+ void vmbus_reset_channel_cb(struct vmbus_channel *channel);
+ 
+ extern int vmbus_recvpacket(struct vmbus_channel *channel,
+-- 
+2.43.0
+

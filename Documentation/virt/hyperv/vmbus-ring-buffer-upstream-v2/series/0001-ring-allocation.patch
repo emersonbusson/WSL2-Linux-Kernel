@@ -1,7 +1,7 @@
-From cc0910d7e7aec7f316227a6450826513ead7e971 Mon Sep 17 00:00:00 2001
+From d565daef6b6d19175fed38ac0c7d269830cec43e Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
-Subject: [PATCH v2 1/9] hv: vmbus: convert ring buffer allocation to
+Subject: [PATCH v2 01/13] hv: vmbus: convert ring buffer allocation to
  vmbus_alloc_buffer()
 
 When opening VMBus channels under memory pressure or heavy buddy
@@ -49,7 +49,7 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  7 files changed, 180 insertions(+), 111 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f..87b806a 100644
+index 7e4cc6f55237..87b806a4846d 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,7 @@
@@ -409,7 +409,7 @@ index 7e4cc6f..87b806a 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 3392362..20d023c 100644
+index 33923621a5a3..20d023c9735e 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -204,8 +204,8 @@ extern int hv_synic_cleanup(unsigned int cpu);
@@ -424,7 +424,7 @@ index 3392362..20d023c 100644
  void hv_ringbuffer_cleanup(struct hv_ring_buffer_info *ring_info);
  
 diff --git a/drivers/hv/ring_buffer.c b/drivers/hv/ring_buffer.c
-index 592a960..16b1c29 100644
+index 592a9601faaa..16b1c2910789 100644
 --- a/drivers/hv/ring_buffer.c
 +++ b/drivers/hv/ring_buffer.c
 @@ -184,8 +184,8 @@ void hv_ringbuffer_pre_init(struct vmbus_channel *channel)
@@ -453,7 +453,7 @@ index 592a960..16b1c29 100644
  	ring_info->ring_buffer = (struct hv_ring_buffer *)
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-index 4841367..a15cb24 100644
+index 4841367fdab2..a15cb2460344 100644
 --- a/drivers/net/hyperv/hyperv_net.h
 +++ b/drivers/net/hyperv/hyperv_net.h
 @@ -1158,21 +1158,15 @@ struct netvsc_device {
@@ -481,7 +481,7 @@ index 4841367..a15cb24 100644
  	u32 send_section_size;
  	unsigned long *send_section_map;
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 5cd084e..29ccd77 100644
+index 5cd084e5696c..29ccd77fb177 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -134,10 +134,8 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
@@ -652,7 +652,7 @@ index 5cd084e..29ccd77 100644
  	int i;
  	int count = 0;
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index 7b4cc45..b3f41ff 100644
+index 7b4cc456c453..b3f41ffc74f8 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -150,19 +150,21 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
@@ -741,7 +741,7 @@ index 7b4cc45..b3f41ff 100644
  			goto fail_close;
  		}
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 9e109d9..567679c 100644
+index 9e109d91aa14..567679c68da1 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -70,8 +70,7 @@

@@ -1,7 +1,7 @@
-From 07965f04c0ad689c5dd3026660ecb0bc38a68b78 Mon Sep 17 00:00:00 2001
+From 8351f22ecc789a92a93f81aea03b133c5fa58883 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 21:40:00 -0300
-Subject: [PATCH v2 8/9] hv: netvsc: allocate RNDIS request descriptors with
+Subject: [PATCH v2 12/13] hv: netvsc: allocate RNDIS request descriptors with
  kvzalloc_obj()
 
 struct rndis_request embeds two RNDIS_EXT_LEN protocol tails.

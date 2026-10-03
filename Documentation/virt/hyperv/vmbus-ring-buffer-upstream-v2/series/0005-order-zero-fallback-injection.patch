@@ -1,7 +1,7 @@
-From 784ba79da9a83642c9b860043a743c15d7cf5443 Mon Sep 17 00:00:00 2001
+From 7b94973123c55ae3e17ce34021ec694ae8f02920 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
-Subject: [PATCH v2 5/9] hv: vmbus: add KUnit test for order-zero allocation
+Subject: [PATCH v2 05/13] hv: vmbus: add KUnit test for order-zero allocation
  fallback
 
 Factor the order-descent allocation loop so KUnit can inject failures
@@ -17,31 +17,134 @@ is allowed to try harder. Reusing one gfp across the whole descent
 would leave __GFP_NORETRY set on the order-0 attempt and silently
 weaken that last resort.
 
+The case joins the others in drivers/hv/vmbus_buffer_test.c, built
+into the hv_vmbus object. vmbus_alloc_pages_with_fallback() and its
+callback type are therefore declared in hyperv_vmbus.h instead of
+staying static in channel.c. Nothing outside hv_vmbus links against
+them, and no symbol is exported.
+
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c | 121 ++++++++++++++++++++++++++++++++++++++++---
- 1 file changed, 105 insertions(+), 16 deletions(-)
+ drivers/hv/channel.c           | 56 ++++++++++++++++++++++----------
+ drivers/hv/hyperv_vmbus.h      | 13 ++++++++
+ drivers/hv/vmbus_buffer_test.c | 58 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 111 insertions(+), 16 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 35bdc94..1c0a834 100644
+index 2ae97a82271c..3663ebe94fd1 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -34,6 +34,13 @@ static unsigned int vmbus_buffer_order(unsigned long remaining,
- 				       unsigned int max_order);
- static bool vmbus_buffer_lower_order(unsigned int *order);
- static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
+@@ -60,6 +60,31 @@ bool vmbus_buffer_lower_order(unsigned int *order)
+ 	return true;
+ }
+ 
++struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
++					     unsigned int *order,
++					     vmbus_alloc_pages_fn alloc,
++					     void *context)
++{
++	struct page *page;
++
++	do {
++		gfp_t try_gfp = gfp;
++
++		/*
++		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
++		 * but try harder at order 0 since that is the final
++		 * fallback.
++		 * __GFP_COMP stores order information in the page folio.
++		 */
++		if (*order)
++			try_gfp |= __GFP_COMP | __GFP_NORETRY | __GFP_NOWARN;
++
++		page = alloc(context, nid, try_gfp, *order);
++		if (page || !vmbus_buffer_lower_order(order))
++			return page;
++	} while (true);
++}
++
+ bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
+ {
+ 	return !buffer->leak && !buffer->gpadl.leak &&
+@@ -769,6 +794,14 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+ }
+ EXPORT_SYMBOL_GPL(vmbus_release_buffer);
+ 
++static struct page *vmbus_alloc_pages_node(void *context, int nid,
++					   gfp_t gfp,
++					   unsigned int order)
++{
++	(void)context;
++	return alloc_pages_node(nid, gfp, order);
++}
++
+ /**
+  * vmbus_alloc_buffer - allocate a host-visible, virtually-contiguous buffer.
+  *
+@@ -832,26 +865,17 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	while (remaining) {
+ 		struct page *page;
+ 		gfp_t gfp;
++		int nid;
+ 
+ 		order = vmbus_buffer_order(remaining, order);
+ 
+-		/*
+-		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
+-		 * but try harder at order 0 since that is the final
+-		 * fallback.
+-		 * __GFP_COMP stores order information in the page folio.
+-		 */
+ 		gfp = GFP_KERNEL | __GFP_ZERO;
+-		if (order)
+-			gfp |= __GFP_COMP | __GFP_NORETRY | __GFP_NOWARN;
+-
+-		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
+-					gfp, order);
+-		if (!page) {
+-			if (!vmbus_buffer_lower_order(&order))
+-				goto err;
+-			continue;
+-		}
++
++		nid = cpu_to_node(channel->target_cpu);
++		page = vmbus_alloc_pages_with_fallback(nid, gfp, &order,
++						       vmbus_alloc_pages_node, NULL);
++		if (!page)
++			goto err;
+ 
+ 		ret = set_memory_decrypted((unsigned long)page_address(page),
+ 					   1U << order);
+diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
+index 711a9f4bec76..ad4675f2589b 100644
+--- a/drivers/hv/hyperv_vmbus.h
++++ b/drivers/hv/hyperv_vmbus.h
+@@ -563,6 +563,19 @@ unsigned int vmbus_buffer_order(unsigned long remaining,
+ bool vmbus_buffer_lower_order(unsigned int *order);
+ bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
+ 
++/*
++ * Order-descent allocation, shared with vmbus_buffer_test.c so the
++ * cases can inject per-order failures. Defined in channel.c, built
++ * into the hv_vmbus object, never exported.
++ */
 +typedef struct page *(*vmbus_alloc_pages_fn)(void *context, int nid,
 +					     gfp_t gfp,
 +					     unsigned int order);
-+static struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
-+						    unsigned int *order,
-+						    vmbus_alloc_pages_fn alloc,
-+						    void *context);
- typedef int (*vmbus_gpadl_post_fn)(void *context, void *buffer,
- 					  size_t buflen, bool can_sleep);
- static int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
-@@ -120,6 +127,63 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
- 	vmbus_release_buffer(&buffer);
++struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
++					     unsigned int *order,
++					     vmbus_alloc_pages_fn alloc,
++					     void *context);
++
+ /*
+  * GPADL post and response helpers, also shared with vmbus_buffer_test.c.
+  * Same deal as the sizing helpers above: defined in channel.c, built into
+diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
+index ac994ee01fde..46145f326d45 100644
+--- a/drivers/hv/vmbus_buffer_test.c
++++ b/drivers/hv/vmbus_buffer_test.c
+@@ -260,12 +260,70 @@ static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
+ 	KUNIT_EXPECT_EQ(test, context.call_count, 1U);
  }
  
 +struct vmbus_buffer_page_alloc_test_context {
@@ -101,10 +204,9 @@ index 35bdc94..1c0a834 100644
 +	KUNIT_EXPECT_EQ(test, context.attempts, (unsigned int)MAX_PAGE_ORDER + 1);
 +}
 +
- struct vmbus_gpadl_post_test_context {
- 	struct kunit *test;
- 	unsigned int call_count;
-@@ -301,6 +365,7 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+ static struct kunit_case vmbus_buffer_test_cases[] = {
+ 	KUNIT_CASE(vmbus_buffer_size_rounding_test),
+ 	KUNIT_CASE(vmbus_buffer_size_overflow_test),
  	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
  	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
  	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
@@ -112,84 +214,6 @@ index 35bdc94..1c0a834 100644
  	KUNIT_CASE(vmbus_gpadl_post_failure_test),
  	KUNIT_CASE(vmbus_gpadl_post_success_test),
  	KUNIT_CASE(vmbus_gpadl_response_state_test),
-@@ -343,6 +408,31 @@ static bool vmbus_buffer_lower_order(unsigned int *order)
- 	return true;
- }
- 
-+static struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
-+						    unsigned int *order,
-+						    vmbus_alloc_pages_fn alloc,
-+						    void *context)
-+{
-+	struct page *page;
-+
-+	do {
-+		gfp_t try_gfp = gfp;
-+
-+		/*
-+		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
-+		 * but try harder at order 0 since that is the final
-+		 * fallback.
-+		 * __GFP_COMP stores order information in the page folio.
-+		 */
-+		if (*order)
-+			try_gfp |= __GFP_COMP | __GFP_NORETRY | __GFP_NOWARN;
-+
-+		page = alloc(context, nid, try_gfp, *order);
-+		if (page || !vmbus_buffer_lower_order(order))
-+			return page;
-+	} while (true);
-+}
-+
- static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
- {
- 	return !buffer->leak && !buffer->gpadl.leak &&
-@@ -1052,6 +1142,14 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
- }
- EXPORT_SYMBOL_GPL(vmbus_release_buffer);
- 
-+static struct page *vmbus_alloc_pages_node(void *context, int nid,
-+					   gfp_t gfp,
-+					   unsigned int order)
-+{
-+	(void)context;
-+	return alloc_pages_node(nid, gfp, order);
-+}
-+
- /**
-  * vmbus_alloc_buffer - allocate a host-visible, virtually-contiguous buffer.
-  *
-@@ -1115,26 +1213,17 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 	while (remaining) {
- 		struct page *page;
- 		gfp_t gfp;
-+		int nid;
- 
- 		order = vmbus_buffer_order(remaining, order);
- 
--		/*
--		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
--		 * but try harder at order 0 since that is the final
--		 * fallback.
--		 * __GFP_COMP stores order information in the page folio.
--		 */
- 		gfp = GFP_KERNEL | __GFP_ZERO;
--		if (order)
--			gfp |= __GFP_COMP | __GFP_NORETRY | __GFP_NOWARN;
--
--		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
--					gfp, order);
--		if (!page) {
--			if (!vmbus_buffer_lower_order(&order))
--				goto err;
--			continue;
--		}
-+
-+		nid = cpu_to_node(channel->target_cpu);
-+		page = vmbus_alloc_pages_with_fallback(nid, gfp, &order,
-+						       vmbus_alloc_pages_node, NULL);
-+		if (!page)
-+			goto err;
- 
- 		ret = set_memory_decrypted((unsigned long)page_address(page),
- 					   1U << order);
+-- 
+2.43.0
+

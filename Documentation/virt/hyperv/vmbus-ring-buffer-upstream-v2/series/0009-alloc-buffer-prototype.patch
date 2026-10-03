@@ -1,0 +1,340 @@
+From f9eb194a3bf3c772fa6e1b7cf1ee0f71aa07b4dc Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Fri, 2 Oct 2026 21:41:54 -0300
+Subject: [PATCH v2 09/13] hv: vmbus: restore the vmbus_alloc_buffer()
+ prototype and adopt _owned
+
+The first patch of this series added a confidential argument to
+vmbus_alloc_buffer() so callers could request a private allocation,
+and the GPADL helper grew a leak out-parameter so a caller could learn
+that the backing pages must be retained. Both widen a mainline
+prototype for a decision the channel already knows and a lifetime the
+buffer descriptor now owns.
+
+Restore the mainline vmbus_alloc_buffer() signature. The confidential
+choice comes from channel->co_external_memory, which is where the
+ring-buffer caller already reads it, and the wrapper detaches the
+ownership record before returning the raw address. Drop the leak
+out-parameter from vmbus_establish_gpadl_caller_decrypted(); the
+caller's vmbus_buffer carries the retention state instead.
+
+Move the remaining callers onto the _owned entry points so one
+descriptor owns allocation, GPADL and release together. netvsc drops
+its open-coded leak flags and teardown early-return, and
+uio_hv_generic does the same for its send and receive buffers. Both
+now call vmbus_alloc_buffer_owned(), vmbus_establish_gpadl_owned() and
+vmbus_teardown_gpadl_owned() with the same struct vmbus_buffer.
+
+The _owned prototypes and the ownership machinery land in the
+previous patch; this one only changes who calls what and restores the
+exported signatures.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c         | 23 ++++++---------
+ drivers/net/hyperv/netvsc.c  | 54 +++++++++++-------------------------
+ drivers/uio/uio_hv_generic.c | 36 +++++++-----------------
+ include/linux/hyperv.h       | 10 +++----
+ 4 files changed, 38 insertions(+), 85 deletions(-)
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 3f8ff6e30bc4..ee1b132d2649 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -1051,16 +1051,14 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
+  * @channel: a channel
+  * @kbuffer: from kmalloc or vmalloc; must already be decrypted by the caller
+  * @size: page-size multiple
+- * @leak: set when a GPADL message may have reached the host but completion is
+- *        uncertain; the caller must retain the backing pages
+  * @gpadl: output gpadl
+  *
+  * The caller is responsible for re-encrypting the buffer before freeing it.
++ * Ownership of the backing pages stays with the caller's vmbus_buffer.
+  */
+ int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
+-					   void *kbuffer, u32 size,
+-					   bool *leak,
+-					   struct vmbus_gpadl *gpadl)
++					  void *kbuffer, u32 size,
++					  struct vmbus_gpadl *gpadl)
+ {
+ 	struct vmbus_buffer buffer = {
+ 		.addr = kbuffer,
+@@ -1069,13 +1067,9 @@ int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
+ 	};
+ 	int ret;
+ 
+-	if (leak)
+-		*leak = false;
+ 	ret = __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, &buffer,
+ 				      0U, true);
+ 	*gpadl = buffer.gpadl;
+-	if (ret && gpadl->leak && leak)
+-		*leak = true;
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl_caller_decrypted);
+@@ -1302,16 +1296,14 @@ int vmbus_alloc_buffer_owned(struct vmbus_channel *channel, u32 size,
+ 	return -ENOMEM;
+ }
+ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer_owned);
++
+ /*
+  * vmbus_alloc_buffer - compatibility allocator for callers managing lifetime.
+  * New callers that need retained GPADL and mmap ownership should use
+  * vmbus_alloc_buffer_owned().
+  */
+-void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+-			 u32 size,
+-			 bool confidential,
+-			 struct page ***chunks_out,
+-			 u32 *chunk_cnt_out)
++void *vmbus_alloc_buffer(struct vmbus_channel *channel, u32 size,
++			 struct page ***chunks_out, u32 *chunk_cnt_out)
+ {
+ 	struct vmbus_buffer buffer = {};
+ 	void *addr;
+@@ -1322,7 +1314,8 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 
+ 	*chunks_out = NULL;
+ 	*chunk_cnt_out = 0;
+-	ret = vmbus_alloc_buffer_owned(channel, size, confidential, &buffer);
++	ret = vmbus_alloc_buffer_owned(channel, size,
++				       channel->co_external_memory, &buffer);
+ 	if (ret)
+ 		return NULL;
+ 
+diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
+index 29ccd77fb177..fd8aa7a3dcb3 100644
+--- a/drivers/net/hyperv/netvsc.c
++++ b/drivers/net/hyperv/netvsc.c
+@@ -243,7 +243,6 @@ static void netvsc_revoke_recv_buf(struct hv_device *device,
+ 		if (ret != 0) {
+ 			netdev_err(ndev, "unable to send "
+ 				"revoke receive buffer to netvsp\n");
+-			net_device->recv_buffer.leak = true;
+ 			return;
+ 		}
+ 		net_device->recv_section_cnt = 0;
+@@ -295,7 +294,6 @@ static void netvsc_revoke_send_buf(struct hv_device *device,
+ 		if (ret != 0) {
+ 			netdev_err(ndev, "unable to send "
+ 				   "revoke send buffer to netvsp\n");
+-			net_device->send_buffer.leak = true;
+ 			return;
+ 		}
+ 		net_device->send_section_cnt = 0;
+@@ -308,18 +306,14 @@ static void netvsc_teardown_recv_gpadl(struct hv_device *device,
+ {
+ 	int ret;
+ 
+-	if (net_device->recv_buffer.leak)
+-		return;
+-
+ 	if (net_device->recv_buffer.gpadl.gpadl_handle) {
+-		ret = vmbus_teardown_gpadl(device->channel,
+-					   &net_device->recv_buffer.gpadl);
++		ret = vmbus_teardown_gpadl_owned(device->channel,
++						 &net_device->recv_buffer);
+ 
+ 		/* If we failed here, we might as well return and have a leak
+ 		 * rather than continue and a bugchk
+ 		 */
+ 		if (ret != 0) {
+-			net_device->recv_buffer.leak = true;
+ 			netdev_err(ndev,
+ 				   "unable to teardown receive buffer's gpadl\n");
+ 			return;
+@@ -333,18 +327,14 @@ static void netvsc_teardown_send_gpadl(struct hv_device *device,
+ {
+ 	int ret;
+ 
+-	if (net_device->send_buffer.leak)
+-		return;
+-
+ 	if (net_device->send_buffer.gpadl.gpadl_handle) {
+-		ret = vmbus_teardown_gpadl(device->channel,
+-					   &net_device->send_buffer.gpadl);
++		ret = vmbus_teardown_gpadl_owned(device->channel,
++						 &net_device->send_buffer);
+ 
+ 		/* If we failed here, we might as well return and have a leak
+ 		 * rather than continue and a bugchk
+ 		 */
+ 		if (ret != 0) {
+-			net_device->send_buffer.leak = true;
+ 			netdev_err(ndev,
+ 				   "unable to teardown send buffer's gpadl\n");
+ 			return;
+@@ -385,16 +375,13 @@ static int netvsc_init_buf(struct hv_device *device,
+ 		buf_size = min_t(unsigned int, buf_size,
+ 				 NETVSC_RECEIVE_BUFFER_SIZE_LEGACY);
+ 
+-	net_device->recv_buffer.addr =
+-		vmbus_alloc_buffer(device->channel, buf_size,
+-				   device->channel->co_external_memory,
+-				   &net_device->recv_buffer.chunks,
+-				   &net_device->recv_buffer.chunk_cnt);
+-	if (!net_device->recv_buffer.addr) {
++	ret = vmbus_alloc_buffer_owned(device->channel, buf_size,
++				       device->channel->co_external_memory,
++				       &net_device->recv_buffer);
++	if (ret) {
+ 		netdev_err(ndev,
+ 			   "unable to allocate receive buffer of size %u\n",
+ 			   buf_size);
+-		ret = -ENOMEM;
+ 		goto cleanup;
+ 	}
+ 
+@@ -405,11 +392,8 @@ static int netvsc_init_buf(struct hv_device *device,
+ 	 * channel.  Note: This call uses the vmbus connection rather
+ 	 * than the channel to establish the gpadl handle.
+ 	 */
+-	ret = vmbus_establish_gpadl_caller_decrypted(device->channel,
+-						     net_device->recv_buffer.addr,
+-						     buf_size,
+-						     &net_device->recv_buffer.leak,
+-						     &net_device->recv_buffer.gpadl);
++	ret = vmbus_establish_gpadl_owned(device->channel,
++					  &net_device->recv_buffer);
+ 	if (ret != 0) {
+ 		netdev_err(ndev,
+ 			"unable to establish receive buffer's gpadl\n");
+@@ -497,15 +481,12 @@ static int netvsc_init_buf(struct hv_device *device,
+ 	buf_size = device_info->send_sections * device_info->send_section_size;
+ 	buf_size = round_up(buf_size, PAGE_SIZE);
+ 
+-	net_device->send_buffer.addr =
+-		vmbus_alloc_buffer(device->channel, buf_size,
+-				   device->channel->co_external_memory,
+-				   &net_device->send_buffer.chunks,
+-				   &net_device->send_buffer.chunk_cnt);
+-	if (!net_device->send_buffer.addr) {
++	ret = vmbus_alloc_buffer_owned(device->channel, buf_size,
++				       device->channel->co_external_memory,
++				       &net_device->send_buffer);
++	if (ret) {
+ 		netdev_err(ndev, "unable to allocate send buffer of size %u\n",
+ 			   buf_size);
+-		ret = -ENOMEM;
+ 		goto cleanup;
+ 	}
+ 	net_device->send_buf_size = buf_size;
+@@ -514,11 +495,8 @@ static int netvsc_init_buf(struct hv_device *device,
+ 	 * channel.  Note: This call uses the vmbus connection rather
+ 	 * than the channel to establish the gpadl handle.
+ 	 */
+-	ret = vmbus_establish_gpadl_caller_decrypted(device->channel,
+-						     net_device->send_buffer.addr,
+-						     buf_size,
+-						     &net_device->send_buffer.leak,
+-						     &net_device->send_buffer.gpadl);
++	ret = vmbus_establish_gpadl_owned(device->channel,
++					  &net_device->send_buffer);
+ 	if (ret != 0) {
+ 		netdev_err(ndev,
+ 			   "unable to establish send buffer's gpadl\n");
+diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
+index 0d7a9802e9db..b40e80e19c6c 100644
+--- a/drivers/uio/uio_hv_generic.c
++++ b/drivers/uio/uio_hv_generic.c
+@@ -196,11 +196,11 @@ static void
+ hv_uio_cleanup(struct hv_device *dev, struct hv_uio_private_data *pdata)
+ {
+ 	if (pdata->send_buffer.gpadl.gpadl_handle)
+-		vmbus_teardown_gpadl(dev->channel, &pdata->send_buffer.gpadl);
++		vmbus_teardown_gpadl_owned(dev->channel, &pdata->send_buffer);
+ 	vmbus_release_buffer(&pdata->send_buffer);
+ 
+ 	if (pdata->recv_buffer.gpadl.gpadl_handle)
+-		vmbus_teardown_gpadl(dev->channel, &pdata->recv_buffer.gpadl);
++		vmbus_teardown_gpadl_owned(dev->channel, &pdata->recv_buffer);
+ 	vmbus_release_buffer(&pdata->recv_buffer);
+ }
+ 
+@@ -298,20 +298,12 @@ hv_uio_probe(struct hv_device *dev,
+ 	pdata->info.mem[MON_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
+ 
+ 	if (channel->device_id == HV_NIC) {
+-		pdata->recv_buffer.addr =
+-			vmbus_alloc_buffer(channel, RECV_BUFFER_SIZE, false,
+-					   &pdata->recv_buffer.chunks,
+-					   &pdata->recv_buffer.chunk_cnt);
+-		if (!pdata->recv_buffer.addr) {
+-			ret = -ENOMEM;
++		ret = vmbus_alloc_buffer_owned(channel, RECV_BUFFER_SIZE, false,
++					       &pdata->recv_buffer);
++		if (ret)
+ 			goto fail_free_ring;
+-		}
+ 
+-		ret = vmbus_establish_gpadl_caller_decrypted(channel,
+-							     pdata->recv_buffer.addr,
+-							     RECV_BUFFER_SIZE,
+-							     &pdata->recv_buffer.leak,
+-							     &pdata->recv_buffer.gpadl);
++		ret = vmbus_establish_gpadl_owned(channel, &pdata->recv_buffer);
+ 		if (ret)
+ 			goto fail_close;
+ 
+@@ -324,20 +316,12 @@ hv_uio_probe(struct hv_device *dev,
+ 		pdata->info.mem[RECV_BUF_MAP].size = RECV_BUFFER_SIZE;
+ 		pdata->info.mem[RECV_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
+ 
+-		pdata->send_buffer.addr =
+-			vmbus_alloc_buffer(channel, SEND_BUFFER_SIZE, false,
+-					   &pdata->send_buffer.chunks,
+-					   &pdata->send_buffer.chunk_cnt);
+-		if (!pdata->send_buffer.addr) {
+-			ret = -ENOMEM;
++		ret = vmbus_alloc_buffer_owned(channel, SEND_BUFFER_SIZE, false,
++					       &pdata->send_buffer);
++		if (ret)
+ 			goto fail_close;
+-		}
+ 
+-		ret = vmbus_establish_gpadl_caller_decrypted(channel,
+-							     pdata->send_buffer.addr,
+-							     SEND_BUFFER_SIZE,
+-							     &pdata->send_buffer.leak,
+-							     &pdata->send_buffer.gpadl);
++		ret = vmbus_establish_gpadl_owned(channel, &pdata->send_buffer);
+ 		if (ret)
+ 			goto fail_close;
+ 
+diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
+index b36208ada4ed..0f482ed5c776 100644
+--- a/include/linux/hyperv.h
++++ b/include/linux/hyperv.h
+@@ -1216,22 +1216,20 @@ extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
+ 				     u64 requestid);
+ 
+ extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
+-				      void *kbuffer,
+-				      u32 size,
+-				      struct vmbus_gpadl *gpadl);
++				 void *kbuffer,
++				 u32 size,
++				 struct vmbus_gpadl *gpadl);
+ 
+ extern int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
+ 						  void *kbuffer,
+ 						  u32 size,
+-						  bool *leak,
+ 						  struct vmbus_gpadl *gpadl);
+ 
+ extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
+-				     struct vmbus_gpadl *gpadl);
++				struct vmbus_gpadl *gpadl);
+ 
+ extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 				u32 size,
+-				bool confidential,
+ 				struct page ***chunks_out,
+ 				u32 *chunk_cnt_out);
+ 
+-- 
+2.43.0
+

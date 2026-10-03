@@ -1,7 +1,7 @@
-From 575983082fb4e815251529c31b3222a5ad5e2f90 Mon Sep 17 00:00:00 2001
+From 9059a645b4a804e7a2f8227dbff5eb58d3afcb4d Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 2/9] hv: vmbus: validate chunk buffer allocation and
+Subject: [PATCH v2 02/13] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated
@@ -33,38 +33,255 @@ of Hyper-V isolation, so both are consulted here, together with the
 per-buffer confidential flag. Ordinary private guests still take
 vzalloc().
 
-The new cases pin both rules, the partial-allocation rollback, and the
+The new cases live in drivers/hv/vmbus_buffer_test.c, which is built
+into the hv_vmbus object rather than a separate module. That keeps the
+cases off the production sources while still letting them call the
+internal sizing, order-descent and free-decision helpers. Those helpers
+are therefore not static; nothing outside hv_vmbus links against them,
+and no symbol is exported for test purposes.
+
+The cases pin both rules, the partial-allocation rollback, and the
 order-descent fallback.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c | 162 +++++++++++++++++++++++++++++++++++++++----
- 1 file changed, 149 insertions(+), 13 deletions(-)
+ drivers/hv/Kconfig             |  11 ++++
+ drivers/hv/Makefile            |   1 +
+ drivers/hv/channel.c           |  71 ++++++++++++++++++-----
+ drivers/hv/hyperv_vmbus.h      |  12 ++++
+ drivers/hv/vmbus_buffer_test.c | 102 +++++++++++++++++++++++++++++++++
+ 5 files changed, 184 insertions(+), 13 deletions(-)
+ create mode 100644 drivers/hv/vmbus_buffer_test.c
 
+diff --git a/drivers/hv/Kconfig b/drivers/hv/Kconfig
+index aa11bcefddf2..d44dd60fbc23 100644
+--- a/drivers/hv/Kconfig
++++ b/drivers/hv/Kconfig
+@@ -65,6 +65,17 @@ config HYPERV_VMBUS
+ 	help
+ 	  Select this option to enable Hyper-V Vmbus driver.
+ 
++config HYPERV_VMBUS_KUNIT_TEST
++	bool "Build Hyper-V VMBus buffer KUnit tests"
++	depends on HYPERV_VMBUS && KUNIT
++	default KUNIT_ALL_TESTS
++	help
++	  Build the vmbus buffer sizing, GPADL lifetime and reclaim KUnit
++	  cases into the hv_vmbus object. The cases reach internal helpers
++	  that are not exported, so they cannot live in a separate module.
++
++	  If unsure, say N.
++
+ config MSHV_ROOT
+ 	tristate "Microsoft Hyper-V root partition support"
+ 	depends on HYPERV && (X86_64 || ARM64)
+diff --git a/drivers/hv/Makefile b/drivers/hv/Makefile
+index 888a748cc7cb..80d33e9c0e57 100644
+--- a/drivers/hv/Makefile
++++ b/drivers/hv/Makefile
+@@ -12,6 +12,7 @@ hv_vmbus-y := vmbus_drv.o \
+ 		 hv.o connection.o channel.o \
+ 		 channel_mgmt.o ring_buffer.o hv_trace.o
+ hv_vmbus-$(CONFIG_HYPERV_TESTING)	+= hv_debugfs.o
++hv_vmbus-$(CONFIG_HYPERV_VMBUS_KUNIT_TEST) += vmbus_buffer_test.o
+ hv_utils-y := hv_util.o hv_kvp.o hv_snapshot.o hv_utils_transport.o
+ mshv_root-y := mshv_root_main.o mshv_synic.o mshv_eventfd.o mshv_irq.o \
+ 	       mshv_root_hv_call.o mshv_portid_table.o mshv_regions.o
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 87b806a..c47a923 100644
+index 87b806a4846d..d6e5f26577b9 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -12,6 +12,8 @@
+@@ -12,6 +12,7 @@
  #include <linux/sched.h>
  #include <linux/wait.h>
  #include <linux/mm.h>
 +#include <linux/cc_platform.h>
-+#include <kunit/test.h>
  #include <linux/overflow.h>
  #include <linux/slab.h>
  #include <linux/log2.h>
-@@ -27,6 +29,134 @@
+@@ -27,6 +28,44 @@
  
  #include "hyperv_vmbus.h"
  
-+static int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
-+static unsigned int vmbus_buffer_order(unsigned long remaining,
-+				       unsigned int max_order);
-+static bool vmbus_buffer_lower_order(unsigned int *order);
-+static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
++/*
++ * vmbus_buffer_round_size() and the order-descent helpers are also called
++ * from vmbus_buffer_test.c, which is built into this same object. They are
++ * therefore not static; nothing outside hv_vmbus links against them.
++ */
++int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
++{
++	if (!size)
++		return -EINVAL;
 +
-+#if IS_ENABLED(CONFIG_KUNIT)
++	if (size > U32_MAX - (u32)PAGE_SIZE + 1)
++		return -EOVERFLOW;
++
++	*rounded_size = round_up(size, (u32)PAGE_SIZE);
++	return 0;
++}
++
++unsigned int vmbus_buffer_order(unsigned long remaining,
++				unsigned int max_order)
++{
++	return min_t(unsigned int, max_order, ilog2(remaining));
++}
++
++bool vmbus_buffer_lower_order(unsigned int *order)
++{
++	if (!*order)
++		return false;
++
++	(*order)--;
++	return true;
++}
++
++bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
++{
++	return !buffer->leak && !buffer->gpadl.leak &&
++	       !buffer->gpadl.gpadl_handle;
++}
++
+ /*
+  * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
+  *
+@@ -655,7 +694,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+ 		return;
+ 	}
+ 
+-	vunmap(addr);
++	if (addr)
++		vunmap(addr);
+ 
+ 	for (i = 0; i < chunk_cnt; i++) {
+ 		unsigned long vaddr =
+@@ -677,8 +717,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+ 		return;
+ 
+ 	kvfree(buffer->pages);
+-	if (!buffer->leak && !buffer->gpadl.leak &&
+-	    !buffer->gpadl.gpadl_handle)
++	if (vmbus_buffer_should_free(buffer))
+ 		vmbus_free_buffer(buffer->addr, buffer->chunks,
+ 				  buffer->chunk_cnt);
+ 	memset(buffer, 0, sizeof(*buffer));
+@@ -711,12 +750,13 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 			 struct page ***chunks_out,
+ 			 u32 *chunk_cnt_out)
+ {
+-	unsigned long nr_pages = PFN_UP(size);
+-	unsigned long remaining = nr_pages;
++	u32 rounded_size;
++	unsigned long nr_pages;
++	unsigned long remaining;
+ 	unsigned long page_idx = 0;
+ 	struct page **chunks = NULL;
+ 	struct page **pages = NULL;
+-	int order = MAX_PAGE_ORDER;
++	unsigned int order = MAX_PAGE_ORDER;
+ 	u32 chunk_cnt = 0;
+ 	void *addr;
+ 	u32 i;
+@@ -725,12 +765,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	*chunks_out = NULL;
+ 	*chunk_cnt_out = 0;
+ 
+-	if (!nr_pages)
++	if (vmbus_buffer_round_size(size, &rounded_size))
+ 		return NULL;
++	nr_pages = rounded_size >> PAGE_SHIFT;
++	remaining = nr_pages;
+ 
+ 	/* If the buffer does not need to be decrypted, just use vzalloc() */
+-	if (!hv_is_isolation_supported() || confidential)
+-		return vzalloc(nr_pages << PAGE_SHIFT);
++	if ((!hv_is_isolation_supported() &&
++	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
++		return vzalloc(rounded_size);
+ 
+ 	/* Worst case: every chunk is a single page. */
+ 	chunks = kvmalloc_objs(*chunks, nr_pages, GFP_KERNEL | __GFP_ZERO);
+@@ -745,7 +788,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 		struct page *page;
+ 		gfp_t gfp;
+ 
+-		order = min(order, ilog2(remaining));
++		order = vmbus_buffer_order(remaining, order);
+ 
+ 		/*
+ 		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
+@@ -760,7 +803,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
+ 					gfp, order);
+ 		if (!page) {
+-			if (!order--)
++			if (!vmbus_buffer_lower_order(&order))
+ 				goto err;
+ 			continue;
+ 		}
+@@ -787,7 +830,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	if (!addr)
+ 		goto err;
+ 
+-	memset(addr, 0, nr_pages << PAGE_SHIFT);
++	memset(addr, 0, rounded_size);
+ 
+ 	kvfree(pages);
+ 	*chunks_out = chunks;
+@@ -1052,8 +1095,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+ 
+ 	info = kzalloc(sizeof(*info) +
+ 		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
+-	if (!info)
++	if (!info) {
++		gpadl->leak = true;
+ 		return -ENOMEM;
++	}
+ 
+ 	init_completion(&info->waitevent);
+ 	info->waiting_channel = channel;
+diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
+index 20d023c9735e..93df3b35cfd4 100644
+--- a/drivers/hv/hyperv_vmbus.h
++++ b/drivers/hv/hyperv_vmbus.h
+@@ -551,4 +551,16 @@ int hv_create_ring_sysfs(struct vmbus_channel *channel,
+ 							    struct vm_area_desc *desc));
+ int hv_remove_ring_sysfs(struct vmbus_channel *channel);
+ 
++/*
++ * vmbus buffer sizing, order-descent and free-decision helpers.
++ *
++ * These are shared with vmbus_buffer_test.c, which is built into the
++ * hv_vmbus object alongside channel.c. They stay unexported.
++ */
++int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
++unsigned int vmbus_buffer_order(unsigned long remaining,
++				unsigned int max_order);
++bool vmbus_buffer_lower_order(unsigned int *order);
++bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
++
+ #endif /* _HYPERV_VMBUS_H */
+diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
+new file mode 100644
+index 000000000000..d0a927a46caf
+--- /dev/null
++++ b/drivers/hv/vmbus_buffer_test.c
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * KUnit tests for Hyper-V VMBus buffer allocation and GPADL lifetime.
++ *
++ * Built into the hv_vmbus object rather than a separate module so the
++ * cases can reach the internal helpers declared in hyperv_vmbus.h
++ * without exporting them.
++ */
++#include <kunit/test.h>
++#include <linux/hyperv.h>
++#include <linux/mm.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++
++#include "hyperv_vmbus.h"
++
 +static void vmbus_buffer_size_rounding_test(struct kunit *test)
 +{
 +	u32 rounded_size;
@@ -151,139 +368,6 @@ index 87b806a..c47a923 100644
 +};
 +
 +kunit_test_suite(vmbus_buffer_test_suite);
-+#endif
-+
-+static int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
-+{
-+	if (!size)
-+		return -EINVAL;
-+
-+	if (size > U32_MAX - (u32)PAGE_SIZE + 1)
-+		return -EOVERFLOW;
-+
-+	*rounded_size = round_up(size, (u32)PAGE_SIZE);
-+	return 0;
-+}
-+
-+static unsigned int vmbus_buffer_order(unsigned long remaining,
-+				       unsigned int max_order)
-+{
-+	return min_t(unsigned int, max_order, ilog2(remaining));
-+}
-+
-+static bool vmbus_buffer_lower_order(unsigned int *order)
-+{
-+	if (!*order)
-+		return false;
-+
-+	(*order)--;
-+	return true;
-+}
-+
-+static bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
-+{
-+	return !buffer->leak && !buffer->gpadl.leak &&
-+	       !buffer->gpadl.gpadl_handle;
-+}
-+
- /*
-  * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
-  *
-@@ -655,7 +785,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
- 		return;
- 	}
- 
--	vunmap(addr);
-+	if (addr)
-+		vunmap(addr);
- 
- 	for (i = 0; i < chunk_cnt; i++) {
- 		unsigned long vaddr =
-@@ -677,8 +808,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
- 		return;
- 
- 	kvfree(buffer->pages);
--	if (!buffer->leak && !buffer->gpadl.leak &&
--	    !buffer->gpadl.gpadl_handle)
-+	if (vmbus_buffer_should_free(buffer))
- 		vmbus_free_buffer(buffer->addr, buffer->chunks,
- 				  buffer->chunk_cnt);
- 	memset(buffer, 0, sizeof(*buffer));
-@@ -711,12 +841,13 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 			 struct page ***chunks_out,
- 			 u32 *chunk_cnt_out)
- {
--	unsigned long nr_pages = PFN_UP(size);
--	unsigned long remaining = nr_pages;
-+	u32 rounded_size;
-+	unsigned long nr_pages;
-+	unsigned long remaining;
- 	unsigned long page_idx = 0;
- 	struct page **chunks = NULL;
- 	struct page **pages = NULL;
--	int order = MAX_PAGE_ORDER;
-+	unsigned int order = MAX_PAGE_ORDER;
- 	u32 chunk_cnt = 0;
- 	void *addr;
- 	u32 i;
-@@ -725,12 +856,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 	*chunks_out = NULL;
- 	*chunk_cnt_out = 0;
- 
--	if (!nr_pages)
-+	if (vmbus_buffer_round_size(size, &rounded_size))
- 		return NULL;
-+	nr_pages = rounded_size >> PAGE_SHIFT;
-+	remaining = nr_pages;
- 
- 	/* If the buffer does not need to be decrypted, just use vzalloc() */
--	if (!hv_is_isolation_supported() || confidential)
--		return vzalloc(nr_pages << PAGE_SHIFT);
-+	if ((!hv_is_isolation_supported() &&
-+	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
-+		return vzalloc(rounded_size);
- 
- 	/* Worst case: every chunk is a single page. */
- 	chunks = kvmalloc_objs(*chunks, nr_pages, GFP_KERNEL | __GFP_ZERO);
-@@ -745,7 +879,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 		struct page *page;
- 		gfp_t gfp;
- 
--		order = min(order, ilog2(remaining));
-+		order = vmbus_buffer_order(remaining, order);
- 
- 		/*
- 		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
-@@ -760,7 +894,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
- 					gfp, order);
- 		if (!page) {
--			if (!order--)
-+			if (!vmbus_buffer_lower_order(&order))
- 				goto err;
- 			continue;
- 		}
-@@ -787,7 +921,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 	if (!addr)
- 		goto err;
- 
--	memset(addr, 0, nr_pages << PAGE_SHIFT);
-+	memset(addr, 0, rounded_size);
- 
- 	kvfree(pages);
- 	*chunks_out = chunks;
-@@ -1052,8 +1186,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
- 
- 	info = kzalloc(sizeof(*info) +
- 		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
--	if (!info)
-+	if (!info) {
-+		gpadl->leak = true;
- 		return -ENOMEM;
-+	}
- 
- 	init_completion(&info->waitevent);
- 	info->waiting_channel = channel;
 -- 
 2.43.0
 

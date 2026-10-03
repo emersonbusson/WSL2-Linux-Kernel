@@ -1,0 +1,131 @@
+From 9d408ffdcc56c38fd4747ef3a6e01b6a918a2225 Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Fri, 2 Oct 2026 20:43:31 -0300
+Subject: [PATCH v2 06/13] hv: vmbus: name the shared-page test in
+ vmbus_needs_shared_pages()
+
+The decision that a buffer needs host-visible pages is composed
+inline from three independent facts: Hyper-V isolation support,
+guest-memory encryption through CC_ATTR_GUEST_MEM_ENCRYPT, and the
+per-buffer confidential flag. Reading that composition at the call
+site hides the inputs and makes the private-versus-shared selection
+impossible to pin in a unit test without a live host.
+
+Pull the composition into vmbus_needs_shared_pages() and pass the
+three inputs as named arguments. The helper is built into the
+hv_vmbus object and declared in hyperv_vmbus.h so the KUnit cases in
+vmbus_buffer_test.c can reach it; nothing outside hv_vmbus links
+against it, and no symbol is exported.
+
+The new case pins all four input combinations: a plain private guest
+keeps vzalloc(), Hyper-V isolation and Arm CCA encryption each force
+shared pages, and an explicitly confidential channel keeps its
+private allocation even under both.
+
+See the chunked-allocation series for why this is not a bare
+hv_is_isolation_supported() test.
+
+Suggested-by: Michael Kelley <mhklinux@outlook.com>
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/hv/channel.c           | 16 ++++++++++++++--
+ drivers/hv/hyperv_vmbus.h      |  2 ++
+ drivers/hv/vmbus_buffer_test.c | 20 ++++++++++++++++++++
+ 3 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
+index 3663ebe94fd1..a44903627068 100644
+--- a/drivers/hv/channel.c
++++ b/drivers/hv/channel.c
+@@ -45,6 +45,13 @@ int vmbus_buffer_round_size(u32 size, u32 *rounded_size)
+ 	return 0;
+ }
+ 
++bool
++vmbus_needs_shared_pages(bool hv_isolation, bool guest_mem_encrypted,
++			 bool confidential)
++{
++	return !confidential && (hv_isolation || guest_mem_encrypted);
++}
++
+ unsigned int vmbus_buffer_order(unsigned long remaining,
+ 				unsigned int max_order)
+ {
+@@ -832,6 +839,8 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	unsigned long nr_pages;
+ 	unsigned long remaining;
+ 	unsigned long page_idx = 0;
++	bool hv_isolation;
++	bool guest_mem_encrypted;
+ 	struct page **chunks = NULL;
+ 	struct page **pages = NULL;
+ 	unsigned int order = MAX_PAGE_ORDER;
+@@ -848,9 +857,12 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 	nr_pages = rounded_size >> PAGE_SHIFT;
+ 	remaining = nr_pages;
+ 
++	hv_isolation = hv_is_isolation_supported();
++	guest_mem_encrypted = cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT);
++
+ 	/* If the buffer does not need to be decrypted, just use vzalloc() */
+-	if ((!hv_is_isolation_supported() &&
+-	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
++	if (!vmbus_needs_shared_pages(hv_isolation, guest_mem_encrypted,
++				      confidential))
+ 		return vzalloc(rounded_size);
+ 
+ 	/* Worst case: every chunk is a single page. */
+diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
+index ad4675f2589b..e4bb33548b98 100644
+--- a/drivers/hv/hyperv_vmbus.h
++++ b/drivers/hv/hyperv_vmbus.h
+@@ -557,6 +557,8 @@ int hv_remove_ring_sysfs(struct vmbus_channel *channel);
+  * These are shared with vmbus_buffer_test.c, which is built into the
+  * hv_vmbus object alongside channel.c. They stay unexported.
+  */
++bool vmbus_needs_shared_pages(bool hv_isolation, bool guest_mem_encrypted,
++			      bool confidential);
+ int vmbus_buffer_round_size(u32 size, u32 *rounded_size);
+ unsigned int vmbus_buffer_order(unsigned long remaining,
+ 				unsigned int max_order);
+diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
+index 46145f326d45..515fc14dc708 100644
+--- a/drivers/hv/vmbus_buffer_test.c
++++ b/drivers/hv/vmbus_buffer_test.c
+@@ -38,6 +38,25 @@ static void vmbus_buffer_size_overflow_test(struct kunit *test)
+ 			(u32)(U32_MAX - PAGE_SIZE + 1));
+ }
+ 
++static void vmbus_buffer_private_shared_selection_test(struct kunit *test)
++{
++	/* Ordinary private guests keep the low-overhead vzalloc path. */
++	KUNIT_EXPECT_FALSE(test,
++			   vmbus_needs_shared_pages(false, false, false));
++
++	/* Hyper-V isolated guests need host-visible pages for shared buffers. */
++	KUNIT_EXPECT_TRUE(test,
++			  vmbus_needs_shared_pages(true, false, false));
++
++	/* Arm CCA reports encryption through CC_ATTR, not Hyper-V isolation. */
++	KUNIT_EXPECT_TRUE(test,
++			  vmbus_needs_shared_pages(false, true, false));
++
++	/* A channel explicitly marked confidential keeps its private allocation. */
++	KUNIT_EXPECT_FALSE(test,
++			   vmbus_needs_shared_pages(true, true, true));
++}
++
+ static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
+ {
+ 	unsigned int order;
+@@ -320,6 +339,7 @@ static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
+ static struct kunit_case vmbus_buffer_test_cases[] = {
+ 	KUNIT_CASE(vmbus_buffer_size_rounding_test),
+ 	KUNIT_CASE(vmbus_buffer_size_overflow_test),
++	KUNIT_CASE(vmbus_buffer_private_shared_selection_test),
+ 	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
+ 	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
+ 	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
+-- 
+2.43.0
+
