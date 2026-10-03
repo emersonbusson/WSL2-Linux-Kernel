@@ -1,4 +1,4 @@
-From 86c631b8656aed58046406072f7074cbfa7b3d3a Mon Sep 17 00:00:00 2001
+From 873a77d74c4d9ad870a74fc039369a5d6ea02945 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 11/13] hv: vmbus: allocate the requestor array with

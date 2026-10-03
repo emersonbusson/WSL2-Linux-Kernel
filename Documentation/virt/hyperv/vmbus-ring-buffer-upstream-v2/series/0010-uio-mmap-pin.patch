@@ -1,4 +1,4 @@
-From a4dacc1c49338c1c8f756421c5519cacf0eb5f40 Mon Sep 17 00:00:00 2001
+From 934acd7ce76d447ab5c16f510fb469c46fda4e08 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Sat, 3 Oct 2026 16:08:58 -0300
 Subject: [PATCH v2 10/13] hv: vmbus: pin buffer pages across UIO mmap to close
@@ -656,7 +656,7 @@ index b40e80e19c6c..05f09a922b4d 100644
  		ret = vmbus_alloc_buffer_owned(channel, RECV_BUFFER_SIZE, false,
 diff --git a/drivers/uio/uio_hv_generic_mmap_test.c b/drivers/uio/uio_hv_generic_mmap_test.c
 new file mode 100644
-index 000000000000..bc1045e81212
+index 000000000000..513c7aea34ba
 --- /dev/null
 +++ b/drivers/uio/uio_hv_generic_mmap_test.c
 @@ -0,0 +1,794 @@
@@ -924,7 +924,7 @@ index 000000000000..bc1045e81212
 +	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
-+			    &pdata.int_pages[0]);
++			    &pdata->int_pages[0]);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(PAGE_SHARED));
 +	/* int_pages is not a vmbus_buffer, so nothing is pinned. */
@@ -937,7 +937,7 @@ index 000000000000..bc1045e81212
 +	ret = hv_uio_mmap_prepare(&pdata->info, &desc);
 +	KUNIT_ASSERT_EQ(test, ret, 0);
 +	KUNIT_EXPECT_PTR_EQ(test, desc.action.map_kernel.pages,
-+			    &pdata.monitor_pages[0]);
++			    &pdata->monitor_pages[0]);
 +	KUNIT_EXPECT_EQ(test, pgprot_val(desc.page_prot),
 +			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
 +	KUNIT_EXPECT_NULL(test, desc.private_data);
