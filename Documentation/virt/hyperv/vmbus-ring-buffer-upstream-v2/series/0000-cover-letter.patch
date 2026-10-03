@@ -2,780 +2,240 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 22:15:00 -0300
 Subject: [PATCH v2 0/13] hv: vmbus: make rings and host-visible buffers
- survive fragmentation without breaking CoCo
+ survive buddy fragmentation
 
-This is v2 of the VMBus ring-allocation series. v1 was posted
-unversioned on 2026-09-17/18 as a two-patch series and proposed a plain
-vzalloc() fallback for vmbus_alloc_ring(). Michael Kelley reviewed that
-approach on 2026-09-22 and pointed out the problem it creates:
-set_memory_decrypted() only works on physically contiguous direct-mapped
-memory, so a vmalloc ring in an arm64 CCA or TDX guest without a
-paravisor cannot be re-encrypted. The fallback would fix ordinary guests
-and break confidential ones.
+v1 posted 2026-09-17/18 proposed a plain vzalloc() fallback for
+vmbus_alloc_ring(). Michael Kelley reviewed it on 2026-09-22 and
+identified the problem: set_memory_decrypted() only works on
+physically contiguous direct-mapped memory, so a vmalloc ring in an
+arm64 CCA or TDX guest without a paravisor cannot be re-encrypted.
+The fallback would fix ordinary guests and break confidential ones.
 
 He asked for the opposite structure: build on Kameron Carr's
 vmbus_alloc_buffer() (already upstream) rather than adding a second
-allocator path next to it. This series is that rewrite.
+allocator. This series is that rewrite.
 
 References
 ----------
 
-  Unversioned v1, sent 2026-09-17/18, Message-ID stem
-  20260918014017.2536753 (cover -1, patch 2/2 -3):
+  v1 (2026-09-17/18):
     https://lists.openwall.net/linux-kernel/2026/09/18/276
     https://lists.openwall.net/linux-kernel/2026/09/18/265
 
-  Kameron Carr's vmbus_alloc_buffer(), the allocator this series builds
-  on, Message-ID stem 2026081160447.2529876-1.
+  Kelley review of v1 (2026-09-22) -- source of the five points
+  below and of Suggested-by on 1/13 and 6/13:
+    https://www.mail-archive.com/linux-kernel%40vger.kernel.org/msg2658605.html
 
-  Michael Kelley's review of v1, 2026-09-22. It is the source of the
-  five points mapped below and of Suggested-by on 1/13 and 6/13.
+  Carr's vmbus_alloc_buffer() (Message-ID stem
+  2026081160447.2529876-1):
+    https://lore.kernel.org/all/?q=2026081160447.2529876-1
 
 Problem
 -------
 
-vmbus_alloc_ring() still allocates both ring halves with one order-7
-(512 KiB) alloc_pages() call. Under buddy fragmentation that fails with
--ENOMEM while plenty of virtual memory is free. On WSL2 the visible
-symptom is userspace control-plane failures such as "accept4 failed 110:
-Connection timed out" on vsock channels. A dynamically instantiated
-sub-channel cannot open, and the channel is dead for the life of the
-fragmentation.
-
-The failure is not exotic. Any long-running guest that allocates and
-frees large objects - build workloads, in-memory databases, swap-heavy
-tiering - will fragment the buddy to the point where no order-7 block
-remains while thousands of order-0 pages are free.
+vmbus_alloc_ring() allocates both ring halves with one order-7
+(512 KiB) alloc_pages(). Under buddy fragmentation that fails with
+-ENOMEM while plenty of virtual memory is free. A dynamically
+instantiated sub-channel cannot open and the channel is dead for the
+life of the fragmentation. On WSL2 this has been observed as
+"accept4 failed 110: Connection timed out" on vsock channels; the
+allocation failure is measured, the specific symptom is one report.
 
 Why not just vzalloc()
 ----------------------
 
-The obvious fix is to fall back to vmalloc when the high-order
-allocation fails. That is what v1 did, and it is wrong for Confidential
-Computing. Ring memory must be host-visible, and a CoCo guest's private
-memory has to be explicitly decrypted before the host can read it.
-set_memory_decrypted() operates on the direct map and therefore needs
-physically contiguous pages. A vmalloc range is not direct-mapped, so
-decrypting it is not possible. arm64 CCA and Intel TDX guests without a
-paravisor would break.
+Ring memory must be host-visible. A CoCo guest's private memory has
+to be explicitly decrypted before the host can read it, and
+set_memory_decrypted() operates on the direct map, so it needs
+physically contiguous pages. A vmalloc range is not direct-mapped.
+arm64 CCA and Intel TDX guests without a paravisor would break.
 
-Kameron Carr's vmbus_alloc_buffer() already solves this: it allocates
-the buffer as a series of physically contiguous chunks, descending from
-a high order to order 0 as needed, decrypts each chunk with
-set_memory_decrypted() where the platform requires it, and vmap()s the
-chunks into one virtually contiguous range. v1 proposed a second
-allocator. v2 removes the second allocator and routes everything through
-the first.
+Carr's vmbus_alloc_buffer() already solves this: it allocates the
+buffer as physically contiguous chunks descending from high order to
+order 0, decrypts each chunk where the platform requires it, and
+vmap()s them into one virtually contiguous range. v2 routes
+everything through it and removes the second allocator.
 
 What changed
 ------------
 
-- vmbus_alloc_ring() and vmbus_free_ring() now use vmbus_alloc_buffer().
-  The three related fields - buffer address, page array, and GPADL state
-  - are grouped into struct vmbus_buffer, and struct vmbus_gpadl is
-  embedded in it as buffer->gpadl so ownership cannot be split across
-  two lifetimes. The struct vmbus_gpadl type itself is kept, because
-  the previously exported vmbus_establish_gpadl(),
-  vmbus_establish_gpadl_caller_decrypted() and vmbus_teardown_gpadl()
-  still take a struct vmbus_gpadl *; the in-tree callers use the
-  descriptor-aware _owned entry points instead.
+- Rings and UIO buffers go through vmbus_alloc_buffer(). Address,
+  page array and GPADL state are grouped in struct vmbus_buffer
+  with struct vmbus_gpadl embedded, so ownership cannot be split
+  across two lifetimes.
 
-- The generic VMBus UIO driver allocates its send and receive buffers
-  the same way. Page and GPADL ownership travel together, which closes
-  the window where a UIO mmap holds pages whose GPADL is still being
-  established.
+- vmbus_buffer_pin_pages()/vmbus_buffer_unpin_pages() close the
+  mmap-versus-reclaimer race. Uncertain cleanup preserves chunks
+  rather than freeing them; unproven GPADL or encryption state is
+  retained and flagged.
 
-- A UIO mmap races the reclaimer in the other direction: the page
-  array and the pages behind it can be freed between reading them and
-  building the mapping. That window is closed by a method rather than
-  by open-coded reference counting at each call site.
-  vmbus_buffer_pin_pages() snapshots the array and takes a reference
-  on every page under the owners lock, failing cleanly if reclaim has
-  already begun. vmbus_buffer_unpin_pages() drops the references once
-  the VMA holds its own. Both are exported, because hv_uio lives in a
-  separate module and both of its mmap paths -- the char-device map
-  and the sysfs ring map -- need them.
+- GPADL post-failure injection and order-descent fallback are
+  factored for KUnit. The same helpers run in production.
 
-- Size rounding is validated before it is stored, and a cleanup with an
-  uncertain outcome preserves the allocated chunks instead of freeing
-  them. A buffer whose GPADL or encryption state cannot be proven is
-  marked leaked and retained rather than handed back to the allocator
-  while the host may still map it.
+- The five exported symbols keep their prototypes and encryption
+  contracts. New _owned entry points and vmbus_release_buffer()
+  are EXPORT_SYMBOL_GPL for migrated in-tree callers.
 
-- GPADL message posting goes through a private callback so KUnit can
-  inject header, body, and teardown post failures without a live host.
-  The same helpers run in production, so the tested path is the shipped
-  path.
+- The requestor array uses kvcalloc() (0011) and rndis_request
+  uses kvzalloc_obj() (0012), removing two high-order allocations
+  from the subchannel-open path. Both are guest-private.
 
-- The order-descent loop is factored so KUnit can fail every order above
-  zero and still exercise a real order-zero allocation, plus clean
-  exhaustion when order zero also fails.
+- vmbus_needs_shared_pages() consults both isolation and
+  CC_ATTR_GUEST_MEM_ENCRYPT plus the per-buffer flag.
 
-- The five previously exported symbols keep their exact prototypes,
-  and the encryption contract each one has always carried. The compat
-  establish still decrypts a range whose caller did not prepare it.
-  The compat teardown re-encrypts that range before returning, because
-  its callers free the memory themselves as soon as it returns and
-  there is no owner left to defer the work to reclaim. The compat
-  alloc/free pair keeps the same per-chunk re-encryption in
-  vmbus_free_buffer(). What those adapters deliberately do not carry
-  is the retained-owner lifetime. vmbus_alloc_buffer() builds an
-  owner inside vmbus_alloc_buffer_owned() and removes it before
-  returning. The establish and teardown adapters build an owner-less
-  stack buffer instead, so decrypt and re-encryption happen inline
-  and the compat surface stays synchronous and self-contained.
-  There is one intermediate shape worth naming: 1/13 gives
-  vmbus_alloc_buffer() a bool confidential argument. The mainline
-  function decides host-visibility from channel->co_external_memory
-  alone, while a ring buffer on the same channel is governed by
-  channel->co_ring_buffer, so the caller has to say which policy
-  applies to the buffer it is allocating. 9/13 folds that argument
-  into vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer()
-  to the exact four-argument prototype mainline has today.
-  vmbus_alloc_buffer_owned(), vmbus_establish_gpadl_owned(),
-  vmbus_teardown_gpadl_owned() and vmbus_release_buffer() are new
-  EXPORT_SYMBOL_GPL symbols and are what the in-tree migrated callers
-  use; they have to be exported because hv_netvsc and uio_hv_generic
-  are separate modules from hv_vmbus. vmbus_onmessage() gains a
-  host_generated argument so the message path can tell host
-  revocation from local unload; it is not an exported symbol.
+- Reclaim workqueue teardown cancels timer-pending delayed_work
+  before destroy_workqueue(). HV_GPADL_BUFFER_DECRYPTED is gone.
 
-- The per-channel requestor array is allocated with kvcalloc() instead
-  of kcalloc(). Its size follows the ring size, so at the default
-  ring_size of 128 pages the array is larger than 256 KiB and kcalloc()
-  would request an order-7 compound page -- the order-7 allocation on
-  the channel-open path, and one of the two that fail with
-  "sub channel open failed: -12" under buddy fragmentation. The array
-  is guest-private request bookkeeping and never reaches the host, so
-  vmalloc backing has no Confidential Computing implication.
+- netvsc_send_completion() no longer dereferences a NULL request
+  address on empty completions (0013). Control RNDIS sends
+  register NULL; the empty-payload branch was a fatal NULL deref
+  in NAPI/softirq. Reachable because open now survives
+  fragmentation. Kept here so the drill is green on the posted
+  bytes; a split is available if netvsc maintainers prefer.
 
-- struct rndis_request is larger than KMALLOC_MAX_CACHE_SIZE because it
-  embeds two RNDIS_EXT_LEN (4 KiB) protocol tails, so kzalloc_obj()
-  hands back an order-2 compound page on every RNDIS control request.
-  That runs on the subchannel open path (netvsc_subchan_work ->
-  get_rndis_request) and is the second high-order allocation there.
-  Those tails are protocol capacity, not padding -- a response is
-  memcpy'd into &request->response_msg and may spill into response_ext
-  -- so the descriptor is not shrunk. It is allocated with
-  kvzalloc_obj() instead: that keeps the zeroing kzalloc_obj()
-  provided -- response_ext and request_ext are read after a response
-  arrives, so an uninitialised tail would be an information leak --
-  and the object is a control-path descriptor copied into the
-  VMBus ring and is never DMA-mapped from this allocation, so vmalloc
-  backing has no Confidential Computing implication, and kvmalloc()
-  tries the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first so it
-  neither fails hard nor reaches the OOM killer when no compound page
-  is available. Freed with kvfree() in the matching put_rndis_request().
+Fixes tags
+----------
 
-- The shared-page decision is an explicit helper. Mainline took the
-  chunked decrypt path from hv_is_isolation_supported() alone, so an
-  Arm CCA or Intel TDX guest without a Hyper-V isolation property
-  fell through to vzalloc() and could not re-encrypt its ring.
-  Guest-memory encryption is reported through
-  CC_ATTR_GUEST_MEM_ENCRYPT, independently of Hyper-V isolation, so
-  vmbus_needs_shared_pages() consults both plus the per-buffer
-  confidential flag. Ordinary private guests still take vzalloc().
+0011 fixes a regression from e8b7db38449ac ("Drivers: hv: vmbus:
+Add vmbus_requestor data structure for VMBus hardening", Andres
+Beltran, 2020-11-09), whose request_arr_init() allocated the
+requestor array with kcalloc(size, sizeof(u64), GFP_KERNEL) on the
+subchannel-open path. 0012 and 0013 harden against buddy
+fragmentation and an empty-completion case whose originating
+commits are not pinned down here, so they deliberately carry no
+Fixes: tag rather than an invented one. Routing 0011-0013 to the
+netvsc maintainers as a follow-up is fine if they prefer that
+split; the bytes are independent of 0001-0010.
 
-- The reclaim workqueue teardown now cancels every timer-pending
-  delayed_work before destroy_workqueue(). drain_workqueue() only
-  drains work that is queued or running; a delayed_work still waiting
-  on its timer lives in the timer wheel, not on the workqueue, so
-  freeing the workqueue under an armed timer is a use-after-free.
-  Owners are split into an internal free path (used by the reclaim
-  work, which cannot wait for its own completion) and an external
-  remove path that cancels the timer first. The shutdown walk cancels
-  with the non-_sync variant under the owners lock, because reclaim
-  work that is already running blocks on that same lock and
-  destroy_workqueue() waits for it afterwards. An owner that is
-  already ready to reclaim is queued once more so the drain frees it
-  before the workqueue goes away, rather than stranding it. A mapping
-  that still holds its pages at that point cannot be freed safely, so
-  those pages are retained and flagged instead of dropped under a live
-  mapping.
-
-- HV_GPADL_BUFFER_DECRYPTED is gone. Once every caller goes through
-  vmbus_alloc_buffer(), the distinction it carried is redundant.
-
-- A completion that resolves to a NULL request address is no longer
-  dereferenced. netvsc_send_pkt() registers (ulong)skb as the VMBus
-  request address, and control RNDIS sends carry no skb -- rndis_filter
-  calls netvsc_send() with skb == NULL -- so the registered address is
-  NULL. That is intentional: there is no guest object to hand back, and
-  the request slot is still allocated so the completion can reclaim it.
-  netvsc_send_tx_complete() already tolerated it with if (likely(skb)).
-  The empty-payload branch of netvsc_send_completion() did not: it cast
-  the address to struct nvsp_message * and read hdr.msg_type
-  unconditionally, which is a fatal NULL dereference in NAPI/softirq.
-  This is not a ring-allocation change. It is reachable from this
-  series because channel open now survives buddy fragmentation and
-  control RNDIS traffic proceeds where it used to fail with -ENOMEM.
-  It is kept in the series because the runtime drill has to be green on
-  the bytes being posted; a trivial split is available if the netvsc
-  maintainers prefer it standalone.
-
-Patch granularity is deliberate. 8/13 is the largest at 892 changed
-lines across six files (772 insertions, 120 deletions) and it adds
-five KUnit cases. It is one patch because it is one lifecycle: the
-owner record, the three encryption facts, the reclaim scheduling and
-the workqueue teardown are one state machine. Splitting it would
-produce intermediate revisions in which a buffer can be freed with
-an unproven encryption state, or a module unload can strand an armed
-reclaim timer against a destroyed workqueue. The other twelve patches
-are 14 to 491 lines each.
+Patch granularity is deliberate. 8/13 is the largest at 898
+changed lines across six files (778 insertions, 120 deletions) and
+it adds five KUnit cases. It is one patch because it is one
+lifecycle: the owner record, the three encryption facts, the
+reclaim scheduling and the workqueue teardown are one state
+machine. Splitting it would produce intermediate revisions in which
+a buffer can be freed with an unproven encryption state, or a
+module unload can strand an armed reclaim timer against a destroyed
+workqueue. 10/13 is next at 785 lines across seven files and adds
+the six UIO mmap cases. The other eleven patches are 14 to 340
+lines each.
 
 Mapping to the 2026-09-22 review
 --------------------------------
 
   1. "Use vmbus_alloc_buffer() for rings, not only as a fallback."
-     vmbus_alloc_ring() and vmbus_free_ring() are converted in 0001 and
-     no second ring allocator remains beside them.
+     vmbus_alloc_ring() and vmbus_free_ring() are converted in 0001
+     and no second ring allocator remains beside them.
 
   2. "Group the buffer address, page array and GPADL state."
      struct vmbus_buffer in include/linux/hyperv.h, 0001.
 
   3. "Fold struct vmbus_gpadl into struct vmbus_buffer."
-     channel->ringbuffer_gpadlhandle and channel->ringbuffer_page are
-     replaced by channel->ringbuffer, whose GPADL is embedded as
-     buffer->gpadl and is released by vmbus_release_buffer() as one
-     unit, 0001 and 0008. The struct vmbus_gpadl type survives as the
-     argument of the three previously exported establish/teardown
-     prototypes; nothing that used to allocate it separately still
-     does.
+     channel->ringbuffer_gpadlhandle and channel->ringbuffer_page
+     are replaced by channel->ringbuffer, whose GPADL is embedded
+     as buffer->gpadl and is released by vmbus_release_buffer() as
+     one unit, 0001 and 0008. The struct vmbus_gpadl type survives
+     as the argument of the three previously exported
+     establish/teardown prototypes; nothing that used to allocate
+     it separately still does.
 
   4. "A leak flag when GPADL or CoCo re-encryption cannot be proven."
-     gpadl.leak and buffer.leak are set when a GPADL message may have
-     reached the host but completion is uncertain, so the backing pages
-     are retained instead of handed back, 0001 and 0008.
+     gpadl.leak and buffer.leak are set when a GPADL message may
+     have reached the host but completion is uncertain, so the
+     backing pages are retained instead of handed back, 0001 and
+     0008.
 
-  5. "Eliminate redundant HV_GPADL_* types once vmbus_alloc_buffer() is
-     universal." HV_GPADL_BUFFER_DECRYPTED is gone. The caller-decrypted
-     case is a memory_prepared argument to the establish path rather
-     than a third GPADL type, 0001.
+  5. "Eliminate redundant HV_GPADL_* types once vmbus_alloc_buffer()
+     is universal." HV_GPADL_BUFFER_DECRYPTED is gone. The
+     caller-decrypted case is a memory_prepared argument to the
+     establish path rather than a third GPADL type, 0001.
 
 Testing
 -------
 
-The build, checkpatch and KUnit leg for these thirteen bytes is
-run 37138227430; the Hyper-V runtime drill leg is run 37138227398.
-Both ran on fork commit 024849b3af07 against pinned mainline base
+The qualifying pair for these thirteen bytes is
+37155088526 / 37155088537 on fork commit ee583038864e, against
+pinned mainline base
 93f51579e7df ("Linux 7.3-rc4"), with all thirteen series/SHA256SUMS
-entries verified before build. 37138227430 applied all thirteen
-stages on x86_64 and arm64, reported 0 ERROR / 0 WARNING from
-scripts/checkpatch.pl --strict --no-tree at every stage, passed W=1
-with Sparse clean on both arches, passed 24 of 24 named KUnit cases
-on x86_64 (hyperv-vmbus-buffer 16 subtests, hyperv-uio-mmap 4
-subtests, refcount_interrupt 4 subtests) and rejected all three CoCo
-gate self-test injections on both arches. Its wsl-backport job
-passed 15 of 15 named cases (hyperv-vmbus-gpadl-lifetime 12,
-hyperv-uio-hv-generic-mmap 3) on the same patch text. 37138227398
-booted the same bytes as a Gen2 guest on both hosted guests, and
-both legs printed HYPERV_DRILL_RESULT status=PASS with
-scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation and
-lifecycle=0 fragment=0 splats=0 faults=0. Each leg returned PHASE1 to
-its exact PHASE1-BEFORE map baseline (MAPS count=12 bytes=20279296
-pages=4939) after 100 hv_netvsc bind/unbind cycles with
-cycle_fails=0 over 400 steps, held the hold-in-mmap window across
-teardown (LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes), and drove
-high_order_7plus to zero with exhausted=1,
-high_order_7plus_blocks=0 (reread=0) and
-order7_dmesg=0 accept4_failures=0 oops=0.
+entries verified before build.
 
-Runs 37089084420 and 37089084375 pinned these same diff hunks under
-the previous revision of the commit messages. After that pair the
-message text above four of the diffs changed -- 1/13, 4/13, 11/13
-and 12/13 -- and no diff hunk moved. 1/13 now names its real
-neighbour 9/13 instead of 6/9 for the prototype it widens, 11/13
-and 12/13 point at 12/13 and 11/13 instead of 8/9 and 7/9, and 4/13
-keeps vmbus_post_gpadl_messages() whole on one line. The cover's
-granularity figures for 8/13 and the twelve smaller patches are
-corrected to the measured ones. series/SHA256SUMS records those
-message changes. The cover letter itself is not in series/SHA256SUMS
-and CI never applies it.
+Build: all thirteen stages applied on x86_64 and arm64; 0 ERROR /
+0 WARNING from scripts/checkpatch.pl --strict --no-tree at every
+stage (cumulative git diff shape). The 22 named KUnit cases this
+series adds all pass on x86_64 (hyperv-vmbus-buffer 16,
+hyperv-uio-mmap 6); the run reports 26 of 26 including the
+pre-existing refcount_interrupt 4. All four CoCo gate self-test
+injections rejected on both arches. WSL backport: 15 of 15 named cases
+(hyperv-vmbus-gpadl-lifetime 12, hyperv-uio-hv-generic-mmap 3).
 
-Both hosted guests print
-VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION in addition to the
-HYPERV_DRILL_RESULT line above. Neither leg reports PARTIAL and
-neither was starved. The verdict scope the drills themselves print
-remains ordinary-x86_64-vzalloc-path;
-co-co-chunked-fallback-not-exercised -- the CoCo gap this series
-discloses, not a drill defect.
+As a mail patch rather than cumulative diff, 2/13 and 10/13 each
+print one FILE_PATH_CHANGES warning about MAINTAINERS. The test
+files are covered by the existing Hyper-V and UIO directory
+entries; the warning is a generic nudge on any file add. Nothing
+was reshaped to silence it.
 
-That 0/0 is the CI shape of the check: scripts/checkpatch.pl
---strict --no-tree reading the cumulative git diff after each apply,
-which is what 37138227430 runs. Read as a mail patch instead, the two
-commits that add a test file (2/13 and 10/13) each print one
-FILE_PATH_CHANGES warning asking whether MAINTAINERS needs updating.
-No MAINTAINERS change is needed: drivers/hv/vmbus_buffer_test.c is
-already covered by the Hyper-V entry's "F: drivers/hv/" and
-drivers/uio/uio_hv_generic_mmap_test.c by the UIO entry's
-"F: drivers/uio/". The warning is a generic nudge on any file add; it
-is not a coverage audit. Nothing was reshaped to silence it.
+WSL backport builds with W=1 and Sparse. Baseline diagnostics that
+pre-exist this series are not introduced by it.
 
-Everything this section says below about the previous nine-patch
-revision is history, not a claim about these bytes. Those runs are
-kept because they are real and because they describe the design
-these patches implement. They are not evidence about the bytes
-posted here.
-
-The split is a re-cut, not a rewrite. On the same pinned base,
-93f51579e7df ("Linux 7.3-rc4"), the previous revision and this
-one produce trees in which seven of the ten files the previous
-revision touched are byte-identical: channel_mgmt.c,
-ring_buffer.c, vmbus_drv.c, hyperv_net.h, netvsc.c,
-rndis_filter.c and include/linux/hyperv.h. The three that move
-are channel.c, hyperv_vmbus.h and uio_hv_generic.c. This
-revision additionally touches drivers/hv/Kconfig,
-drivers/hv/Makefile and drivers/uio/Kconfig for the two test
-options, and adds drivers/hv/vmbus_buffer_test.c and
-drivers/uio/uio_hv_generic_mmap_test.c.
-
-channel.c loses its KUnit block and its kunit/test.h include;
-struct vmbus_buffer_retained moves to hyperv_vmbus.h; the helpers
-the test file reaches lose static and are declared there;
-vmbus_free_buffer(), vmbus_buffer_pin_pages() and
-vmbus_buffer_unpin_pages() move earlier in the file; three
-exported functions gain kernel-doc. The twenty-six
-EXPORT_SYMBOL_GPL names in channel.c are the same set in both
-trees. uio_hv_generic.c loses its KUnit block and gains the
-#if defined(CONFIG_UIO_HV_GENERIC_KUNIT_TEST) seam that includes
-uio_hv_generic_mmap_test.c. One new non-static helper,
-vmbus_buffer_mark_host_revoked(), wraps the lock around the
-_locked form so the test does not have to; its only caller is
-vmbus_buffer_test.c, and production still calls the _locked form
-at the same two sites. No production logic differs.
-
-Patch numbers in the narrative below are the nine-patch
-revision's. They map to the posted series as follows:
-
-  1/9 -> 1/13     convert ring buffer allocation
-  2/9 -> 2/13     validate chunk buffer allocation and cleanup
-  3/9 -> 3/13     uio: allocate host-visible buffers through VMBus
-  4/9 -> 4/13     GPADL post failure injection tests
-  5/9 -> 5/13     order-zero allocation fallback test
-  6/9 -> 6/13, 7/13, 8/13, 9/13 and 10/13
-  7/9 -> 11/13    requestor array with kvcalloc()
-  8/9 -> 12/13    RNDIS request descriptors with kvzalloc_obj()
-  9/9 -> 13/13    NULL request address on empty completions
-
-The pin for these thirteen bytes is the pair named at the top of
-this section. The census below is the previous nine-patch
-revision's and is history only.
-
-For the previous nine-patch revision, twelve runs across six
-pairs are the census:
-36970357736 and 36970357645, then 36972315239 and 36972315260,
-then 36975012643 and 36975012655, then 36978224379 and
-36978224340, then 37022258445 and 37022259049, then 37025110180
-and 37025110735. The left-hand run
-of each pair is build, checkpatch and KUnit on x86_64, arm64 and
-the WSL 6.18.40.1 backport; the right-hand run is the Hyper-V
-runtime on both hosted guests. The first three pairs pinned one
-set of nine patch bytes against series/SHA256SUMS, and across
-those three only the cover letter differed.
-
-The fourth pair pinned the same diff hunks under the revised
-commit messages. Only the commit-message text above seven of the
-diffs changed after the first three pairs -- 1/9, 4/9, 5/9, 6/9,
-7/9, 8/9 and 9/9 -- and no diff hunk moved at that point.
-Cross-references that still named an eight-patch series are
-renumbered to nine, 9/9's rollback wording is rewritten as the
-plain revert condition its neighbours already use, and 1/9, 4/9
-and 5/9 are rewrapped to 72 columns. series/SHA256SUMS records
-those message changes. The cover letter itself is not in
-series/SHA256SUMS and CI never applies it.
-
-36978224379 and 36978224340 pin the patch files as those runs read
-them, not as they read now. After that pair, 5/9's diff hunks
-changed. The factoring of the order-descent loop in 5/9 reused one
-gfp across the whole descent, which left __GFP_NORETRY |
-__GFP_NOWARN set on the order-0 attempt. The loop it replaces
-recomputed gfp every iteration, so order 0 fell back to the plain
-GFP_KERNEL | __GFP_ZERO last resort that is allowed to try harder.
-5/9 now applies the per-order policy inside
-vmbus_alloc_pages_with_fallback() and discloses the invariant in
-its commit message. 0001-0004 and 0006-0009 are byte-identical to
-what that pair executed.
-
-37022258445, 37022259049, 37025110180 and 37025110735 were the
-byte-exact pin for the previous revision of this series. All four
-ran the nine patch files as those files then read against
-series/SHA256SUMS on the pinned base. 37022258445 and 37025110180
-applied all nine stages and passed 24 of 24 KUnit cases, including
-vmbus_ring_fallback_order_zero_test and the four gpadl
-fault-injection cases. 37022259049 and 37025110735 booted those
-same bytes as a Gen2 guest on both hosted guests, and all four
+Runtime: both hosted guests booted the same bytes as Gen2. Both
 legs printed HYPERV_DRILL_RESULT status=PASS with
-scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation.
-Every leg exhausted order-7-plus supply to zero and then reopened
-the channel with order7_dmesg=0, accept4_failures=0, oops=0 and
-rebind=yes. Lifecycle ran 100 cycles with phase2=yes on all.
-Splats and faults are 0 on all.
+scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation and
+lifecycle=0 fragment=0 splats=0 faults=0. PHASE1 returned to its
+exact map baseline after 100 hv_netvsc bind/unbind cycles
+(cycle_fails=0, 400 steps). Hold-in-mmap window held across
+teardown. high_order_7plus driven to zero with exhausted=1,
+order7_dmesg=0 accept4_failures=0 oops=0. Both legs printed
+VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The drill scope
+is ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation, noted
+no-co-co-hardware; co-co-chunked-fallback-not-exercised.
 
-Those four runs are not a pin for the bytes posted here. After
-them, 6/9 through 9/9 changed and series/SHA256SUMS was
-regenerated. 6/9 restores the synchronous re-encryption in the
-compat vmbus_teardown_gpadl() the previous 6/9 had dropped, adds
-the vmbus_buffer_pin_pages() / vmbus_buffer_unpin_pages() pair
-and both hv_uio mmap call sites, drains owners that are ready to
-reclaim at shutdown instead of stranding them, frees an owner-less
-chunked buffer whose vmbus_buffer_should_free() is true, stops
-overwriting the real errno with -ENOMEM at the four
-vmbus_alloc_buffer_owned() failure sites, and names the reclaim
-schedule, retry and workqueue constants. The two KUnit tests that
-fed a NULL page array now allocate real pages, because pin
-dereferences the array. 1/9 through 5/9 are byte-identical to
-what those four runs executed. The fresh build + KUnit +
-both-drill-legs pair on those nine bytes is 37058078668 and
-37058079485. 37058078668 applied all nine stages,
-passed 24 of 24 KUnit cases on x86_64 and 15 of 15 on the WSL
-6.18.40.1 backport, and cleared CoCo static invariants on x86_64
-and arm64 with all three gate self-tests rejecting their
-injections. 37058079485 booted the same bytes on both hosted
-guests. windows-latest printed status=PASS,
-scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation,
-high_order_7plus=504->26->0, exhausted=1 and
-VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, with PHASE1
-cycle_fails=0 / 400 steps and LIFECYCLE_VERDICT=PASS cycles=100
-phase2=yes. windows-2025 printed status=PARTIAL,
-scope=lifecycle-pass-fragment-inconclusive: lifecycle passed the
-same way, and its buddy chase stopped at chase-memfree-margin
-with high_order_7plus_blocks=1 (reread=1) still free, so
-VERDICT=INCONCLUSIVE_CAP_REACHED rather than a fragment pass.
-Both legs printed order7_dmesg=0 accept4_failures=0 oops=0,
-splats=0 faults=0 and reader_status=DONE. The opposite leg was
-the inconclusive half on 37054709239; this is runner buddy
-capacity, not a property of these bytes.
-
-One diff changed after the seven early drill runs named further
-below. 6/9 used to reformat the allocation-failure path in
-__vmbus_teardown_gpadl_buffer as two consecutive if (!info) tests
-around the leak flag -- a style regression this series introduced.
-It is now the single braced block that 1/9 through 5/9 produce.
-Both forms set gpadl->leak and return -ENOMEM, so the behaviour
-those runs measured is unchanged, but they did not execute 6/9 as
-it now reads. The diffs in 1/9 through 5/9 and 7/9 through 9/9 are
-what those runs executed.
-
-Build, apply and KUnit for the first eight patches are runs
-36949824209, 36954234370 and 36957852118. Runtime is seven Hyper-V
-drill runs on the same hosted guests -- 36949824155, 36951361583,
-36952899809, 36954234419, 36955854882, 36957852050 and
-36965808247 -- plus 36970357645, 36972315260 and 36975012655 on
-the corrected 6/9 bytes, and 36978224340 on the same diff hunks
-with the revised commit messages. 37022259049 and 37025110735
-carried the previous nine bytes, and 37022258445 and 37025110180
-their matching build and KUnit halves; 6/9 through 9/9 have
-changed since. The claims below are drawn from the eleven drill
-runs tabulated below -- twenty-two guest-runs -- and are what
-repeated across them, not what one run happened to show. They are
-claims about the design those runs exercised, not measurements of
-the bytes posted here; see the pin note above. One further passing
-drill run sits outside both sets: 36967341916, which shares its
-bytes with 36965808247. Two earlier runs on superseded byte
-snapshots are not passes and are not counted: 36956881309 stopped
-short on windows-latest and 36959412461 on windows-2025, both
-INCONCLUSIVE_CAP_REACHED.
-Within that census, commit messages were revised after their diffs
-settled and without touching a diff line: 6/9 and 8/9 after the
-first five, and again across 1/9, 4/9, 5/9, 6/9, 7/9, 8/9 and 9/9.
-The later revision described above did change 6/9 through 9/9
-diffs; that one sits outside the census. Patch 9/9 has its own
-build and runtime runs, 36965808263 and 36965808247.
-
-Build and apply:
-
-  The series applies cleanly to the pinned mainline base, commit
-  93f51579e7df ("Linux 7.3-rc4"), as nine stages. Run 36972315239
-  pins every patch against series/SHA256SUMS, then applies and
-  builds all nine stages; 36970357736 did the same on the same
-  nine patch bytes, and 36965808263 on the previous 6/9 bytes. It
-  builds on x86_64 and on arm64 (aarch64-linux-gnu), with the
-  Confidential Computing static invariants enforced on both.
-  checkpatch --strict is clean across
-  the nine patches, 0 errors and 0 warnings on each. The WSL
-  6.18.40.1 backport builds with W=1 and sparse.
-
-KUnit (hosted, no Hyper-V required):
-
-  20/20 named cases on x86_64, in two suites -- hyperv-vmbus-buffer 16
-  and hyperv-uio-mmap 4 (the runner's total of 24 includes the
-  pre-existing refcount_interrupt suite) -- covering size rounding,
-  ownership decisions,
-  partial-allocation cleanup, GPADL post-failure injection at
-  header/body/teardown, response-state mapping including host rejection
-  and rescind, the order-descent fallback with injected order >0
-  failures, and clean exhaustion. The separate WSL 6.18.40.1 backport
-  build passes its own 15 named cases in two differently named suites --
-  hyperv-vmbus-gpadl-lifetime 12 and hyperv-uio-hv-generic-mmap 3 --
-  covering GPADL rescind and re-encrypt lifetime plus UIO mmap. Only
-  vmbus_buffer_size_rounding_test is shared by name. In the posted
-  series 0011, 0012 and 0013 add no named case of their own: 0012
-  touches rndis_filter.c and 0013 touches netvsc.c completion paths,
-  neither of which a named case covers. The named cases are the ones
-  this series adds.
-
-Runtime on ordinary x86_64 Hyper-V (not CoCo):
-
-  The exact pinned bytes boot as a Gen2 guest with the candidate symbols
-  present. The lifecycle half is what repeated. On all eleven runs, on
-  both guests, the vmbus_alloc_buffer map set returns to its exact
-  baseline across 100 hv_netvsc rebind cycles: PHASE1-BEFORE and
-  PHASE1-AFTER both read MAPS count=12 bytes=20279296 pages=4939, with
-  zero splats and zero faults, and LIFECYCLE_VERDICT=PASS cycles=100
-  phase2=yes every time. Intermediate samples taken during a rebind
-  show the in-flight maps. Four of the twenty-two guest-runs differ
-  from the other eighteen at those checkpoints. On 36972315260's
-  windows-2025 guest they read count=18 bytes=73887744 pages=18021
-  at every ten-cycle checkpoint and 17 at cycle 100 -- flat, not
-  growing. On 36975012655's windows-2025 guest they read 12 at
-  every checkpoint except cycle 50, which reads count=11
-  bytes=19226624 pages=4683 -- a one-sample dip, not a trend.
-  36978224340's guests are not flat at all: windows-latest samples
-  13, 11, 18, 18, 12, 15, 18, 18, 12 and 18 across the ten
-  checkpoints, and windows-2025 samples 12 except for 18 at cycle 60
-  and 11 at cycle 80. In-flight maps during a rebind are transient
-  state, not a gate. The checkpoint lines are what the gate reads,
-  and PHASE1-AFTER matches PHASE1-BEFORE exactly on every one.
-
-  The mmap-versus-release window repeats the same way. With a userspace
-  mapping held open across the teardown, the UIO device maps and the
-  2 MiB subchannel ring both stay alive while the ring is freed
-  (/dev/uio0 maps=5, sysfs ring maps=1, PHASE2 hold-in-mmap window
-  OPEN) on every guest-run in the census above. The 100 bind/unbind
-  cycles complete with zero bind failures (400 steps, cycle_fails=0).
-  The exact map-set match is the PHASE1 pair above. PHASE2 allocates
-  its own subchannel region and does not claim to return to BASELINE;
-  FINAL reads one region above it, which is that region still live
-  after restore_nic. The wrapper note below covers the counts taken
-  outside these gates. No splat, fault, or accept4 failure appears on
-  any of the twenty-two guest-runs.
-
-  The sysfs ring map goes through hv_uio_ring_mmap(), which rejects a
-  channel that is not CHANNEL_OPENED_STATE with -ENODEV. A subchannel
-  can be present in sysfs and still read maps=0 if the helper reaches
-  it before the open completes; the UIO device map carries the hold in
-  that case. uio0 reads maps=5 on every guest-run in the census.
-
-  One wrapper count sits outside both gates and differs on two
-  guests. after_lifecycle, the harness map count taken after
-  restore_nic, reads 14 against a baseline of 12 on 36972315260's
-  windows-2025 guest and 9 on 36978224340's windows-latest guest,
-  where the other twenty guest-runs read 13. Both readings are
-  consistent with the restored NIC re-establishing a ring map after
-  the FINAL snapshot, at different points in that window; that
-  reading is an interpretation, not a measurement, and neither
-  PHASE1 nor PHASE2 is affected.
-
-  The 115200 serial capture also drops single bytes now and then,
-  which is worth naming so a reader of the raw logs is not surprised
-  by a corrupted word. 36975012655's windows-2025 guest prints its
-  PHASE1-BEFORE line as MAPS count=12 byts=... with the e missing,
-  and 36978224340's guests print HYPERV_DRIL_BOOT,
-  HYPERV_DRIL_DEVICE and high_order_7plus_blocks_reread0, each with
-  one character gone. Earlier runs lost a single character the same
-  way. The numbers on those lines are intact and the harness reads
-  the counts; no claim above is taken from a corrupted word.
-
-  Fragmentation depth is the part that does not repeat, and the letter
-  does not claim it does. The buddy-fragmentation drill allocates until
-  /proc/buddyinfo holds no free block of order 7 or above, then punches
-  physical buddy holes whose partners it keeps pinned, so nothing above
-  order-0 can coalesce. Whether it reaches full depletion depends on
-  how the 4096 hole pairs happen to land, and that varies per run:
-
-    run 36949824155   windows-latest  high_order_7plus=497->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=500->26->0
-                                      exhausted=1
-    run 36951361583   windows-latest  high_order_7plus=497->28->1
-                                      exhausted=0
-                      windows-2025    high_order_7plus=495->26->0
-                                      exhausted=1
-    run 36952899809   windows-latest  high_order_7plus=500->25->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=499->26->1
-                                      exhausted=0
-    run 36954234419   windows-latest  high_order_7plus=500->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=501->26->0
-                                      exhausted=1
-    run 36955854882   windows-latest  high_order_7plus=503->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=503->25->0
-                                      exhausted=1
-    run 36957852050   windows-latest  high_order_7plus=498->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=500->26->0
-                                      exhausted=1
-    run 36965808247   windows-latest  high_order_7plus=498->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=495->26->0
-                                      exhausted=1
-    run 36970357645   windows-latest  high_order_7plus=496->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=499->25->0
-                                      exhausted=1
-    run 36972315260   windows-latest  high_order_7plus=502->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=502->26->0
-                                      exhausted=1
-    run 36975012655   windows-latest  high_order_7plus=500->28->1
-                                      exhausted=0
-                      windows-2025    high_order_7plus=503->26->0
-                                      exhausted=1
-    run 36978224340   windows-latest  high_order_7plus=500->26->0
-                                      exhausted=1
-                      windows-2025    high_order_7plus=503->26->0
-                                      exhausted=1
-
-  So full order-7 depletion is reached in nineteen of twenty-two
-  guest-runs. The drill reports INCONCLUSIVE_CAP_REACHED on the
-  three that stop short, rather than claiming an exhaustion it did
-  not measure. One of those three is the only guest-run in the set
-  that the harness grades PARTIAL overall: 36975012655's
-  windows-latest guest, whose RESULT line reads lifecycle=0
-  fragment=3 splats=0 faults=0 with
-  scope=lifecycle-pass-fragment-inconclusive. Its lifecycle half
-  still passed; only the fragmentation half stopped short.
-
-  What does repeat is the claim the series is about: channel open
-  survives. On all twenty-two guest-runs the hv_netvsc rebind comes
-  back (nic_rebound=yes), with zero accept4 failures and zero oops,
-  at every measured depth -- including the three that stopped with a
-  single order-7 block still free. In those twenty-two, where
-  depletion was reached the verdict is
-  PASS_RING_ALLOCATION_UNDER_FRAGMENTATION, scoped as
-  ordinary-x86_64-vzalloc-path; co-co-chunked-fallback-not-exercised.
-
-  Two runs outside that census name the wall past depletion. After
-  the hog is mlocked, compaction is off and min_free_kbytes is
-  forced to 512, a later channel open can die in SLUB before the
-  ring allocator is reached at all. The oom-killer header on both
-  is the same:
-
-    gfp_mask=0x40cc0(GFP_KERNEL|__GFP_COMP), order=1
-    Workqueue: hv_sub_chan vmbus_add_channel_work
-    Out of memory and no killable processes...
-    Kernel panic - not syncing: System is deadlocked on memory
-
-  36982941081 and 37043082886, both windows-2025, both print
-  PRE-OPEN 12 maps and then this at 4.1s of guest time, and neither
-  reaches POST-OPEN. 0011 and 0012 have already taken the order-7
-  requestor array and the order-2 RNDIS descriptor off this path;
-  what is left is an ordinary SLUB new-slab page for a small
-  __kmalloc, and with the hog holding about 1.9 GiB unevictable and
-  init the only killable task, nothing can satisfy it. The buddy
-  counters do not predict that. 36949824155 survived a tighter
-  reading -- 2091 order-0 blocks and no order-1 at all -- than the
-  two that died at 1238 and 2068 order-0 with four and five order-1
-  still free at ready=1. What decides it is whether the kmalloc
-  cache that open needs still has a free object, which the drill
-  does not measure. Neither run is a ring-allocation failure, and
-  neither is counted in the census above.
-
-  On an ordinary x86_64 guest vmbus_alloc_buffer() always takes
-  vzalloc(), so the chunked order-N -> order-0 degrade is not what ran
-  here; that path is covered by fault injection and stays open on CoCo
-  hardware.
-
-  The drill's post-ready path is fork-free. After ready=1 every parse,
-  every buddy and map count, and the channel rebind run on shell
-  builtins until the helper is torn down. That constraint is
-  load-bearing regardless of the numbers a given run reports: a munmap
-  of 16 KiB frees four order-0 pages into the per-cpu page cache rather
-  than one order-2 buddy block, drain_all_pages() never runs against a
-  fully mlocked pattern, and earlier runs lost the shell and the
-  console to a clone at exactly that moment. So the helper's
-  groups=504 pages=2016 are a munmap tally, not forkable stacks, and
-  buddy_order2= is reported from the buddy's own order-2-and-above
-  count for information -- 0, 4, 5, 286, 305, 333, 339, 342, 362,
-  and 466 have all been seen depending on the run, and it is not
-  what the post-ready path trusts.
-
-  A green drill job is not by itself a gate closure -- the gate is the
-  RESULT, VERDICT and MMAP_HOLD lines in the guest console. The
-  converse also holds: a hosted runner that starves one guest reddens
-  the job with a clean fragmentation half and a lifecycle that never
-  reaches cycle 10, which is a failed measurement rather than a code
-  failure. Both halves are read from the console before a run is
-  called anything.
-
-  An earlier run against a build that still carried a second high-order
-  allocation on the subchannel-open path -- the RNDIS request
-  descriptor, fixed in 8/9 -- reached a buddy with buddy_order2=1 and
-  died in netvsc_subchan_work -> get_rndis_request with "page
-  allocation failure: order:2" and an oom-kill of the drill shell. In
-  the census above the runs reach a tighter buddy than that
-  (buddy_order2=0 on 36949824155) and the subchannel open survived.
-  That is the failure mode 0012 removes, shown absent on the bytes
-  that remove it. The SLUB wall named further up is a different
-  failure mode, and is not what 0012 addresses.
-
-  A later run against the same eight-patch bytes failed differently,
-  and 9/9 is the response. Run 36960219285 panicked in netvsc_poll
-  with "BUG: kernel NULL pointer dereference, address: 0000000000000000"
-  and "Kernel panic - not syncing: Fatal exception in interrupt". A
-  control RNDIS send registers a NULL skb as the request address, an
-  empty completion for it resolved to that NULL address, and the
-  unguarded empty-payload branch of netvsc_send_completion()
-  dereferenced it. The crash is pre-existing relative to commit
-  93f51579e7df ("Linux 7.3-rc4") and is not introduced by these diffs;
-  the series exposes it because channel open now survives the
-  fragmentation the drill creates. That run is cited here as a failure
-  only.
-
-  Patch 9/9 is the fix. Run 36965808247 is the runtime proof that it
-  holds, and runs 36970357645 and 36972315260 repeat it on the
-  corrected 6/9 bytes. All three boot as a Gen2 guest on both hosted
-  guests and drive the same fragmentation and lifecycle sequence that
-  found the panic. Every guest on every one of those runs reports
-  VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION with
-  order7_dmesg=0 accept4_failures=0 oops=0 rebind=yes, and
-  LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes with
-  lifecycle=0 fragment=0 splats=0 faults=0. There is no NULL
-  dereference and no panic on any of them. Run 36975012655 adds the
-  same negative on the same bytes with one guest short of depletion,
-  and 36978224340 repeats it on the revised commit messages. Both
-  runs report order7_dmesg=0 accept4_failures=0 oops=0 rebind=yes
-  and LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes on every guest.
-  The crash was in the completion path for a control RNDIS send, and
-  those sends are part of every one of the 100 rebind cycles, so
-  this is the surface that failed in 36960219285, shown surviving.
-
-  One observation from a different surface, which is not evidence
-  about these thirteen patches. A WSL 6.18 development tree carrying
-  this design -- a different base from 7.3-rc4 and a different code
-  shape, folding buffer release into vmbus_free_buffer() rather
-  than exporting vmbus_release_buffer() -- is installed on a daily
-  WSL2 workstation. A post-boot capture on it read zero splats,
-  zero order-N allocation failures, zero accept4 failures and no
-  code WARNING or BUG, with the VMBus buffer symbols present and
-  107 live vmbus_alloc_buffer regions. That is a snapshot under
-  real daily use, not a soak, and it qualifies nothing about the
-  series as submitted.
+The end-of-run map gate scores a band, not a point. The settled
+post-unbind tuple is 7 maps / 307200 bytes / 68 pages. UIO teardown
+is not the inverse of UIO probe under the hv_uio_remove() gap below,
+so the end must land between that tuple and the boot baseline with
+the retained ring set bounded. Both legs settled at
+9 / 4517888 / 1094 after two samples: a retained gap of 2 maps /
+4210688 bytes / 1026 pages against a 4 / 8388608 / 2048 budget,
+with PHASE 2 having released its own buffers. PHASE 1 returned to
+12 / 20279296 / 4939 exactly on both legs.
 
 What is not proven here
 -----------------------
 
-CoCo page-state transitions. SEV-SNP, TDX, and Arm CCA memory-state
-behaviour has not been observed on real confidential hardware. The
-per-chunk decrypt design is what those platforms need, and the static
-invariants are machine-checked in CI, but that is a negative proof about
-this patch set, not platform evidence. Platform validation is follow-up
-work and this series should be read with that gap open.
+CoCo page-state transitions have not been observed on confidential
+hardware. The per-chunk decrypt design is what those platforms need
+and the static invariants are machine-checked in CI, but that is a
+negative proof, not platform evidence. CoCo hardware qualification
+is set aside for this submission; the row stays PARTIAL. The
+chunked degrade only runs under vmbus_needs_shared_pages(); an
+ordinary x86_64 guest takes the vzalloc() path, so the runtime
+numbers do not speak to the confidential fallback.
 
-Note also that the chunked order-N -> order-0 degrade only runs when
-vmbus_needs_shared_pages() is true: a non-confidential buffer on a
-guest where hv_is_isolation_supported() or
-cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT) holds. An ordinary x86_64
-guest always takes the single vzalloc() path inside
-vmbus_alloc_buffer(), so the runtime numbers above speak to ring
-lifecycle and fragmentation resilience, not to the confidential
-fallback. That fallback is covered by the KUnit injection tests and
-awaits platform validation.
+Patches 0011-0013 add no named KUnit case. The netvsc completion
+path and RNDIS allocation have no targeted regression test here.
 
-The design follows Michael Kelley's review of the v1 series. Comments
-welcome.
+Driver rebind is not host rescind or GPADL response/reordering
+interleaving. The lifecycle gate measures normal rebind; it does
+not direct the hypervisor to rescind an offer or pause a create
+response. That qualification remains open.
+
+The assumption that a host rescind revokes every possible GPADL
+owner is not settled by a public protocol ordering proof. Uncertain
+cases are retained and accounted for rather than freed.
+
+The allocation failure under buddy fragmentation is the measured
+defect. The WSL "accept4 failed" symptom is one observed
+consequence; this series does not claim every WSL symptom came
+from this path.
+
+hv_uio_remove() unregisters a UIO device without
+vmbus_disconnect_ring(), so unbinding uio_hv_generic while
+userspace still holds /dev/uioN leaves the channel in
+CHANNEL_OPENED_STATE and the next hv_netvsc probe fails with -22.
+That is pre-existing in mainline and is not fixed here. This series
+does not make it worse: the ring pages stay alive while pinned
+instead of being freed under an open mapping.
+
+The design follows Kelley's review of v1. Comments welcome.
 
 Emerson Busson (13):
   hv: vmbus: convert ring buffer allocation to vmbus_alloc_buffer()
@@ -794,20 +254,21 @@ Emerson Busson (13):
 
  drivers/hv/Kconfig                     |   11 +
  drivers/hv/Makefile                    |    1 +
- drivers/hv/channel.c                   | 1101 ++++++++++++++++++++++++++------
+ drivers/hv/channel.c                   | 1110 ++++++++++++++++++++++++++------
  drivers/hv/channel_mgmt.c              |   36 +-
  drivers/hv/hyperv_vmbus.h              |   91 ++-
  drivers/hv/ring_buffer.c               |    9 +-
- drivers/hv/vmbus_buffer_test.c         |  468 ++++++++++++++
- drivers/hv/vmbus_drv.c                 |   14 +-
+ drivers/hv/vmbus_buffer_test.c         |  474 ++++++++++++++
+ drivers/hv/vmbus_drv.c                 |   32 +-
  drivers/net/hyperv/hyperv_net.h        |   10 +-
  drivers/net/hyperv/netvsc.c            |  119 ++--
  drivers/net/hyperv/rndis_filter.c      |   19 +-
  drivers/uio/Kconfig                    |   11 +
- drivers/uio/uio_hv_generic.c           |  236 +++++--
- drivers/uio/uio_hv_generic_mmap_test.c |  246 +++++++
+ drivers/uio/uio.c                      |   20 +
+ drivers/uio/uio_hv_generic.c           |  336 ++++++++--
+ drivers/uio/uio_hv_generic_mmap_test.c |  391 +++++++++++
  include/linux/hyperv.h                 |   53 +-
- 15 files changed, 2090 insertions(+), 335 deletions(-)
+ 16 files changed, 2388 insertions(+), 335 deletions(-)
 
 --
 2.43.0
