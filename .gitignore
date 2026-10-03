@@ -183,3 +183,9 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+
+# VMBus upstream series is tracked content, not quilt state. The kernel
+# tree's quilt `series` and the build `*.patch` rules would otherwise hide
+# every untracked file in that directory from `git status`.
+!Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series/
+!Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series/*.patch
