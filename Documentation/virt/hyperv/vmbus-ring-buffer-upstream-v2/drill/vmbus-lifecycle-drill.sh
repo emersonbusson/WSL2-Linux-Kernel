@@ -49,6 +49,28 @@ guard
 
 say() { echo "$@" | tee -a "$LOG"; }
 
+# emit_verdicts_and_exit <code>
+# Every exit path prints the same four independent verdicts and then the
+# aggregate. A refusal that fires before phase 2 reports MAP_* as SKIP with
+# "not launched" rather than folding an unmeasured surface into a claim. The
+# aggregate is narrowed by construction: it repeats what was measured and
+# says when a surface was not.
+emit_verdicts_and_exit() {
+	say "CLEANUP_VERDICT=${CLEANUP_VERDICT:-SKIP} ${CLEANUP_WHY:-not reached}"
+	say "MAP_UIO_VERDICT=${MAP_UIO_VERDICT:-SKIP} ${MAP_UIO_WHY:-not launched}"
+	say "MAP_SYSFS_VERDICT=${MAP_SYSFS_VERDICT:-SKIP} ${MAP_SYSFS_WHY:-not launched}"
+	say "RESTORE_VERDICT=${RESTORE_VERDICT:-SKIP} ${RESTORE_WHY:-not reached}"
+	say "LIFECYCLE_VERDICT=${LIFE:-FAIL} cleanup=${CLEANUP_VERDICT:-SKIP} map_uio=${MAP_UIO_VERDICT:-SKIP} map_sysfs=${MAP_SYSFS_VERDICT:-SKIP} restore=${RESTORE_VERDICT:-SKIP} cycles=$CYCLES maps=(${SETTLE_TUPLE:-}) gap_retained=(${GAP_N:-0}/${GAP_B:-0}/${GAP_P:-0}) settle_tries=${SETTLE_TRIES:-0} rebind=${REBIND_OK:-no}"
+	if [ "${LIFE:-FAIL}" != PASS ]; then
+		say "  aggregate is narrowed: it reports only the surfaces that were measured"
+		say "  map_uio=${MAP_UIO_WHY:-not launched}"
+		say "  map_sysfs=${MAP_SYSFS_WHY:-not launched}"
+	fi
+	say "=== END vmbus-lifecycle-drill ==="
+	say "log=$LOG"
+	exit "$1"
+}
+
 # --- VMEM: VMBus map accounting ---------------------------------------------
 # Counts live vmbus_alloc_buffer maps and total vmalloc area attributed to them.
 # Never logs kernel virtual addresses (SPEC: no KASLR material in evidence).
@@ -80,6 +102,49 @@ vmbus_maps() {
 	' /proc/vmallocinfo
 }
 
+# Per-map sizes of live vmbus_alloc_buffer areas, one byte count per line.
+# Size is the owner attribution available here: /proc/vmallocinfo names the
+# allocating symbol for every one of these, so one kernel owner cannot be told
+# from another. What can be told is whether a size was already accounted for
+# before the teardown. A size that appears only after it is a retention this
+# run cannot name, and an unnamed retention does not become balanced by
+# sitting under an aggregate budget.
+vmbus_map_sizes() {
+	if [ ! -r /proc/vmallocinfo ]; then
+		return 1
+	fi
+	awk ' /vmbus_alloc_buffer/ { print $2 } ' /proc/vmallocinfo
+}
+
+# sizes_unknown_after <before> <after>
+# Prints each size in <after> with no match in <before>, one per line.
+# Exit 0 when at least one is unknown, 1 when every after-size is accounted.
+sizes_unknown_after() {
+	awk '
+		NR == FNR { seen[$1] = 1; next }
+		!($1 in seen) { print $1; found = 1 }
+		END { exit(found ? 0 : 1) }
+	' "$1" "$2"
+}
+
+# hold_ready_maps <path>
+# Prints the maps= count from this path's MMAP_HOLD READY line, or nothing.
+# The path is compared as a whole field, never as a regex: a sysfs path is
+# not a pattern.
+hold_ready_maps() {
+	awk -v p="$1" '
+		$1 == "MMAP_HOLD" {
+			path = ""; maps = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^path=/) path = substr($i, 6)
+				if ($i ~ /^maps=/) maps = substr($i, 6)
+			}
+			if (path == p && maps != "") last = maps
+		}
+		END { if (last != "") print last }
+	' "$LOG"
+}
+
 say "=== BEGIN vmbus-lifecycle-drill cycles=$CYCLES ==="
 say "kernel=$(uname -r)  cmdline=$(cat /proc/cmdline 2>/dev/null | tr -d '\n')"
 say "symbols: $(grep -cE 'vmbus_(alloc|free|release)_buffer' /proc/kallsyms 2>/dev/null || echo 0) present"
@@ -88,6 +153,8 @@ say "--- BEFORE ---"
 say "devices=$(ls /sys/bus/vmbus/devices 2>/dev/null | wc -l)"
 BASE_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
 say "$BASE_MAPS"
+: >"$LOG.sizes-base"
+vmbus_map_sizes >>"$LOG.sizes-base" 2>/dev/null || true
 dmesg 2>/dev/null | tail -5 >>"$LOG"
 
 # --- synthetic NIC rebind setup ---------------------------------------------
@@ -268,13 +335,14 @@ while [ "$PRE_UIO_TRIES" -le "$PRE_UIO_BUDGET_S" ]; do
 	sleep 1
 done
 if [ "$PRE_UIO_RUN" -lt "$PRE_UIO_STABLE" ]; then
-	say "LIFECYCLE_VERDICT=PARTIAL pre-UIO tuple did not settle"
+	LIFE=PARTIAL
+	CLEANUP_VERDICT=PARTIAL
+	CLEANUP_WHY="pre-UIO tuple did not settle (instant='$PRE_UIO_INSTANT' last='$PRE_UIO_MAPS' run=$PRE_UIO_RUN)"
+	RESTORE_VERDICT=PARTIAL
+	RESTORE_WHY="the expected end tuple is unreadable while the unbind is still freeing"
 	say "  instant='$PRE_UIO_INSTANT'"
 	say "  last='$PRE_UIO_MAPS' run=$PRE_UIO_RUN"
-	say "  the expected end tuple is unreadable while the unbind is still freeing"
-	say "=== END vmbus-lifecycle-drill ==="
-	say "log=$LOG"
-	exit 3
+	emit_verdicts_and_exit 3
 fi
 say "PRE_UIO $PRE_UIO_MAPS"
 # new_id's driver_attach() is what binds the device; no separate bind.
@@ -292,14 +360,28 @@ done
 # CONCURRENTLY with the teardown. Running it in the foreground mapped, held,
 # released, and only then let restore_nic run -- the mapping was already gone
 # when the ring was freed, so the BUG-3 window was never open and a green run
-# proved nothing about mmap-versus-release. Background it, give it a second to
-# place the mappings, then tear down underneath them.
+# proved nothing about mmap-versus-release.
+#
+# Two surfaces, two helpers, two verdicts. A sysfs ring map that never opened
+# is not cured by a UIO map that did, and the reverse. Each helper publishes
+# its own READY line (MMAP_HOLD path=... maps=N) after the maps exist and
+# before the hold sleep, and its RELEASE line (MMAP_HOLD released maps=N)
+# after munmap. Those are the barriers. A blind sleep is not: it scores a
+# closed window as open whenever the helper is slower than the nap.
+HOLD_PID_UIO=""
+HOLD_PID_RING=""
+UIO_MAPS_HELD=0
+RING_MAPS_HELD=0
+UIO_HOLD_STATUS=absent
+RING_HOLD_STATUS=absent
+
 if [ -n "$UIO_DEV" ] && [ -e "$UIO_DEV" ] && [ -n "$HELPER" ]; then
 	say "PHASE2 mmap all maps of $UIO_DEV (held across teardown)"
 	# UIO map N lives at offset N * pagesize. 8 maps of 4 KiB covers every
 	# map the driver advertises.
 	"$HELPER" mmap-hold "$UIO_DEV" 4096 8 8 >>"$LOG" 2>&1 &
-	HOLD_PIDS="$HOLD_PIDS $!"
+	HOLD_PID_UIO=$!
+	HOLD_PIDS="$HOLD_PIDS $HOLD_PID_UIO"
 else
 	say "PHASE2 no UIO device or no vmbus_drill_helper; skipping UIO mmap"
 	say "PHASE2 note UIO hold-in-mmap did NOT run"
@@ -319,7 +401,8 @@ if [ -n "$RING" ]; then
 		# driver.
 		say "PHASE2 ring mmap 2097152 bytes = SZ_2M subchannel ring (held across teardown)"
 		"$HELPER" mmap-hold "$RING" 2097152 8 1 >>"$LOG" 2>&1 &
-		HOLD_PIDS="$HOLD_PIDS $!"
+		HOLD_PID_RING=$!
+		HOLD_PIDS="$HOLD_PIDS $HOLD_PID_RING"
 	else
 		say "PHASE2 no vmbus_drill_helper; skipping ring mmap"
 	fi
@@ -327,8 +410,56 @@ else
 	say "PHASE2 no sysfs ring found"
 fi
 
-# Give the helpers time to open their mappings before the teardown races them.
-sleep 2
+# READY barrier. Wait for each launched helper to publish its own line. The
+# budget is bounded because a helper that never publishes is not readiness,
+# it is a hang -- and tearing down underneath a hold that never opened scores
+# a closed window as open. maps=0 is a published failure, not a slow helper.
+READY_BUDGET_S=10
+READY_TRIES=0
+READY_UIO_PUBLISHED=no
+READY_RING_PUBLISHED=no
+while [ "$READY_TRIES" -le "$READY_BUDGET_S" ]; do
+	if [ "$READY_UIO_PUBLISHED" = no ] && [ -n "$HOLD_PID_UIO" ]; then
+		_r="$(hold_ready_maps "$UIO_DEV" || true)"
+		if [ -n "$_r" ]; then
+			UIO_MAPS_HELD=$_r
+			READY_UIO_PUBLISHED=yes
+			say "READY UIO path=$UIO_DEV maps=$_r"
+		fi
+	fi
+	if [ "$READY_RING_PUBLISHED" = no ] && [ -n "$HOLD_PID_RING" ]; then
+		_r="$(hold_ready_maps "$RING" || true)"
+		if [ -n "$_r" ]; then
+			RING_MAPS_HELD=$_r
+			READY_RING_PUBLISHED=yes
+			say "READY SYSFS path=$RING maps=$_r"
+		fi
+	fi
+	# Every launched helper has published, or was never launched. No outer
+	# "someone published" guard: with no helper at all this must break at
+	# once rather than spend the whole READY budget spinning.
+	if { [ -z "$HOLD_PID_UIO" ] || [ "$READY_UIO_PUBLISHED" = yes ]; } &&
+		{ [ -z "$HOLD_PID_RING" ] || [ "$READY_RING_PUBLISHED" = yes ]; }; then
+		break
+	fi
+	READY_TRIES=$((READY_TRIES + 1))
+	if [ "$READY_TRIES" -gt "$READY_BUDGET_S" ]; then
+		break
+	fi
+	sleep 1
+done
+if [ -n "$HOLD_PID_UIO" ] && [ "$READY_UIO_PUBLISHED" = no ]; then
+	say "READY UIO timeout after ${READY_BUDGET_S}s (helper published no MMAP_HOLD line)"
+fi
+if [ -n "$HOLD_PID_RING" ] && [ "$READY_RING_PUBLISHED" = no ]; then
+	say "READY SYSFS timeout after ${READY_BUDGET_S}s (helper published no MMAP_HOLD line)"
+fi
+
+# Snapshot the sizes the teardown is allowed to leave behind, before it runs.
+# This is the owner ledger: anything present afterwards that is not in this
+# set is a retention no prior state accounts for.
+: >"$LOG.sizes-before"
+vmbus_map_sizes >>"$LOG.sizes-before" 2>/dev/null || true
 
 say "=== PHASE 2 teardown while maps held (BUG-3 window) ==="
 PHASE2_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
@@ -336,21 +467,34 @@ say "PHASE2-BEFORE-TEARDOWN $PHASE2_MAPS"
 restore_nic
 say "PHASE2-AFTER-TEARDOWN $(vmbus_maps || echo 'MAPS unavailable')"
 
-# Collect the hold results. A mapping that was alive when restore_nic freed
-# the ring is the BUG-3 window; maps=0 means it never opened. The MMAP_HOLD
-# lines go to the console so the uploaded artifact carries the numbers (and
-# the errno when a mmap fails).
+# Collect the hold results with their real exit status. mmap-hold returns 0
+# when at least one map was held and 1 when none were: swallowing that turns
+# a failed mapping into a quiet skip and the run scores green on an exercise
+# that never ran. The MMAP_HOLD lines go to the console so the uploaded
+# artifact carries the numbers (and the errno when a mmap fails).
+if [ -n "$HOLD_PID_UIO" ]; then
+	if wait "$HOLD_PID_UIO"; then
+		UIO_HOLD_STATUS=ok
+	else
+		UIO_HOLD_STATUS=failed
+	fi
+	say "HOLD UIO status=$UIO_HOLD_STATUS maps=$UIO_MAPS_HELD"
+fi
+if [ -n "$HOLD_PID_RING" ]; then
+	if wait "$HOLD_PID_RING"; then
+		RING_HOLD_STATUS=ok
+	else
+		RING_HOLD_STATUS=failed
+	fi
+	say "HOLD SYSFS status=$RING_HOLD_STATUS maps=$RING_MAPS_HELD"
+fi
 for p in $HOLD_PIDS; do
 	wait "$p" 2>/dev/null || true
 done
 say "--- MMAP_HOLD evidence ---"
 grep 'MMAP_HOLD\|HELPER mmap\|HELPER open' "$LOG" | tee -a "$LOG" || true
-if grep -qE 'MMAP_HOLD path=.* maps=[1-9]' "$LOG"; then
-	PHASE2_RAN=yes
-	say "PHASE2 hold-in-mmap window OPEN (mapping alive across restore_nic)"
-else
-	say "PHASE2 hold-in-mmap window did NOT open (no mapping succeeded)"
-fi
+RELEASED_LINES="$(grep -c 'MMAP_HOLD released' "$LOG" 2>/dev/null || echo 0)"
+say "RELEASE acks=$RELEASED_LINES (one per helper that reached munmap)"
 
 # --- phase 3: reconciliation -------------------------------------------------
 say "=== PHASE 3: reconciliation ==="
@@ -481,14 +625,15 @@ tuple_within_end_band() {
 BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
 PRE_TUPLE="$(maps_tuple "${PRE_UIO_MAPS:-}")" || PRE_TUPLE=""
 if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
-	say "LIFECYCLE_VERDICT=PARTIAL map accounting unavailable"
+	LIFE=PARTIAL
+	CLEANUP_VERDICT=PARTIAL
+	CLEANUP_WHY="map accounting unavailable, release unprovable"
+	RESTORE_VERDICT=PARTIAL
+	RESTORE_WHY="a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
 	say "  baseline='$BASE_MAPS'"
 	say "  pre_uio='${PRE_UIO_MAPS:-}'"
 	say "  final='$FINAL_MAPS'"
-	say "  a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
-	say "=== END vmbus-lifecycle-drill ==="
-	say "log=$LOG"
-	exit 3
+	emit_verdicts_and_exit 3
 fi
 # The unbind may only remove maps. A settled PRE_UIO above the boot baseline
 # means the unbind itself grew the accounting, and scoring the end against it
@@ -501,13 +646,15 @@ BASE_N=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $1}')
 BASE_B=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $2}')
 if [ -n "$PRE_N" ] && [ -n "$BASE_N" ]; then
 	if [ "$PRE_N" -gt "$BASE_N" ] || [ "$PRE_B" -gt "$BASE_B" ]; then
-		say "LIFECYCLE_VERDICT=FAIL pre-UIO tuple exceeds the boot baseline"
+		LIFE=FAIL
+		CLEANUP_VERDICT=FAIL
+		CLEANUP_WHY="the unbind grew the accounting (baseline=$BASE_TUPLE pre_uio=$PRE_TUPLE); not a reachable end state"
+		RESTORE_VERDICT=FAIL
+		RESTORE_WHY="pre-UIO tuple exceeds the boot baseline"
 		say "  baseline=$BASE_TUPLE"
 		say "  pre_uio=$PRE_TUPLE"
 		say "  the unbind grew the accounting; that is not a reachable end state"
-		say "=== END vmbus-lifecycle-drill ==="
-		say "log=$LOG"
-		exit 1
+		emit_verdicts_and_exit 1
 	fi
 fi
 if [ "${REBIND_OK:-no}" = yes ]; then
@@ -557,17 +704,21 @@ while [ "$SETTLE_TRIES" -le "$SETTLE_BUDGET_S" ]; do
 done
 SETTLE_MAPS="${SETTLE_NOW:-$FINAL_MAPS}"
 
-# Scoring. A green exit means the exercise actually ran and reconciled:
-#   - every bind/unbind step succeeded, and
-#   - at least one mapping was alive while restore_nic freed the ring
-#     (MMAP_HOLD ... maps>0 observed before teardown returned), so the
-#     BUG-3 window was open rather than merely prepared, and
-#   - the vmbus_alloc_buffer map accounting landed in the band this run
-#     is supposed to end on (exactly the boot baseline when hv_netvsc
-#     rebound; the settled pre-UIO tuple plus a bounded ring-retention
-#     set when the known hv_uio_remove gap kept it from rebinding), so
-#     100 cycles and the held teardown left no unexplained growth and
-#     freed nothing PHASE 2 still owned.
+# Scoring. Four independent verdicts and one aggregate that is explicitly a
+# conjunction of them. The aggregate never folds a skipped surface into a
+# green line, and never lets one mapping path's success stand in for the
+# other's.
+#
+#   CLEANUP_VERDICT    bind/unbind steps succeeded and the teardown released
+#                      something (the hold dropped its buffers)
+#   MAP_UIO_VERDICT    the /dev/uioN character-device maps were established,
+#                      held across restore_nic and released
+#   MAP_SYSFS_VERDICT  the channel "ring" sysfs maps were established, held
+#                      across restore_nic and released
+#   RESTORE_VERDICT    the end tuple is in the band for this rebind outcome,
+#                      and every retained map size is one a prior state
+#                      already accounted for
+#
 # Reporting success after a silent skip -- or after a mapping that was
 # already released -- is how a broken dynid registration looked green for
 # thirty cycles and how a closed window looked like a hold-in-mmap pass.
@@ -582,37 +733,21 @@ SETTLE_MAPS="${SETTLE_NOW:-$FINAL_MAPS}"
 # that disclosure as a leak makes the gate unreachable for the opposite
 # reason. The ring-retention budget separates the two: it is sized to the
 # ~2 MiB ring class and is blown on its own by one ~12 MiB UIO buffer.
-if [ "${CYCLE_FAILS:-0}" -gt 0 ]; then
-	say "LIFECYCLE_VERDICT=FAIL cycle_fails=$CYCLE_FAILS"
-	say "=== END vmbus-lifecycle-drill ==="
-	say "log=$LOG"
-	exit 1
-fi
-if [ "${PHASE2_RAN:-no}" != yes ]; then
-	say "LIFECYCLE_VERDICT=FAIL no mapping survived into the teardown (BUG-3 window not open)"
-	say "=== END vmbus-lifecycle-drill ==="
-	say "log=$LOG"
-	exit 1
-fi
+#
+# The budget is not the whole test. A retention can sit inside it and still
+# have no owner this run can name -- a synthetic 64 KiB area is well under
+# the 8 MiB ceiling and is not a ring the probe re-established. Such a
+# retention is unknown_owner_inside_retention_budget_is_not_complete_pass:
+# it is a FAIL even though the aggregate numbers look balanced. Size is the
+# only owner attribution /proc/vmallocinfo offers here (every area is
+# attributed to vmbus_alloc_buffer), so the claim this scorer makes is
+# narrowed to size classes, and it says so.
 
 FINAL_TUPLE="$(maps_tuple "$FINAL_MAPS")" || FINAL_TUPLE=""
 SETTLE_TUPLE="$(maps_tuple "$SETTLE_MAPS")" || SETTLE_TUPLE=""
-if [ -z "$SETTLE_TUPLE" ]; then
-	say "LIFECYCLE_VERDICT=PARTIAL map accounting unavailable"
-	say "  baseline='$BASE_MAPS'"
-	say "  pre_uio='${PRE_UIO_MAPS:-}'"
-	say "  final='$FINAL_MAPS'"
-	say "  settle='$SETTLE_MAPS'"
-	say "  absent map accounting is unqualified, not balanced"
-	say "=== END vmbus-lifecycle-drill ==="
-	say "log=$LOG"
-	exit 3
-fi
-# The settled tuple is the verdict input. The immediate FINAL tuple is
-# reported alongside it so a run that reconciled only after the reclaim
-# worker woke stays distinguishable from one that reconciled at once.
 PRE_INSTANT_TUPLE="$(maps_tuple "${PRE_UIO_INSTANT:-}")" || PRE_INSTANT_TUPLE="${PRE_UIO_INSTANT:-}"
 PHASE2_TUPLE="$(maps_tuple "${PHASE2_MAPS:-}")" || PHASE2_TUPLE=""
+
 # gap_retained is what the end state holds above the settled pre-UIO tuple.
 # With rebind=no that is the ring set the UIO probe re-establishes and the
 # hv_uio_remove gap retains, and it must sit inside the ring-retention
@@ -627,6 +762,22 @@ if [ -n "$SETTLE_TUPLE" ] && [ -n "$PRE_TUPLE" ]; then
 	GAP_B=$(($(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $2+0}') - $(printf '%s\n' "$PRE_TUPLE" | awk '{print $2+0}')))
 	GAP_P=$(($(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $3+0}') - $(printf '%s\n' "$PRE_TUPLE" | awk '{print $3+0}')))
 fi
+
+# Owner ledger. Anything the end holds whose size no prior state showed is a
+# retention this run cannot attribute.
+: >"$LOG.sizes-after"
+vmbus_map_sizes >>"$LOG.sizes-after" 2>/dev/null || true
+UNKNOWN_SIZES=""
+if [ -s "$LOG.sizes-before" ]; then
+	cat "$LOG.sizes-base" "$LOG.sizes-before" 2>/dev/null | sort -n -u >"$LOG.sizes-known" || true
+	if [ -s "$LOG.sizes-after" ] && [ -s "$LOG.sizes-known" ]; then
+		UNKNOWN_SIZES="$(sizes_unknown_after "$LOG.sizes-known" "$LOG.sizes-after" || true)"
+	fi
+elif [ -s "$LOG.sizes-after" ]; then
+	# No prior ledger: the retention cannot be attributed to anything.
+	UNKNOWN_SIZES="$(sort -n -u "$LOG.sizes-after")"
+fi
+
 say "  baseline=$BASE_TUPLE"
 say "  pre_uio=$PRE_TUPLE"
 say "  pre_uio_instant=$PRE_INSTANT_TUPLE"
@@ -636,30 +787,105 @@ say "  settle=$SETTLE_TUPLE tries=$SETTLE_TRIES"
 say "  expected=$EXPECT_TUPLE source=$EXPECT_SRC"
 say "  gap_retained=$GAP_N/$GAP_B/$GAP_P budget=$GAP_RING_BUDGET_N/$GAP_RING_BUDGET_B/$GAP_RING_BUDGET_P"
 say "  rebind=${REBIND_OK:-no}"
-if ! BAND_WHY="$(tuple_within_end_band "$SETTLE_TUPLE" "$PRE_TUPLE" "$BASE_TUPLE" "${REBIND_OK:-no}")"; then
-	say "LIFECYCLE_VERDICT=FAIL map accounting outside the expected band: ${BAND_WHY:-unknown}"
-	say "=== END vmbus-lifecycle-drill ==="
-	say "log=$LOG"
-	exit 1
+if [ -n "$UNKNOWN_SIZES" ]; then
+	say "  unidentified_retained_sizes: $(printf '%s' "$UNKNOWN_SIZES" | tr '\n' ' ')"
+else
+	say "  unidentified_retained_sizes: none"
 fi
-# PHASE 2 must have released something. A settle equal to the pre-teardown
-# tuple means UIO's own buffers never went anywhere: the hold released
-# nothing, which is an accounting that cannot be reconciled and must not
-# score as balanced.
-if [ -n "$PHASE2_TUPLE" ] && [ -n "$SETTLE_TUPLE" ]; then
+
+# --- CLEANUP_VERDICT --------------------------------------------------------
+CLEANUP_VERDICT=PASS
+CLEANUP_WHY="steps ok, teardown released"
+if [ "${CYCLE_FAILS:-0}" -gt 0 ]; then
+	CLEANUP_VERDICT=FAIL
+	CLEANUP_WHY="cycle_fails=$CYCLE_FAILS"
+elif [ -n "$PHASE2_TUPLE" ] && [ -n "$SETTLE_TUPLE" ]; then
 	PH2_N=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $1+0}')
 	PH2_B=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $2+0}')
 	ST_N=$(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $1+0}')
 	ST_B=$(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $2+0}')
 	if [ "$ST_N" -ge "$PH2_N" ] && [ "$ST_B" -ge "$PH2_B" ]; then
-		say "LIFECYCLE_VERDICT=FAIL teardown released nothing (phase2_before=$PHASE2_TUPLE settle=$SETTLE_TUPLE)"
-		say "=== END vmbus-lifecycle-drill ==="
-		say "log=$LOG"
-		exit 1
+		CLEANUP_VERDICT=FAIL
+		CLEANUP_WHY="teardown released nothing (phase2_before=$PHASE2_TUPLE settle=$SETTLE_TUPLE)"
+	fi
+elif [ -z "$SETTLE_TUPLE" ]; then
+	CLEANUP_VERDICT=PARTIAL
+	CLEANUP_WHY="map accounting unavailable, release unprovable"
+fi
+
+# --- MAP_UIO_VERDICT / MAP_SYSFS_VERDICT ------------------------------------
+# Independent by construction: each surface has its own helper, its own READY
+# ack and its own exit status. One path's success is not the other's.
+MAP_UIO_VERDICT=SKIP
+MAP_UIO_WHY="surface not launched"
+if [ -n "$HOLD_PID_UIO" ]; then
+	if [ "$UIO_HOLD_STATUS" != ok ]; then
+		MAP_UIO_VERDICT=FAIL
+		MAP_UIO_WHY="helper status=$UIO_HOLD_STATUS (mmap-hold returns 1 when no map was held)"
+	elif [ "${UIO_MAPS_HELD:-0}" -eq 0 ]; then
+		MAP_UIO_VERDICT=FAIL
+		MAP_UIO_WHY="published maps=0 (opened nothing)"
+	elif [ "$READY_UIO_PUBLISHED" != yes ]; then
+		MAP_UIO_VERDICT=FAIL
+		MAP_UIO_WHY="no READY ack within ${READY_BUDGET_S}s"
+	else
+		MAP_UIO_VERDICT=PASS
+		MAP_UIO_WHY="maps=$UIO_MAPS_HELD held across teardown, status=$UIO_HOLD_STATUS"
 	fi
 fi
 
-say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN maps=($SETTLE_TUPLE) gap_retained=($GAP_N/$GAP_B/$GAP_P) settle_tries=$SETTLE_TRIES rebind=${REBIND_OK:-no}"
-say "=== END vmbus-lifecycle-drill ==="
-say "log=$LOG"
-exit 0
+MAP_SYSFS_VERDICT=SKIP
+MAP_SYSFS_WHY="surface not launched"
+if [ -n "$HOLD_PID_RING" ]; then
+	if [ "$RING_HOLD_STATUS" != ok ]; then
+		MAP_SYSFS_VERDICT=FAIL
+		MAP_SYSFS_WHY="helper status=$RING_HOLD_STATUS (mmap-hold returns 1 when no map was held)"
+	elif [ "${RING_MAPS_HELD:-0}" -eq 0 ]; then
+		MAP_SYSFS_VERDICT=FAIL
+		MAP_SYSFS_WHY="published maps=0 (opened nothing)"
+	elif [ "$READY_RING_PUBLISHED" != yes ]; then
+		MAP_SYSFS_VERDICT=FAIL
+		MAP_SYSFS_WHY="no READY ack within ${READY_BUDGET_S}s"
+	else
+		MAP_SYSFS_VERDICT=PASS
+		MAP_SYSFS_WHY="maps=$RING_MAPS_HELD held across teardown, status=$RING_HOLD_STATUS"
+	fi
+fi
+
+# --- RESTORE_VERDICT --------------------------------------------------------
+RESTORE_VERDICT=PASS
+RESTORE_WHY="end tuple in band, retained sizes identified"
+if [ -z "$SETTLE_TUPLE" ]; then
+	RESTORE_VERDICT=PARTIAL
+	RESTORE_WHY="map accounting unavailable"
+elif ! BAND_WHY="$(tuple_within_end_band "$SETTLE_TUPLE" "$PRE_TUPLE" "$BASE_TUPLE" "${REBIND_OK:-no}")"; then
+	RESTORE_VERDICT=FAIL
+	RESTORE_WHY="outside the expected band: ${BAND_WHY:-unknown}"
+elif [ -n "$UNKNOWN_SIZES" ]; then
+	RESTORE_VERDICT=FAIL
+	RESTORE_WHY="unknown_owner_inside_retention_budget_is_not_complete_pass: retained sizes no prior state accounted for"
+fi
+
+# --- aggregate --------------------------------------------------------------
+# PASS requires every verdict to be PASS. A skipped or partial surface makes
+# the aggregate PARTIAL, never PASS: a green line that silently omitted a
+# mapping path is the exact failure this scorer exists to refuse.
+LIFE=PASS
+LIFE_CODE=0
+for _v in "$CLEANUP_VERDICT" "$MAP_UIO_VERDICT" "$MAP_SYSFS_VERDICT" "$RESTORE_VERDICT"; do
+	case "$_v" in
+	FAIL)
+		LIFE=FAIL
+		LIFE_CODE=1
+		break
+		;;
+	SKIP | PARTIAL)
+		if [ "$LIFE" = PASS ]; then
+			LIFE=PARTIAL
+			LIFE_CODE=3
+		fi
+		;;
+	esac
+done
+
+emit_verdicts_and_exit "$LIFE_CODE"
