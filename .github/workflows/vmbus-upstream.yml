@@ -85,6 +85,8 @@ jobs:
           CONFIG_HYPERV_VMBUS=y
           CONFIG_UIO=y
           CONFIG_UIO_HV_GENERIC=y
+          CONFIG_HYPERV_VMBUS_KUNIT_TEST=y
+          CONFIG_UIO_HV_GENERIC_KUNIT_TEST=y
           EOF
           cp "$RUNNER_TEMP/wsl-kunitconfig" \
             vmbus-wsl-artifacts/config-kunit-requested
@@ -93,13 +95,13 @@ jobs:
             vmbus_vmalloc_mapping_ref_defers_free_test \
             vmbus_reclaim_busy_ref_defers_free_test \
             vmbus_buffer_cleanup_repeated_test; do
-            grep -q "KUNIT_CASE($case_name)" drivers/hv/channel.c
+            grep -q "KUNIT_CASE($case_name)" drivers/hv/vmbus_buffer_test.c
           done
           for case_name in \
             hv_uio_mmap_validate_test \
             hv_uio_ring_mmap_page_range_test \
             hv_uio_mmap_page_protection_test; do
-            grep -q "KUNIT_CASE($case_name)" drivers/uio/uio_hv_generic.c
+            grep -q "KUNIT_CASE($case_name)" drivers/uio/uio_hv_generic_mmap_test.c
           done
           python3 tools/testing/kunit/kunit.py run \
             --build_dir="$GITHUB_WORKSPACE/wsl-kunit-out" \
