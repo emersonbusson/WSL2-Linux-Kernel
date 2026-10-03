@@ -30,11 +30,11 @@ be able to name which policy applies to the buffer it is allocating.
 This patch adds a bool confidential argument for that.
 
 That argument temporarily widens an exported prototype: it is present
-from 1/9 through 5/9. 6/9 moves it onto the new
-vmbus_alloc_buffer_owned() and restores vmbus_alloc_buffer() to the
-four-argument form mainline has now, so the merged tree keeps the
-existing external surface unchanged. Read this patch together with
-6/9 for the final shape.
+from 1/13 through 8/13. 8/13 adds vmbus_alloc_buffer_owned() beside
+it, and 9/13 folds the argument into that entry point and restores
+vmbus_alloc_buffer() to the four-argument form mainline has now, so
+the merged tree keeps the existing external surface unchanged. Read
+this patch together with 9/13 for the final shape.
 
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>

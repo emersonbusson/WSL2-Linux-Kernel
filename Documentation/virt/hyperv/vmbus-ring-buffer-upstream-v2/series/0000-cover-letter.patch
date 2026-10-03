@@ -213,15 +213,15 @@ What changed
   the bytes being posted; a trivial split is available if the netvsc
   maintainers prefer it standalone.
 
-Patch granularity is deliberate. 8/13 is the largest at 894 changed
-lines across six files (772 insertions, 122 deletions) and it adds
+Patch granularity is deliberate. 8/13 is the largest at 892 changed
+lines across six files (772 insertions, 120 deletions) and it adds
 five KUnit cases. It is one patch because it is one lifecycle: the
 owner record, the three encryption facts, the reclaim scheduling and
 the workqueue teardown are one state machine. Splitting it would
 produce intermediate revisions in which a buffer can be freed with
 an unproven encryption state, or a module unload can strand an armed
 reclaim timer against a destroyed workqueue. The other twelve patches
-are 16 to 493 lines each.
+are 14 to 491 lines each.
 
 Mapping to the 2026-09-22 review
 --------------------------------
