@@ -136,12 +136,37 @@ else
 fi
 DRIVER_DIR="/sys/bus/vmbus/drivers"
 
+# REBIND_OK records whether restore_nic actually got hv_netvsc back on the
+# device. It is a scoring input, not a nicety: after the BUG-3 hold the
+# channel is still CHANNEL_OPENED_STATE because hv_uio_remove() never calls
+# vmbus_disconnect_ring() -- identical in mainline base 93f51579e7df -- and
+# the rebind then fails with -22. When that happens the NIC's own ring maps
+# left with this phase's own unbind and cannot come back, so the end-of-run
+# map tuple cannot return to the boot baseline and must not be scored as if
+# it should.
+REBIND_OK=no
+
 restore_nic() {
 	say "RESTORE begin"
 	echo "$NIC" >"$DRIVER_DIR/uio_hv_generic/unbind" 2>>"$LOG" || true
 	echo "$CLS" >"$DRIVER_DIR/uio_hv_generic/remove_id" 2>>"$LOG" || true
 	echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG" || true
-	say "RESTORE driver=$(readlink -f "/sys/bus/vmbus/devices/$NIC/driver" 2>/dev/null || echo none)"
+	# readlink -f on the driver symlink resolves to .../drivers/hv_netvsc on
+	# a successful bind. On failure the symlink is absent and readlink still
+	# prints the unresolved .../device/driver path, which is the
+	# rebind-failure signature.
+	RESTORE_DRIVER="$(readlink -f "/sys/bus/vmbus/devices/$NIC/driver" 2>/dev/null || echo none)"
+	say "RESTORE driver=$RESTORE_DRIVER"
+	case "$RESTORE_DRIVER" in
+	*/drivers/hv_netvsc)
+		REBIND_OK=yes
+		say "RESTORE rebind=yes"
+		;;
+	*)
+		REBIND_OK=no
+		say "RESTORE rebind=no (hv_netvsc did not rebind; open channel is the known hv_uio_remove gap)"
+		;;
+	esac
 }
 
 # The BUG-3 holds run in the background so their mappings are alive while
@@ -202,6 +227,12 @@ say "PHASE1-AFTER $(vmbus_maps || echo 'MAPS unavailable')"
 # --- phase 2: UIO mmap + hold-in-mmap (BUG-3 candidate repro) ---------------
 say "=== PHASE 2: UIO mmap + hold-in-mmap ==="
 echo "$NIC" >"$DRIVER_DIR/hv_netvsc/unbind" 2>>"$LOG" || true
+# Sampled after the production NIC has been taken down and before UIO is
+# bound. This is the state PHASE 2 itself starts from: the NIC's ring maps
+# are already gone, and every map present at the end has to be explained
+# against this tuple rather than against the boot baseline.
+PRE_UIO_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
+say "PRE_UIO $PRE_UIO_MAPS"
 # new_id's driver_attach() is what binds the device; no separate bind.
 echo "$CLS" >"$DRIVER_DIR/uio_hv_generic/new_id" 2>>"$LOG" || true
 sleep 1
@@ -311,34 +342,70 @@ maps_tuple() {
 	'
 }
 
+# Which tuple is the end of the run supposed to reach?
+#
+# PHASE 2 deliberately takes the production NIC down. restore_nic puts it
+# back only if hv_netvsc rebinds. After the BUG-3 hold it does not: the
+# channel is still CHANNEL_OPENED_STATE because hv_uio_remove() never calls
+# vmbus_disconnect_ring() -- identical in mainline base 93f51579e7df -- and
+# the probe then fails with -22. The NIC's own ring maps left with this
+# phase's own unbind and cannot come back, so the end tuple cannot equal the
+# boot baseline and a scorer that demands it is measuring the known restore
+# gap, not a leak.
+#
+#   rebind=yes  -> the run is closed: the end must be the boot baseline
+#   rebind=no   -> the NIC set is gone as a consequence of this phase's own
+#                  unbind; the end must be the pre-UIO tuple, i.e. every map
+#                  PHASE 2 created has been released and nothing else moved
+#
+# A settled tuple HIGHER than the expected one is growth: a leak. One LOWER
+# is an over-free: the accounting lost something PHASE 2 never released.
+# Both are FAIL. Only an exact match is PASS.
+BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
+PRE_TUPLE="$(maps_tuple "${PRE_UIO_MAPS:-}")" || PRE_TUPLE=""
+if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
+	say "LIFECYCLE_VERDICT=PARTIAL map accounting unavailable"
+	say "  baseline='$BASE_MAPS'"
+	say "  pre_uio='${PRE_UIO_MAPS:-}'"
+	say "  final='$FINAL_MAPS'"
+	say "  a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
+	say "=== END vmbus-lifecycle-drill ==="
+	say "log=$LOG"
+	exit 3
+fi
+if [ "${REBIND_OK:-no}" = yes ]; then
+	EXPECT_TUPLE="$BASE_TUPLE"
+	EXPECT_SRC="baseline (hv_netvsc rebound, run closed)"
+else
+	EXPECT_TUPLE="$PRE_TUPLE"
+	EXPECT_SRC="pre_uio (hv_netvsc did not rebound; its ring maps left with this phase's own unbind)"
+fi
+
 # Reclaim is asynchronous. vmbus_release_buffer() hands the buffer to
 # delayed work, and vmbus_buffer_unpin_pages() only drops the folio ref --
 # it does not wake the worker. The free can therefore land up to
 # VMBUS_BUFFER_RECLAIM_RETRY_MS (1000 ms) after the last pin drops, so a
 # tuple sampled in the same breath as wait() reports a healthy buffer that
-# is simply still queued as a leak. Poll until the tuple reaches baseline
-# or the settle budget expires. The budget is a few retry intervals, not an
-# unbounded wait: a tuple that still differs afterwards is a real
-# accounting failure and must stay a FAIL.
+# is simply still queued as a leak. Poll until the tuple reaches the
+# expected one or the settle budget expires. The budget is a few retry
+# intervals, not an unbounded wait: a tuple that still differs afterwards is
+# a real accounting failure and must stay a FAIL.
 SETTLE_BUDGET_S=5
 SETTLE_TRIES=0
 SETTLE_TUPLE=""
-BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
-if [ -n "$BASE_TUPLE" ]; then
-	while [ "$SETTLE_TRIES" -le "$SETTLE_BUDGET_S" ]; do
-		SETTLE_NOW="$(vmbus_maps || echo 'MAPS unavailable')"
-		SETTLE_TUPLE="$(maps_tuple "$SETTLE_NOW")" || SETTLE_TUPLE=""
-		say "SETTLE try=$SETTLE_TRIES $SETTLE_NOW"
-		if [ -n "$SETTLE_TUPLE" ] && [ "$SETTLE_TUPLE" = "$BASE_TUPLE" ]; then
-			break
-		fi
-		SETTLE_TRIES=$((SETTLE_TRIES + 1))
-		if [ "$SETTLE_TRIES" -gt "$SETTLE_BUDGET_S" ]; then
-			break
-		fi
-		sleep 1
-	done
-fi
+while [ "$SETTLE_TRIES" -le "$SETTLE_BUDGET_S" ]; do
+	SETTLE_NOW="$(vmbus_maps || echo 'MAPS unavailable')"
+	SETTLE_TUPLE="$(maps_tuple "$SETTLE_NOW")" || SETTLE_TUPLE=""
+	say "SETTLE try=$SETTLE_TRIES $SETTLE_NOW"
+	if [ -n "$SETTLE_TUPLE" ] && [ "$SETTLE_TUPLE" = "$EXPECT_TUPLE" ]; then
+		break
+	fi
+	SETTLE_TRIES=$((SETTLE_TRIES + 1))
+	if [ "$SETTLE_TRIES" -gt "$SETTLE_BUDGET_S" ]; then
+		break
+	fi
+	sleep 1
+done
 SETTLE_MAPS="${SETTLE_NOW:-$FINAL_MAPS}"
 
 # Scoring. A green exit means the exercise actually ran and reconciled:
@@ -346,15 +413,19 @@ SETTLE_MAPS="${SETTLE_NOW:-$FINAL_MAPS}"
 #   - at least one mapping was alive while restore_nic freed the ring
 #     (MMAP_HOLD ... maps>0 observed before teardown returned), so the
 #     BUG-3 window was open rather than merely prepared, and
-#   - the vmbus_alloc_buffer map accounting returned to its own baseline
-#     (count, bytes and pages) once the reclaim worker had drained, so 100
-#     cycles and the held teardown left no unexplained growth.
+#   - the vmbus_alloc_buffer map accounting reached exactly the tuple this
+#     run is supposed to end on (boot baseline when hv_netvsc rebound,
+#     the pre-UIO tuple when the known hv_uio_remove gap kept it from
+#     rebinding), so 100 cycles and the held teardown left no unexplained
+#     growth and freed nothing PHASE 2 still owned.
 # Reporting success after a silent skip -- or after a mapping that was
 # already released -- is how a broken dynid registration looked green for
 # thirty cycles and how a closed window looked like a hold-in-mmap pass.
-# Reporting success without comparing the two MAPS tuples is how a leak
-# looks like balanced accounting: the scorer printed both and checked
-# neither.
+# Reporting success without comparing the MAPS tuples is how a leak looks
+# like balanced accounting: the scorer printed both and checked neither.
+# Reporting failure because the tuple did not return to the *boot* baseline
+# is the opposite error: it scores the known rebind gap as if it were a
+# kernel defect, and a green run becomes unreachable on this guest.
 if [ "${CYCLE_FAILS:-0}" -gt 0 ]; then
 	say "LIFECYCLE_VERDICT=FAIL cycle_fails=$CYCLE_FAILS"
 	say "=== END vmbus-lifecycle-drill ==="
@@ -368,12 +439,12 @@ if [ "${PHASE2_RAN:-no}" != yes ]; then
 	exit 1
 fi
 
-BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
 FINAL_TUPLE="$(maps_tuple "$FINAL_MAPS")" || FINAL_TUPLE=""
 SETTLE_TUPLE="$(maps_tuple "$SETTLE_MAPS")" || SETTLE_TUPLE=""
-if [ -z "$BASE_TUPLE" ] || [ -z "$SETTLE_TUPLE" ]; then
+if [ -z "$SETTLE_TUPLE" ]; then
 	say "LIFECYCLE_VERDICT=PARTIAL map accounting unavailable"
 	say "  baseline='$BASE_MAPS'"
+	say "  pre_uio='${PRE_UIO_MAPS:-}'"
 	say "  final='$FINAL_MAPS'"
 	say "  settle='$SETTLE_MAPS'"
 	say "  absent map accounting is unqualified, not balanced"
@@ -384,19 +455,20 @@ fi
 # The settled tuple is the verdict input. The immediate FINAL tuple is
 # reported alongside it so a run that reconciled only after the reclaim
 # worker woke stays distinguishable from one that reconciled at once.
-if [ "$BASE_TUPLE" != "$SETTLE_TUPLE" ]; then
-	say "LIFECYCLE_VERDICT=FAIL map accounting did not return to baseline"
-	say "  baseline=$BASE_TUPLE"
-	say "  final=$FINAL_TUPLE"
-	say "  settle=$SETTLE_TUPLE tries=$SETTLE_TRIES"
+say "  baseline=$BASE_TUPLE"
+say "  pre_uio=$PRE_TUPLE"
+say "  final=$FINAL_TUPLE"
+say "  settle=$SETTLE_TUPLE tries=$SETTLE_TRIES"
+say "  expected=$EXPECT_TUPLE source=$EXPECT_SRC"
+say "  rebind=${REBIND_OK:-no}"
+if [ "$SETTLE_TUPLE" != "$EXPECT_TUPLE" ]; then
+	say "LIFECYCLE_VERDICT=FAIL map accounting did not reach the expected tuple"
 	say "=== END vmbus-lifecycle-drill ==="
 	say "log=$LOG"
 	exit 1
 fi
 
-say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN maps=($BASE_TUPLE) settle_tries=$SETTLE_TRIES"
-say "  final=$FINAL_TUPLE"
-say "  settle=$SETTLE_TUPLE"
+say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN maps=($EXPECT_TUPLE) settle_tries=$SETTLE_TRIES rebind=${REBIND_OK:-no}"
 say "=== END vmbus-lifecycle-drill ==="
 say "log=$LOG"
 exit 0

@@ -260,10 +260,11 @@ if [ "$VMBUS_PRESENT" = yes ] &&
 		SCOPE=lifecycle-pass-fragment-inconclusive
 	elif [ "$LIFECYCLE_STATUS" = 3 ]; then
 		# Lifecycle exited 3: the exercise ran but a required
-		# measurement was unavailable (map accounting unreadable), so
-		# the run is unqualified rather than failed. Never fold this
-		# into FAIL -- that would read as candidate damage -- and never
-		# into PASS -- absent data is not balanced data.
+		# measurement was unavailable (map accounting unreadable, or
+		# the pre-UIO tuple was not sampled), so the run is unqualified
+		# rather than failed. Never fold this into FAIL -- that would
+		# read as candidate damage -- and never into PASS -- absent
+		# data is not balanced data.
 		RESULT=PARTIAL
 		SCOPE=lifecycle-inconclusive
 	fi
