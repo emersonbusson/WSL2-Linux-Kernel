@@ -2,7 +2,7 @@
 # Guest-side VMBus GPADL/UIO lifecycle drill for the ring-buffer upstream v2 series.
 #
 # Runs INSIDE a disposable ordinary x86_64 Hyper-V guest that booted the exact
-# eight-patch candidate. It is never run on the daily WSL2 host: it rebinds the
+# thirteen-patch candidate. It is never run on the daily WSL2 host: it rebinds the
 # production synthetic NIC and unloads/reloads VMBus sub-drivers.
 #
 # Covers the named SPEC gates that hosted KUnit cannot:
@@ -278,7 +278,8 @@ fi
 
 # --- phase 3: reconciliation -------------------------------------------------
 say "=== PHASE 3: reconciliation ==="
-say "FINAL $(vmbus_maps || echo 'MAPS unavailable')"
+FINAL_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
+say "FINAL $FINAL_MAPS"
 say "BASELINE $BASE_MAPS"
 say "devices_final=$(ls /sys/bus/vmbus/devices 2>/dev/null | wc -l)"
 
@@ -289,14 +290,37 @@ else
 	say "FAULTS_NONE"
 fi
 
-# Scoring. A green exit means the exercise actually ran:
+# Extract "count bytes pages" from a vmbus_maps() line. Prints nothing and
+# returns 1 when the tuple is missing or is a placeholder. Absent measurement
+# is not a zero: treating "MAPS unavailable" as balanced is how an unread
+# /proc/vmallocinfo looks like a clean accounting pass.
+maps_tuple() {
+	printf '%s\n' "$1" | awk '
+		/^MAPS count=[0-9]+ bytes=[0-9]+ pages=[0-9]+$/ {
+			sub(/^MAPS count=/, "")
+			split($0, a, " bytes=")
+			n = a[1]
+			split(a[2], b, " pages=")
+			print n, b[1], b[2]
+			found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	'
+}
+
+# Scoring. A green exit means the exercise actually ran and reconciled:
 #   - every bind/unbind step succeeded, and
 #   - at least one mapping was alive while restore_nic freed the ring
 #     (MMAP_HOLD ... maps>0 observed before teardown returned), so the
-#     BUG-3 window was open rather than merely prepared.
+#     BUG-3 window was open rather than merely prepared, and
+#   - the vmbus_alloc_buffer map accounting returned to its own baseline
+#     (count, bytes and pages), so 100 cycles left no unexplained growth.
 # Reporting success after a silent skip -- or after a mapping that was
 # already released -- is how a broken dynid registration looked green for
 # thirty cycles and how a closed window looked like a hold-in-mmap pass.
+# Reporting success without comparing the two MAPS tuples is how a leak
+# looks like balanced accounting: the scorer printed both and checked
+# neither.
 if [ "${CYCLE_FAILS:-0}" -gt 0 ]; then
 	say "LIFECYCLE_VERDICT=FAIL cycle_fails=$CYCLE_FAILS"
 	say "=== END vmbus-lifecycle-drill ==="
@@ -310,7 +334,27 @@ if [ "${PHASE2_RAN:-no}" != yes ]; then
 	exit 1
 fi
 
-say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN"
+BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
+FINAL_TUPLE="$(maps_tuple "$FINAL_MAPS")" || FINAL_TUPLE=""
+if [ -z "$BASE_TUPLE" ] || [ -z "$FINAL_TUPLE" ]; then
+	say "LIFECYCLE_VERDICT=PARTIAL map accounting unavailable"
+	say "  baseline='$BASE_MAPS'"
+	say "  final='$FINAL_MAPS'"
+	say "  absent map accounting is unqualified, not balanced"
+	say "=== END vmbus-lifecycle-drill ==="
+	say "log=$LOG"
+	exit 3
+fi
+if [ "$BASE_TUPLE" != "$FINAL_TUPLE" ]; then
+	say "LIFECYCLE_VERDICT=FAIL map accounting did not return to baseline"
+	say "  baseline=$BASE_TUPLE"
+	say "  final=$FINAL_TUPLE"
+	say "=== END vmbus-lifecycle-drill ==="
+	say "log=$LOG"
+	exit 1
+fi
+
+say "LIFECYCLE_VERDICT=PASS cycles=$CYCLES phase2=$PHASE2_RAN maps=($BASE_TUPLE)"
 say "=== END vmbus-lifecycle-drill ==="
 say "log=$LOG"
 exit 0
