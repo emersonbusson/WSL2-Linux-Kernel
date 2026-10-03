@@ -26,7 +26,7 @@ a single order-2 block, the hv_netvsc rebind reaches
   sh: page allocation failure: order:2, ...
   Kernel panic - not syncing: System is deadlocked on memory
 
-Patch 7/9 removes the order-7 requestor array from that path. This
+Patch 11/13 removes the order-7 requestor array from that path. This
 removes the order-2 request descriptor, which is the last high-order
 allocation on the subchannel open path.
 
@@ -42,7 +42,7 @@ patch does.
 The request is a control-path descriptor copied into the VMBus ring and
 is never DMA-mapped from this allocation, so vmalloc backing carries no
 Confidential Computing implication -- the same reasoning as the
-kvcalloc() requestor array in 7/9. kvzalloc_obj() is the type-safe
+kvcalloc() requestor array in 11/13. kvzalloc_obj() is the type-safe
 counterpart of kzalloc_obj() that keeps the zeroing, and it tries the
 kmalloc path with __GFP_NORETRY|__GFP_NOWARN first, so it neither fails
 hard nor reaches the OOM killer when no compound page is available. The

@@ -12,11 +12,12 @@ helpers used by production.
 
 The cases join the existing ones in drivers/hv/vmbus_buffer_test.c,
 which is built into the hv_vmbus object. That keeps tests out of the
-production sources while still letting them drive vmbus_post_gpadl_
-messages(), vmbus_gpadl_response_status() and vmbus_post_gpadl_teardown().
-Those three are therefore not static, and their callback type is
-declared in hyperv_vmbus.h alongside the sizing helpers. Nothing
-outside hv_vmbus links against them, and no symbol is exported.
+production sources while still letting them drive
+vmbus_post_gpadl_messages(), vmbus_gpadl_response_status() and
+vmbus_post_gpadl_teardown(). Those three are therefore not static,
+and their callback type is declared in hyperv_vmbus.h alongside the
+sizing helpers. Nothing outside hv_vmbus links against them, and no
+symbol is exported.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
