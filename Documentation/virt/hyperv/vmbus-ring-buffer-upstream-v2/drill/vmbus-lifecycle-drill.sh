@@ -227,11 +227,55 @@ say "PHASE1-AFTER $(vmbus_maps || echo 'MAPS unavailable')"
 # --- phase 2: UIO mmap + hold-in-mmap (BUG-3 candidate repro) ---------------
 say "=== PHASE 2: UIO mmap + hold-in-mmap ==="
 echo "$NIC" >"$DRIVER_DIR/hv_netvsc/unbind" 2>>"$LOG" || true
-# Sampled after the production NIC has been taken down and before UIO is
-# bound. This is the state PHASE 2 itself starts from: the NIC's ring maps
-# are already gone, and every map present at the end has to be explained
-# against this tuple rather than against the boot baseline.
-PRE_UIO_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
+# The unbind releases the NIC's ring buffers through the owner reclaim path,
+# which is asynchronous: vmbus_release_buffer() schedules the free and
+# vmbus_buffer_unpin_pages() only drops the folio ref without waking the
+# worker, so a map can outlive the unbind write by one or more
+# VMBUS_BUFFER_RECLAIM_RETRY_MS intervals. Measured on run 37151705350: two
+# of the three netvsc ring maps were gone the instant unbind returned and the
+# third was still present, so a single sample reported 10 maps while the
+# settled end state correctly reported 9. Sampled that way PRE_UIO is a
+# transient inside the unbind's own teardown, not the state PHASE 2 starts
+# from, and scoring against it invents an over-free that never happened.
+# Settle first: hold the tuple unchanged across PRE_UIO_STABLE samples before
+# treating it as PRE_UIO. The instant reading is kept beside it so a run where
+# they differ still shows the drain.
+PRE_UIO_INSTANT="$(vmbus_maps || echo 'MAPS unavailable')"
+say "PRE_UIO_INSTANT $PRE_UIO_INSTANT"
+PRE_UIO_BUDGET_S=15
+PRE_UIO_STABLE=5
+PRE_UIO_TRIES=0
+PRE_UIO_MAPS=""
+PRE_UIO_LAST=""
+PRE_UIO_RUN=0
+while [ "$PRE_UIO_TRIES" -le "$PRE_UIO_BUDGET_S" ]; do
+	PRE_UIO_NOW="$(vmbus_maps || echo 'MAPS unavailable')"
+	PRE_UIO_MAPS="$PRE_UIO_NOW"
+	say "PRE_UIO_SETTLE try=$PRE_UIO_TRIES run=$PRE_UIO_RUN $PRE_UIO_NOW"
+	if [ -n "$PRE_UIO_LAST" ] && [ "$PRE_UIO_NOW" = "$PRE_UIO_LAST" ]; then
+		PRE_UIO_RUN=$((PRE_UIO_RUN + 1))
+	else
+		PRE_UIO_RUN=1
+	fi
+	PRE_UIO_LAST="$PRE_UIO_NOW"
+	if [ "$PRE_UIO_RUN" -ge "$PRE_UIO_STABLE" ]; then
+		break
+	fi
+	PRE_UIO_TRIES=$((PRE_UIO_TRIES + 1))
+	if [ "$PRE_UIO_TRIES" -gt "$PRE_UIO_BUDGET_S" ]; then
+		break
+	fi
+	sleep 1
+done
+if [ "$PRE_UIO_RUN" -lt "$PRE_UIO_STABLE" ]; then
+	say "LIFECYCLE_VERDICT=PARTIAL pre-UIO tuple did not settle"
+	say "  instant='$PRE_UIO_INSTANT'"
+	say "  last='$PRE_UIO_MAPS' run=$PRE_UIO_RUN"
+	say "  the expected end tuple is unreadable while the unbind is still freeing"
+	say "=== END vmbus-lifecycle-drill ==="
+	say "log=$LOG"
+	exit 3
+fi
 say "PRE_UIO $PRE_UIO_MAPS"
 # new_id's driver_attach() is what binds the device; no separate bind.
 echo "$CLS" >"$DRIVER_DIR/uio_hv_generic/new_id" 2>>"$LOG" || true
@@ -355,11 +399,14 @@ maps_tuple() {
 #
 #   rebind=yes  -> the run is closed: the end must be the boot baseline
 #   rebind=no   -> the NIC set is gone as a consequence of this phase's own
-#                  unbind; the end must be the pre-UIO tuple, i.e. every map
-#                  PHASE 2 created has been released and nothing else moved
+#                  unbind; the end must be the settled pre-UIO tuple, i.e.
+#                  every map PHASE 2 created has been released and nothing
+#                  else moved
 #
-# A settled tuple HIGHER than the expected one is growth: a leak. One LOWER
-# is an over-free: the accounting lost something PHASE 2 never released.
+# PRE_UIO here is the settled one, not the instant sample: the unbind frees
+# through the owner reclaim path and a map can still be queued when the write
+# returns. A settled tuple HIGHER than the expected one is growth: a leak. One
+# LOWER is an over-free: the accounting lost something PHASE 2 never released.
 # Both are FAIL. Only an exact match is PASS.
 BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
 PRE_TUPLE="$(maps_tuple "${PRE_UIO_MAPS:-}")" || PRE_TUPLE=""
@@ -372,6 +419,26 @@ if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
 	say "=== END vmbus-lifecycle-drill ==="
 	say "log=$LOG"
 	exit 3
+fi
+# The unbind may only remove maps. A settled PRE_UIO above the boot baseline
+# means the unbind itself grew the accounting, and scoring the end against it
+# would launder that growth in as the expected state. Count and bytes are
+# compared; pages can differ by guard-page accounting and is not a growth
+# signal on its own.
+PRE_N=$(printf '%s\n' "$PRE_TUPLE" | awk '{print $1}')
+PRE_B=$(printf '%s\n' "$PRE_TUPLE" | awk '{print $2}')
+BASE_N=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $1}')
+BASE_B=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $2}')
+if [ -n "$PRE_N" ] && [ -n "$BASE_N" ]; then
+	if [ "$PRE_N" -gt "$BASE_N" ] || [ "$PRE_B" -gt "$BASE_B" ]; then
+		say "LIFECYCLE_VERDICT=FAIL pre-UIO tuple exceeds the boot baseline"
+		say "  baseline=$BASE_TUPLE"
+		say "  pre_uio=$PRE_TUPLE"
+		say "  the unbind grew the accounting; that is not a reachable end state"
+		say "=== END vmbus-lifecycle-drill ==="
+		say "log=$LOG"
+		exit 1
+	fi
 fi
 if [ "${REBIND_OK:-no}" = yes ]; then
 	EXPECT_TUPLE="$BASE_TUPLE"
@@ -455,8 +522,10 @@ fi
 # The settled tuple is the verdict input. The immediate FINAL tuple is
 # reported alongside it so a run that reconciled only after the reclaim
 # worker woke stays distinguishable from one that reconciled at once.
+PRE_INSTANT_TUPLE="$(maps_tuple "${PRE_UIO_INSTANT:-}")" || PRE_INSTANT_TUPLE="${PRE_UIO_INSTANT:-}"
 say "  baseline=$BASE_TUPLE"
 say "  pre_uio=$PRE_TUPLE"
+say "  pre_uio_instant=$PRE_INSTANT_TUPLE"
 say "  final=$FINAL_TUPLE"
 say "  settle=$SETTLE_TUPLE tries=$SETTLE_TRIES"
 say "  expected=$EXPECT_TUPLE source=$EXPECT_SRC"
