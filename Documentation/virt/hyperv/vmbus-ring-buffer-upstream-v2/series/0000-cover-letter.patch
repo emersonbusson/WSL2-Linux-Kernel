@@ -213,6 +213,16 @@ What changed
   the bytes being posted; a trivial split is available if the netvsc
   maintainers prefer it standalone.
 
+Patch granularity is deliberate. 8/13 is the largest at 894 changed
+lines across six files (772 insertions, 122 deletions) and it adds
+five KUnit cases. It is one patch because it is one lifecycle: the
+owner record, the three encryption facts, the reclaim scheduling and
+the workqueue teardown are one state machine. Splitting it would
+produce intermediate revisions in which a buffer can be freed with
+an unproven encryption state, or a module unload can strand an armed
+reclaim timer against a destroyed workqueue. The other twelve patches
+are 16 to 493 lines each.
+
 Mapping to the 2026-09-22 review
 --------------------------------
 
@@ -245,15 +255,55 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-These thirteen patch files have not been measured yet. Every run
-named below was taken on the previous nine-patch revision of the
-same work, before the series was split and before the KUnit cases
-were moved out of channel.c and uio_hv_generic.c into
-drivers/hv/vmbus_buffer_test.c and
-drivers/uio/uio_hv_generic_mmap_test.c. The measurements are kept
-because they are real and because they describe the design these
-patches implement. They are not evidence about the bytes posted
-here.
+The build, checkpatch and KUnit leg for these thirteen bytes is
+run 37089084420; the Hyper-V runtime drill leg is run 37089084375.
+Both ran on fork commit 1f788edba152 against pinned mainline base
+93f51579e7df ("Linux 7.3-rc4"), with all thirteen series/SHA256SUMS
+entries verified before build. 37089084420 applied all thirteen
+stages on x86_64 and arm64, reported 0 ERROR / 0 WARNING from
+scripts/checkpatch.pl --strict --no-tree at every stage, passed W=1
+with Sparse clean on both arches, passed 24 of 24 named KUnit cases
+on x86_64 (hyperv-vmbus-buffer 16 subtests, hyperv-uio-mmap 4
+subtests, refcount_interrupt 4 subtests) and rejected all three CoCo
+gate self-test injections on both arches. Its wsl-backport job
+passed 15 of 15 named cases (hyperv-vmbus-gpadl-lifetime 12,
+hyperv-uio-hv-generic-mmap 3) on the same patch text. 37089084375
+booted the same bytes as a Gen2 guest on both hosted guests, and
+both legs printed HYPERV_DRILL_RESULT status=PASS with
+scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation and
+lifecycle=0 fragment=0 splats=0 faults=0. Each leg returned PHASE1 to
+its exact PHASE1-BEFORE map baseline (MAPS count=12 bytes=20279296
+pages=4939) after 100 hv_netvsc bind/unbind cycles with
+cycle_fails=0 over 400 steps, held the hold-in-mmap window across
+teardown (LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes), and drove
+high_order_7plus to zero with exhausted=1,
+high_order_7plus_blocks=0 (reread=0) and
+order7_dmesg=0 accept4_failures=0 oops=0.
+
+Both hosted guests print
+VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION in addition to the
+HYPERV_DRILL_RESULT line above. Neither leg reports PARTIAL and
+neither was starved. The verdict scope the drills themselves print
+remains ordinary-x86_64-vzalloc-path;
+co-co-chunked-fallback-not-exercised -- the CoCo gap this series
+discloses, not a drill defect.
+
+That 0/0 is the CI shape of the check: scripts/checkpatch.pl
+--strict --no-tree reading the cumulative git diff after each apply,
+which is what 37089084420 runs. Read as a mail patch instead, the two
+commits that add a test file (2/13 and 10/13) each print one
+FILE_PATH_CHANGES warning asking whether MAINTAINERS needs updating.
+No MAINTAINERS change is needed: drivers/hv/vmbus_buffer_test.c is
+already covered by the Hyper-V entry's "F: drivers/hv/" and
+drivers/uio/uio_hv_generic_mmap_test.c by the UIO entry's
+"F: drivers/uio/". The warning is a generic nudge on any file add; it
+is not a coverage audit. Nothing was reshaped to silence it.
+
+Everything this section says below about the previous nine-patch
+revision is history, not a claim about these bytes. Those runs are
+kept because they are real and because they describe the design
+these patches implement. They are not evidence about the bytes
+posted here.
 
 The split is a re-cut, not a rewrite. On the same pinned base,
 93f51579e7df ("Linux 7.3-rc4"), the previous revision and this
@@ -295,9 +345,9 @@ revision's. They map to the posted series as follows:
   8/9 -> 12/13    RNDIS request descriptors with kvzalloc_obj()
   9/9 -> 13/13    NULL request address on empty completions
 
-The build, KUnit and drill pair for these thirteen bytes is not
-in this letter yet. It will be named here when it has run and
-both drill legs have been read.
+The pin for these thirteen bytes is the pair named at the top of
+this section. The census below is the previous nine-patch
+revision's and is history only.
 
 For the previous nine-patch revision, twelve runs across six
 pairs are the census:
