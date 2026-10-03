@@ -65,6 +65,23 @@ LIST_HEAD(vmbus_retained_buffers);
 DEFINE_MUTEX(vmbus_retained_buffers_lock);
 static struct workqueue_struct *vmbus_buffer_reclaim_wq;
 static bool vmbus_buffer_reclaimer_stopping;
+
+/*
+ * Reclaim scheduling. VMBUS_BUFFER_RECLAIM_SCHEDULE_MS is the delay
+ * before the first reclaim attempt after ownership state changes;
+ * it is kept at one jiffy so a completed GPADL teardown frees the
+ * buffer promptly. VMBUS_BUFFER_RECLAIM_RETRY_MS is the steady-state
+ * retry while a guest mapping still holds the pages. The workqueue
+ * is unbound so reclaim never runs in the caller's context, and
+ * WQ_MEM_RECLAIM so the free path is not blocked by the very
+ * pressure it is relieving. max_active stays at one: re-encryption
+ * is serialized and the cost of a second concurrent worker is not
+ * worth the ordering questions it would raise.
+ */
+#define VMBUS_BUFFER_RECLAIM_SCHEDULE_MS	1
+#define VMBUS_BUFFER_RECLAIM_RETRY_MS		1000
+#define VMBUS_BUFFER_RECLAIM_WQ_FLAGS		(WQ_UNBOUND | WQ_MEM_RECLAIM)
+#define VMBUS_BUFFER_RECLAIM_WQ_MAX_ACTIVE	1
 enum vmbus_rescind_source
 vmbus_channel_rescind_source(const struct vmbus_channel *channel)
 {
@@ -202,7 +219,8 @@ struct vmbus_buffer_retained *vmbus_buffer_owner_alloc(void)
 	if (!vmbus_buffer_reclaim_wq) {
 		vmbus_buffer_reclaim_wq =
 			alloc_workqueue("vmbus-buffer-reclaim",
-					WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
+					VMBUS_BUFFER_RECLAIM_WQ_FLAGS,
+					VMBUS_BUFFER_RECLAIM_WQ_MAX_ACTIVE);
 		if (!vmbus_buffer_reclaim_wq)
 			goto err_unlock;
 	}
@@ -220,12 +238,16 @@ err_unlock:
 static void
 vmbus_buffer_retain_owner_locked(struct vmbus_buffer_retained *owner)
 {
+	unsigned long delay;
+
 	if (list_empty(&owner->list))
 		list_add_tail(&owner->list, &vmbus_retained_buffers);
 	if (!vmbus_buffer_reclaimer_stopping && vmbus_buffer_reclaim_wq &&
-	    vmbus_buffer_owner_can_reclaim(owner))
+	    vmbus_buffer_owner_can_reclaim(owner)) {
+		delay = msecs_to_jiffies(VMBUS_BUFFER_RECLAIM_SCHEDULE_MS);
 		mod_delayed_work(vmbus_buffer_reclaim_wq,
-				 &owner->reclaim_work, 1);
+				 &owner->reclaim_work, delay);
+	}
 }
 
 void vmbus_buffer_retain_owner(struct vmbus_buffer_retained *owner)
@@ -277,6 +299,7 @@ void vmbus_buffer_reclaim_work(struct work_struct *work)
 	struct vmbus_buffer_retained *owner = container_of(to_delayed_work(work),
 								   struct vmbus_buffer_retained,
 								   reclaim_work);
+	unsigned long delay = msecs_to_jiffies(VMBUS_BUFFER_RECLAIM_RETRY_MS);
 	bool retained;
 
 	mutex_lock(&vmbus_retained_buffers_lock);
@@ -288,7 +311,7 @@ void vmbus_buffer_reclaim_work(struct work_struct *work)
 
 	if (vmbus_buffer_pages_busy(owner)) {
 		mod_delayed_work(vmbus_buffer_reclaim_wq,
-				 &owner->reclaim_work, msecs_to_jiffies(1000));
+				 &owner->reclaim_work, delay);
 		mutex_unlock(&vmbus_retained_buffers_lock);
 		return;
 	}
@@ -308,8 +331,7 @@ void vmbus_buffer_reclaim_work(struct work_struct *work)
 		if (!vmbus_buffer_reclaimer_stopping &&
 		    vmbus_buffer_owner_can_reclaim(owner))
 			mod_delayed_work(vmbus_buffer_reclaim_wq,
-					 &owner->reclaim_work,
-					 msecs_to_jiffies(1000));
+					 &owner->reclaim_work, delay);
 		mutex_unlock(&vmbus_retained_buffers_lock);
 		return;
 	}
