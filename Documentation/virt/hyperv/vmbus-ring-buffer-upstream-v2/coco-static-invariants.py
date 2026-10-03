@@ -188,10 +188,82 @@ DIRECT_MAP_DECL = re.compile(
 )
 # A write to a bare identifier, with no -> or . member access in front of it.
 BARE_WRITE = re.compile(r"(?<![\w.>])(\w+)\s*(\+\+|--|<<=|>>=|[+\-*/%|&^]?=)(?!=)")
+# A bare identifier occurrence, ignoring member access and longer names.
+BARE_IDENT = re.compile(r"(?<![\w.>])(\w+)(?!\w)")
+SET_MEMORY_CALL = re.compile(r"\bset_memory_(?:en|de)crypted\s*\(")
+
+
+def is_pure_call(expr: str, fn: str) -> bool:
+    """True when @expr is exactly fn(...) and nothing else.
+
+    The gate is about the range an expression names, not about its spelling.
+    page_address(p) + (addr - page_address(p)) simplifies to addr -- a virtual
+    address, not a direct-map chunk -- while every prefix test accepts it,
+    because the text does start with page_address(. So the call's matching
+    parenthesis has to be the last character of the expression.
+    """
+    expr = re.sub(r"\s+", " ", expr.strip())
+    match = re.match(r"^\b" + re.escape(fn) + r"\s*\(", expr)
+    if not match:
+        return False
+    open_i = expr.index("(", match.start())
+    depth = 0
+    for i in range(open_i, len(expr)):
+        if expr[i] == "(":
+            depth += 1
+        elif expr[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i == len(expr) - 1
+    return False
+
+
+def first_arg_span(code: str, open_paren_index: int) -> tuple[int, int]:
+    """Span of the first argument of a call, paren-balanced."""
+    i = open_paren_index + 1
+    depth = 0
+    start = i
+    while i < len(code):
+        c = code[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                return start, i
+            depth -= 1
+        elif c == "," and depth == 0:
+            return start, i
+        i += 1
+    return start, len(code)
+
+
+def sanctioned_read_spans(code: str) -> list[tuple[int, int]]:
+    """Spans of set_memory_* first arguments that are exactly a bare name.
+
+    Those are the only reads this gate understands: the transition is being
+    applied to the range that name already describes. A name read anywhere
+    else may be handed to a helper that writes it, so it cannot be trusted.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in SET_MEMORY_CALL.finditer(code):
+        start, end = first_arg_span(code, match.end() - 1)
+        bare = re.sub(r"\s+", " ", unwrap_cast(code[start:end]).strip())
+        if re.fullmatch(r"\w+", bare):
+            spans.append((start, end))
+    return spans
+
+
+def blank_spans(code: str, spans: list[tuple[int, int]]) -> str:
+    out = list(code)
+    for start, end in spans:
+        for i in range(start, end):
+            if out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
 
 
 def direct_map_locals(code: str) -> set[str]:
-    """Names whose every assignment is a page_address() direct-map chunk.
+    """Names whose every assignment is a pure page_address() direct-map chunk.
 
     mainline's vmbus_free_buffer() stores page_address(chunks[i]) in a local
     and passes that local to set_memory_encrypted(). The invariant is about the
@@ -200,20 +272,33 @@ def direct_map_locals(code: str) -> set[str]:
 
     Both the declaration and any later write count. Collecting declarations
     alone is how a reassignment of a clean temporary slipped past this gate.
-    """
-    rhss: dict[str, list[str]] = {}
-    for match in DIRECT_MAP_DECL.finditer(code):
-        rhs = code[match.end():].split(";", 1)[0]
-        rhss.setdefault(match.group(1), []).append(
-            unwrap_cast(re.sub(r"\s+", " ", rhs.strip()))
-        )
-    if not rhss:
-        return set()
 
+    The right-hand side has to be the whole page_address() call. An expression
+    that merely starts with one is not a direct-map chunk:
+    page_address(p) + (addr - page_address(p)) is addr.
+
+    And the name has to be used only in ways this gate understands: as the
+    left-hand side of one of those assignments, or as the first argument of a
+    set_memory_*() call. Anything else -- an address taken by a helper, a
+    macro that writes it, an unsanctioned call argument -- can move the
+    address without this checker seeing an assignment, so the name is dropped
+    rather than trusted.
+    """
+    writes: dict[str, list[tuple[int, int, str]]] = {}
     decl_tail = re.compile(
         r"(?:unsigned\s+long(?:\s+int)?|u64|uintptr_t)\s+$"
     )
-    for name in list(rhss):
+
+    for match in DIRECT_MAP_DECL.finditer(code):
+        rhs = code[match.end():].split(";", 1)[0]
+        writes.setdefault(match.group(1), []).append(
+            (match.start(1), match.end(1),
+             unwrap_cast(re.sub(r"\s+", " ", rhs.strip())))
+        )
+    if not writes:
+        return set()
+
+    for name in list(writes):
         for match in BARE_WRITE.finditer(code):
             if match.group(1) != name:
                 continue
@@ -223,18 +308,29 @@ def direct_map_locals(code: str) -> set[str]:
             op = match.group(2)
             if op == "=":
                 rhs = code[match.end():].split(";", 1)[0]
-                rhss[name].append(
-                    unwrap_cast(re.sub(r"\s+", " ", rhs.strip()))
+                writes[name].append(
+                    (match.start(1), match.end(1),
+                     unwrap_cast(re.sub(r"\s+", " ", rhs.strip())))
                 )
             else:
                 # ++, --, += and friends move the address without deriving it.
-                rhss[name].append(f"<compound-assignment:{op}>")
+                writes[name].append(
+                    (match.start(1), match.end(1), f"<compound-assignment:{op}>")
+                )
 
-    return {
-        name
-        for name, assigns in rhss.items()
-        if assigns and all(r.startswith("page_address(") for r in assigns)
-    }
+    accepted: set[str] = set()
+    reads = sanctioned_read_spans(code)
+    for name, assigns in writes.items():
+        if not assigns or not all(is_pure_call(rhs, "page_address")
+                                  for _, _, rhs in assigns):
+            continue
+        used = blank_spans(code, reads)
+        used = blank_spans(used, [(s, e) for s, e, _ in assigns])
+        leftover = [m for m in BARE_IDENT.finditer(used) if m.group(1) == name]
+        if leftover:
+            continue
+        accepted.add(name)
+    return accepted
 
 
 def scan_set_memory(src: str, path: Path) -> None:
@@ -251,7 +347,7 @@ def scan_set_memory(src: str, path: Path) -> None:
         line = line_of(code, match.start())
         bare = unwrap_cast(arg)
         compact = re.sub(r"\s+", " ", bare)
-        if compact.startswith("page_address("):
+        if is_pure_call(compact, "page_address"):
             note(f"{path}:{line} {fn}(page_address(...)) OK direct-map chunk")
             continue
         if compact in direct_map:
@@ -539,14 +635,292 @@ def scan_legacy_callers(src: str, path: Path) -> None:
         )
 
 
+
+def self_test() -> int:
+    """Refusal fixtures for the direct-map alias rules.
+
+    These fragments are synthetic. They demonstrate gaps in the *validator*:
+    a prefix test that accepted an algebraic alias, and a write tracker that
+    missed a write through a helper. They are not reproduced kernel leaks and
+    must never be cited as one.
+
+    mainline's real shape is the accept case and has to stay accepted:
+
+        unsigned long vaddr = (unsigned long)page_address(chunks[i]);
+        ...
+        if (set_memory_encrypted(vaddr, 1U << order))
+            continue;
+    """
+    results: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str) -> None:
+        results.append((name, ok, detail))
+
+    def local_case(name: str, var: str, code: str, want: bool) -> None:
+        got = var in direct_map_locals(strip_comments(code))
+        check(name, got == want,
+              f"direct_map_locals -> {got}, want {want}")
+
+    def pure_call_case(name: str, expr: str, want: bool) -> None:
+        got = is_pure_call(expr, "page_address")
+        check(name, got == want, f"is_pure_call -> {got}, want {want}")
+
+    def call_site_case(name: str, code: str, want_reject: bool) -> None:
+        global failures, notes
+        saved_failures, saved_notes = failures, notes
+        failures, notes = [], []
+        try:
+            scan_set_memory(strip_comments(code), Path("selftest.c"))
+            rejected = any("non-page_address argument" in f for f in failures)
+        finally:
+            failures, notes = saved_failures, saved_notes
+        check(name, rejected == want_reject,
+              f"scan_set_memory rejected -> {rejected}, want {want_reject}")
+
+    # ---- is_pure_call: the expression, not its prefix ----
+    pure_call_case(
+        "coco_pure_call_exact_accept",
+        "page_address(chunks[i])",
+        True,
+    )
+    pure_call_case(
+        "coco_pure_call_ternary_arg_accept",
+        "page_address(cond ? a : b)",
+        True,
+    )
+    pure_call_case(
+        "coco_pure_call_trailing_plus_reject",
+        "page_address(p) + (addr - page_address(p))",
+        False,
+    )
+    pure_call_case(
+        "coco_pure_call_trailing_ternary_reject",
+        "page_address(p) ? a : b",
+        False,
+    )
+    pure_call_case(
+        "coco_pure_call_trailing_or_one_reject",
+        "page_address(p) | 1",
+        False,
+    )
+    pure_call_case(
+        "coco_pure_call_not_a_call_reject",
+        "addr",
+        False,
+    )
+
+    # ---- direct_map_locals: every assignment, the whole expression ----
+    local_case(
+        "coco_alias_exact_direct_map_accept",
+        "vaddr",
+        """
+void f(struct page **chunks, unsigned int i, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(chunks[i]);
+
+	if (set_memory_encrypted(vaddr, 1U << order))
+		continue;
+}
+""",
+        True,
+    )
+    local_case(
+        "coco_alias_reassigned_virtual_reject",
+        "vaddr",
+        """
+void f(struct page **chunks, unsigned int i, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(chunks[i]);
+
+	vaddr = (unsigned long)addr;
+	if (set_memory_encrypted(vaddr, 1U << order))
+		continue;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_algebraic_virtual_reject",
+        "vaddr",
+        """
+void f(struct page **chunks, unsigned int i, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(chunks[i])
+		+ ((unsigned long)addr - (unsigned long)page_address(chunks[i]));
+
+	if (set_memory_encrypted(vaddr, 1U << order))
+		continue;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_conditional_reject",
+        "vaddr",
+        """
+void f(struct page *a, struct page *b, int cond, unsigned int order)
+{
+	unsigned long vaddr = cond ? (unsigned long)page_address(a)
+				   : (unsigned long)addr;
+
+	if (set_memory_encrypted(vaddr, 1U << order))
+		continue;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_scope_shadow_reject",
+        "vaddr",
+        """
+void f(struct page *p, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(p);
+
+	if (set_memory_encrypted(vaddr, 1U << order))
+		return;
+}
+
+void g(unsigned long addr, unsigned int order)
+{
+	unsigned long vaddr = addr;
+
+	if (set_memory_encrypted(vaddr, 1U << order))
+		return;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_compound_write_reject",
+        "vaddr",
+        """
+void f(struct page *p, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(p);
+
+	vaddr += 1;
+	if (set_memory_encrypted(vaddr, 1U << order))
+		return;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_helper_write_reject",
+        "vaddr",
+        """
+void f(struct page *p, unsigned long addr, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(p);
+
+	set_vaddr(&vaddr, addr);
+	if (set_memory_encrypted(vaddr, 1U << order))
+		return;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_macro_write_reject",
+        "vaddr",
+        """
+void f(struct page *p, unsigned long addr, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(p);
+
+	SET_VADDR(vaddr, addr);
+	if (set_memory_encrypted(vaddr, 1U << order))
+		return;
+}
+""",
+        False,
+    )
+    local_case(
+        "coco_alias_unsanctioned_read_reject",
+        "vaddr",
+        """
+void f(struct page *p, unsigned int order)
+{
+	unsigned long vaddr = (unsigned long)page_address(p);
+
+	do_thing(vaddr, 1);
+	if (set_memory_encrypted(vaddr, 1U << order))
+		return;
+}
+""",
+        False,
+    )
+
+    # ---- scan_set_memory: the call-site argument, the whole expression ----
+    call_site_case(
+        "coco_call_exact_direct_map_accept",
+        """
+void f(struct page *page, unsigned int order)
+{
+	if (set_memory_encrypted((unsigned long)page_address(page),
+				 1U << order))
+		return;
+}
+""",
+        False,
+    )
+    call_site_case(
+        "coco_call_algebraic_virtual_reject",
+        """
+void f(struct page *p, unsigned long addr, unsigned int order)
+{
+	if (set_memory_encrypted((unsigned long)page_address(p)
+				 + ((unsigned long)addr
+				    - (unsigned long)page_address(p)),
+				 1U << order))
+		return;
+}
+""",
+        True,
+    )
+    call_site_case(
+        "coco_call_trailing_or_one_reject",
+        """
+void f(struct page *p, unsigned int order)
+{
+	if (set_memory_encrypted((unsigned long)page_address(p) | 1,
+				 1U << order))
+		return;
+}
+""",
+        True,
+    )
+
+    failed = [r for r in results if not r[1]]
+    print("=== CoCo alias self-test ===")
+    for name, ok, detail in results:
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}: {detail}")
+    print()
+    if failed:
+        print(f"{len(failed)} self-test case(s) failed.")
+        return 1
+    print(f"All {len(results)} self-test cases hold.")
+    print("scope: synthetic validator fixtures, not reproduced kernel leaks.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tree",
-        required=True,
         help="candidate kernel tree with all thirteen patches applied",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the direct-map alias refusal fixtures and exit",
+    )
     args = parser.parse_args()
+    if args.self_test:
+        return self_test()
+    if not args.tree:
+        parser.error("--tree is required unless --self-test is given")
     tree = Path(args.tree)
     if not tree.is_dir():
         print(f"error: not a directory: {tree}", file=sys.stderr)
