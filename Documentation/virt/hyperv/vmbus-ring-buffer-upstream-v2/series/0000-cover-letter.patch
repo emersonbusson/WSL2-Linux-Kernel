@@ -245,15 +245,34 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-These thirteen patch files have not been measured yet. Every run
-named below was taken on the previous nine-patch revision of the
-same work, before the series was split and before the KUnit cases
-were moved out of channel.c and uio_hv_generic.c into
-drivers/hv/vmbus_buffer_test.c and
-drivers/uio/uio_hv_generic_mmap_test.c. The measurements are kept
-because they are real and because they describe the design these
-patches implement. They are not evidence about the bytes posted
-here.
+These thirteen patch files have been measured once, on the pair
+named first. Everything after it is still the previous nine-patch
+revision's census: those runs are real and describe the design
+these patches implement, but they are not evidence about the bytes
+posted here.
+
+The pair on these bytes is 37089084420 and 37089084375, both
+against tip 1f788edba152. On the left, the thirteen patches verify
+against series/SHA256SUMS and apply to 93f51579e7df ("Linux
+7.3-rc4"); every stage of the apply loop builds on x86_64 and on
+arm64; the CoCo static invariants hold on both architectures;
+hyperv-vmbus-buffer passes its sixteen subtests and hyperv-uio-mmap
+its four; the x86_64 runner reports "Testing complete. Ran 24
+tests: passed: 24". The same run's wsl-backport job builds the
+6.18.40.1 backport and reports hyperv-vmbus-gpadl-lifetime (12
+subtests) and hyperv-uio-hv-generic-mmap (3 subtests) both PASSED,
+with "Testing complete. Ran 15 tests: passed: 15".
+
+On the right, both hosted guests boot the candidate and pass the
+drills at full scope. windows-2025 and windows-latest each print
+VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION,
+LIFECYCLE_VERDICT=PASS cycles=100 phase2=yes, and
+HYPERV_DRILL_RESULT lifecycle=0 fragment=0 splats=0 faults=0,
+scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation.
+Neither leg reports PARTIAL and neither was starved. The verdict
+scope the drills themselves print remains ordinary-x86_64-vzalloc-
+path; co-co-chunked-fallback-not-exercised -- the CoCo gap this
+series discloses, not a drill defect.
 
 The split is a re-cut, not a rewrite. On the same pinned base,
 93f51579e7df ("Linux 7.3-rc4"), the previous revision and this
@@ -295,9 +314,9 @@ revision's. They map to the posted series as follows:
   8/9 -> 12/13    RNDIS request descriptors with kvzalloc_obj()
   9/9 -> 13/13    NULL request address on empty completions
 
-The build, KUnit and drill pair for these thirteen bytes is not
-in this letter yet. It will be named here when it has run and
-both drill legs have been read.
+Everything named after this paragraph is the previous nine-patch
+revision's census. It is kept for the record and is not a claim
+about these thirteen patch files.
 
 For the previous nine-patch revision, twelve runs across six
 pairs are the census:
