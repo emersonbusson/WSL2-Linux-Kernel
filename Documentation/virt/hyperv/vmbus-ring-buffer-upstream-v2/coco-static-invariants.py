@@ -4,7 +4,7 @@
 Static negative proof: the guest-fatal pattern Michael Kelley named
 (set_memory_decrypted() on a vmalloc()/vmap() virtual range) has no code path
 in any allocation this series introduces. Run against the candidate tree after
-all nine patches are applied.
+all thirteen patches are applied.
 
   python3 coco-static-invariants.py --tree <linux-tree>
 
@@ -34,6 +34,18 @@ NETVSC = Path("drivers/net/hyperv/netvsc.c")
 # owner->raw_decrypted re-encrypts the whole range through owner->addr, and the
 # chunked owner->needs_encrypt path re-encrypts per page_address() page. Every
 # path this series allocates uses page_address() of an alloc_pages_node() result.
+#
+# A bare local is also a direct-map chunk when every assignment to it is
+# page_address() of a page. mainline's own vmbus_free_buffer() has always done
+# exactly that:
+#
+#   unsigned long vaddr = (unsigned long)page_address(chunks[i]);
+#   ...
+#   if (set_memory_encrypted(vaddr, 1U << order))
+#
+# Rejecting the temporary would reject mainline. Accepting any bare identifier
+# would hide a vmalloc() temporary. So accept a local only when every assignment
+# to that name in the file derives from page_address().
 LEGACY_DECRYPT_ARG = "kbuffer"
 LEGACY_ENCRYPT_ARG = "owner->addr"
 LEGACY_COMPAT_ENCRYPT_ARG = "gpadl->buffer"
@@ -146,10 +158,38 @@ def unwrap_cast(expr: str) -> str:
         expr = expr[match.end():].strip()
 
 
+# A simple local holding a direct-map address: `T name = [cast] page_address(`.
+DIRECT_MAP_LOCAL = re.compile(
+    r"\b(?:unsigned\s+long(?:\s+int)?|u64|uintptr_t)\s+(\w+)\s*=\s*"
+)
+
+
+def direct_map_locals(code: str) -> set[str]:
+    """Names whose every assignment is a page_address() direct-map chunk.
+
+    mainline's vmbus_free_buffer() stores page_address(chunks[i]) in a local
+    and passes that local to set_memory_encrypted(). The invariant is about the
+    range, not the spelling, so a local qualifies only when nothing ever
+    assigns it a non-page_address value.
+    """
+    assigned: dict[str, list[str]] = {}
+    for match in DIRECT_MAP_LOCAL.finditer(code):
+        rhs = code[match.end():].split(";", 1)[0]
+        assigned.setdefault(match.group(1), []).append(
+            unwrap_cast(re.sub(r"\s+", " ", rhs.strip()))
+        )
+    return {
+        name
+        for name, rhss in assigned.items()
+        if rhss and all(r.startswith("page_address(") for r in rhss)
+    }
+
+
 def scan_set_memory(src: str, path: Path) -> None:
     """INV-1: encryption transitions only on page_address() chunks, plus the
     single preserved legacy virtual-address pair."""
     code = strip_comments(src)
+    direct_map = direct_map_locals(code)
     seen_decrypt_legacy = 0
     seen_encrypt_legacy = 0
     seen_compat_encrypt = 0
@@ -161,6 +201,9 @@ def scan_set_memory(src: str, path: Path) -> None:
         compact = re.sub(r"\s+", " ", bare)
         if compact.startswith("page_address("):
             note(f"{path}:{line} {fn}(page_address(...)) OK direct-map chunk")
+            continue
+        if compact in direct_map:
+            note(f"{path}:{line} {fn}({compact}) OK direct-map local from page_address()")
             continue
         if fn == "set_memory_decrypted" and compact in (
             f"(unsigned long){LEGACY_DECRYPT_ARG}",
@@ -443,7 +486,7 @@ def main() -> int:
     parser.add_argument(
         "--tree",
         required=True,
-        help="candidate kernel tree with all six patches applied",
+        help="candidate kernel tree with all thirteen patches applied",
     )
     args = parser.parse_args()
     tree = Path(args.tree)
