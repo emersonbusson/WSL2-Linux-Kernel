@@ -64,6 +64,17 @@ config HYPERV_VMBUS
 	help
 	  Select this option to enable Hyper-V Vmbus driver.
 
+config HYPERV_VMBUS_KUNIT_TEST
+	bool "Hyper-V VMBus buffer and GPADL lifetime tests"
+	depends on HYPERV_VMBUS && KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Build the vmbus_buffer_test.c KUnit suite into hv_vmbus so the
+	  cases can reach the internal buffer and GPADL helpers without
+	  exporting them. The suite name is hyperv-vmbus-gpadl-lifetime.
+
+	  If unsure, say N.
+
 config MSHV_ROOT
 	tristate "Microsoft Hyper-V root partition support"
 	depends on HYPERV && (X86_64 || ARM64)

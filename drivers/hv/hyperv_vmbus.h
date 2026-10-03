@@ -18,6 +18,8 @@
 #include <linux/atomic.h>
 #include <linux/hyperv.h>
 #include <linux/interrupt.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <hyperv/hvhdk.h>
 
 #include "hv_trace.h"
@@ -485,5 +487,85 @@ int hv_create_ring_sysfs(struct vmbus_channel *channel,
 			 int (*hv_mmap_ring_buffer)(struct vmbus_channel *channel,
 						    struct vm_area_struct *vma));
 int hv_remove_ring_sysfs(struct vmbus_channel *channel);
+
+/*
+ * Buffer ownership retained across a GPADL that cannot yet be proven
+ * released. The layout is private to hv_vmbus and its KUnit tests; it
+ * is declared here rather than in include/linux/hyperv.h so nothing
+ * outside drivers/hv/ can reach these fields.
+ */
+struct vmbus_buffer_retained {
+	struct list_head list;
+	struct delayed_work reclaim_work;
+	void *addr;
+	struct page **chunks;
+	u32 chunk_cnt;
+	u32 size;
+	u32 gpadl_handle;
+	enum vmbus_gpadl_state gpadl_state;
+	bool leak;
+	bool encryption_unknown;
+	bool released;
+	bool reclaiming;
+};
+
+enum vmbus_rescind_source {
+	VMBUS_RESCIND_NONE,
+	VMBUS_RESCIND_HOST,
+	VMBUS_RESCIND_LOCAL,
+};
+
+enum vmbus_gpadl_teardown_event {
+	VMBUS_GPADL_TEARDOWN_ACK,
+	VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
+	VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND,
+	VMBUS_GPADL_TEARDOWN_FAILURE,
+};
+
+typedef int (*vmbus_reencrypt_fn)(unsigned long, int);
+typedef struct vmbus_channel_msginfo *(*vmbus_gpadl_info_alloc_fn)(void);
+
+/*
+ * The helpers below are shared with vmbus_buffer_test.c through the
+ * hv_vmbus object so the cases can reach them without exporting them.
+ * They must never gain EXPORT_SYMBOL_GPL.
+ */
+bool vmbus_uses_shared_page_chunks(bool encrypted, bool hv_isolated);
+int vmbus_buffer_size_pages(u32 requested_size, unsigned long *nr_pages,
+			    u32 *aligned_size);
+enum vmbus_rescind_source
+vmbus_channel_rescind_source(const struct vmbus_channel *channel);
+int vmbus_gpadl_begin(struct vmbus_buffer *buffer, u32 handle);
+int vmbus_gpadl_teardown_begin(struct vmbus_buffer *buffer);
+int vmbus_gpadl_create_response(struct vmbus_buffer *buffer,
+				bool response_received,
+				u32 creation_status,
+				enum vmbus_rescind_source rescind_source);
+void vmbus_gpadl_create_finish(struct vmbus_buffer *buffer);
+int vmbus_gpadl_teardown_result(struct vmbus_channel *channel,
+				struct vmbus_buffer *buffer,
+				enum vmbus_gpadl_teardown_event event,
+				int ret);
+bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer);
+struct vmbus_buffer_retained *vmbus_buffer_owner_alloc(void);
+void vmbus_buffer_retain_owner(struct vmbus_buffer_retained *owner);
+void vmbus_buffer_reclaim_work(struct work_struct *work);
+/*
+ * Free the backing memory of a retained owner. The caller must hold
+ * vmbus_retained_buffers_lock so the page-busy check and the free cannot
+ * interleave with a concurrent reclaimer pass.
+ */
+bool __vmbus_free_buffer_mem(struct vmbus_buffer_retained *owner,
+			     void *addr, struct page **chunks,
+			     u32 chunk_cnt, struct page *unknown_page,
+			     vmbus_reencrypt_fn reencrypt);
+void __vmbus_free_buffer(struct vmbus_buffer *buffer,
+			 vmbus_reencrypt_fn reencrypt);
+int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
+			   struct vmbus_buffer *buffer,
+			   vmbus_gpadl_info_alloc_fn alloc_info);
+
+extern struct list_head vmbus_retained_buffers;
+extern struct mutex vmbus_retained_buffers_lock;
 
 #endif /* _HYPERV_VMBUS_H */
