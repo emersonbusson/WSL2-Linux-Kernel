@@ -278,7 +278,11 @@ if gzip -c "$OWNER_CAPTURE" >"$OWNER_CAPTURE.gz"; then
 $(sha256sum "$OWNER_CAPTURE.gz")
 EOF
 	echo "OWNER_TRACE_BLOB format=gzip-base64 sha256=$OWNER_DIGEST"
-	base64 "$OWNER_CAPTURE.gz" | sed 's/^/OWNER_TRACE_DATA /'
+	base64 "$OWNER_CAPTURE.gz" | while IFS= read -r OWNER_ROW; do
+		printf 'OWNER_TRACE_DATA %s\n' "$OWNER_ROW"
+		# Pace the serial burst below line rate while the host drains it.
+		sleep 0.02
+	done
 	echo "OWNER_TRACE_BLOB end=1"
 else
 	echo "OWNER_TRACE status=UNAVAILABLE reason=serialization_failed"

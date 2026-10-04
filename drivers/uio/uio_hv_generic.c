@@ -533,11 +533,14 @@ hv_uio_remove(struct hv_device *dev)
 		return;
 
 	hv_remove_ring_sysfs(dev->channel);
+	/* Keep event notification alive until channel callbacks are stopped. */
+	get_device(&pdata->info.uio_dev->dev);
 	uio_unregister_device(&pdata->info);
 	/* unregister prevents the eventual fd close from calling .release. */
 	ret = hv_uio_disconnect_if_open(dev->channel, vmbus_disconnect_ring);
 	if (ret)
 		dev_err(&dev->device, "channel disconnect failed: %d\n", ret);
+	put_device(&pdata->info.uio_dev->dev);
 	hv_uio_cleanup(dev, pdata);
 
 	vmbus_free_ring(dev->channel);

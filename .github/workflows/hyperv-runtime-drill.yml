@@ -196,6 +196,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $DRILL = 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill'
+          & (Join-Path $DRILL 'test-serial-reader.ps1')
           & (Join-Path $DRILL 'test-reader-heartbeat.ps1')
           $image = Join-Path 'drill-kernel' 'BOOTX64.EFI'
           if (-not (Test-Path $image)) {

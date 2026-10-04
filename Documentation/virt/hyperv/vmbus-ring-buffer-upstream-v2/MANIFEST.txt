@@ -3,14 +3,14 @@ MANIFEST — VMBus upstream v2 reproduction dossier
 Updated: 2026-10-04
 Status: unsent; ordinary hosted validation pending; CoCo hardware unqualified.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
-Applied source tip: 84be078d2389991432425aee245b96e198c814b1
-(previous 4f60e973c983 plus UIO removal closure)
+Applied source tip: 934ef265c4b82130be2ca84b17e82424eed79793
+(previous 84be078d2389 plus notifier reference across callback shutdown)
 Mail shape: cover 0/13, thirteen code mails. Apply hashes, not the WSL fork.
 Cover is intentionally outside series/SHA256SUMS.
 
 COVER
-32a671d1db3dae748f59c28d7753dac5cfec9e24234c14e9c2d346e5bde76ff9  series/0000-cover-letter.patch
-lines=189
+883afe32fa8fb64b40e9a6266c0fc9ab20216c5fe97a1f9b471edaf354597cf5  series/0000-cover-letter.patch
+lines=195
 
 PRODUCTION MAILS
 c962e2019a2404c9c57555a2bb8eef1cc87855b2111bd1208d77f9989967fd18  0001-ring-allocation.patch
@@ -22,7 +22,7 @@ b5a2cae1d081f0f21e3d4f621daeef0db8c70c09233d4b976e890b96be7a4e01  0002-allocatio
 66bbbd876db3e11ab5a0d3012b105241f4ecf0eb74f3e2ea18e82e89df7df209  0007-rescind-vs-unload.patch
 8fbd4907b146beed0f0dbd6a65f91cf2849431b30c1571bbbb4e43cb9bdc0643  0008-buffer-ownership.patch
 2d9dd093fd0282ef6f47e212900af7282e568fa8788ce46ce3f6c0ff941c9579  0009-alloc-buffer-prototype.patch
-9ff6d4ad6e330b04d5241ac1481e09857dcd79bced45513f08e599a934ba98e2  0010-uio-mmap-pin.patch
+695e1b7cb2a146b2f3186cc45a877c0d240be4a36e07e79de57c631e1cd3bc07  0010-uio-mmap-pin.patch
 efca76ff8197c6b12baaa9afa7a9e753082a728b759a11bd47b5bda30660c31b  0011-requestor-kvcalloc.patch
 d11683ba206131556e38168e78d3091e3adebf8f6cbed244664312d876c9441b  0012-rndis-request-kvmalloc.patch
 800ef02e49cf5400b7c653e4186175f9a56c215bbdcd0b61ac10f121f48b4b4c  0013-netvsc-empty-completion-null.patch
@@ -37,13 +37,14 @@ da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-in
 5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
 eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
 19321190c77a222d3199131f709000149d606b974a15b298681ec98232f03b49  drill/build-drill-kernel.sh
-7bf7b14e611399c7c49bf4837a86d7ff04039d31d3b922551feb2ee6be9678ea  drill/init
+79007cc3e4446d5b36502035f7e0730f72affbcbce4b8ee2d4f6a7d7913634f1  drill/init
 a852ec4a5cab991de9feb797462b63c3977c9c28256e2a07ab2d2dca8b5036fe  drill/vmbus-lifecycle-drill.sh
 e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
 16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
 311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
-72b296da07dfa824760b7bb490580e382d837d60708c817ff74816897215c68f  drill/new-drill-vm.ps1
+06b12e160cde766c556979d0bcae81d2066604485f22a62337a6f4f96b56b825  drill/new-drill-vm.ps1
 ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
+afdcb6ee7ee3dc817b141c233e0bfc8c3e08ea077bb17338b675d9d422af0861  drill/test-serial-reader.ps1
 2c2f0254a855830606b195cf9263213e9d87af00d96f83d844b46f3ba3d872e5  drill/owner-trace-accounting.py
 
 Recipe: tinyconfig plus explicit symbols; embedded initramfs, static helper,
@@ -87,3 +88,11 @@ include boot metadata, complete per-CPU statistics,
 zero overrun/dropped events and the end marker. The analyzer never logs
 raw lines or addresses. Active owners are not automatically leaks.
 No email has been sent. The operator sends the qualified frozen package.
+
+FOLLOW-UP
+37241455320 built the preceding revision successfully; 37241455209
+passed both candidate lifecycles but failed both baseline restores. One
+candidate capture accounted for 682 owners with zero errors; the other
+was PARTIAL due to transport corruption. A fresh pair must qualify the
+notifier-reference and paced/asynchronously drained serial follow-up.
+The native named-pipe burst fixture passes on the actual reader.

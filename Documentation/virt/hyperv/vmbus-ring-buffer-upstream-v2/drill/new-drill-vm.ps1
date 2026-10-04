@@ -26,15 +26,11 @@
 .PARAMETER TimeoutSec
   Maximum wall-clock to wait for the guest to finish. Default 1200.
 
-  1200 is not slack. On an uncontented runner the whole drill is about
-  20-25 seconds of guest kernel time and finishes in well under a minute
-  of wall clock. On a noisy windows-latest neighbour the guest can be
-  descheduled to roughly a tenth of the CPU while a 2004 MiB fragmentation
-  hog thrashes against host dynamic-memory negotiation. Run 36980429381
-  reached PHASE1-BEFORE at 48.8s of kernel time after burning the whole
-  420s backstop and was then scored NO_RESULT -- a failed measurement,
-  not a candidate failure. Keep this large enough that a starved guest
-  can still finish; a real hang still reddens here.
+  The backstop preserves time for slow disposable guests. Earlier runs
+  reached lifecycle phase one and then produced no more console progress.
+  The cause is unproven: timeout alone does not distinguish descheduling,
+  a guest wait, pressure or a blocked reader. Independent observer
+  heartbeats record VM state and console progress for that investigation.
 
 .EXAMPLE
   ./new-hyperv-drill-vm.ps1 -BzImage ./drill-out/BOOTX64.EFI
@@ -276,13 +272,13 @@ $readerScript = {
       $n = $readTask.Result
       if ($n -le 0) { break }
       $chunk = [System.Text.Encoding]::ASCII.GetString($buf, 0, $n)
+      # Drain the next chunk while file output runs. The immutable string
+      # above no longer depends on the byte buffer reused by ReadAsync.
+      $readTask = $pipe.ReadAsync($buf, 0, $buf.Length)
       $pending += $chunk
       Add-Content -Path $logPath -Value $chunk -NoNewline
       if ($pending -match 'HYPERV_DRILL_DONE') {
         $seenDone = $true
-      }
-      else {
-        $readTask = $pipe.ReadAsync($buf, 0, $buf.Length)
       }
     }
     catch {

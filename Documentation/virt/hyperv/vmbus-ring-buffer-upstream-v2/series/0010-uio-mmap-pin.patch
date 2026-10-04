@@ -78,16 +78,21 @@ leaves host ownership uncertain and retained. Test open, already closed,
 repeated and failed disconnection through the same helper used by
 remove.
 
+Hold the UIO notifier device reference across unregister and channel
+disconnect. If the last fd closes in that interval, an in-flight channel
+callback can still notify the UIO device until disconnect synchronizes
+callbacks.
+
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/channel.c                   |  92 ++++
  drivers/hv/vmbus_drv.c                 |  45 +-
  drivers/uio/Kconfig                    |  11 +
  drivers/uio/uio.c                      |  20 +
- drivers/uio/uio_hv_generic.c           | 312 ++++++++++++-
+ drivers/uio/uio_hv_generic.c           | 315 ++++++++++++-
  drivers/uio/uio_hv_generic_mmap_test.c | 830 +++++++++++++++++++++++++++++++++
  include/linux/hyperv.h                 |  24 +
- 7 files changed, 1326 insertions(+), 8 deletions(-)
+ 7 files changed, 1329 insertions(+), 8 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index c08c140a00c0..2c6fa1edf6c7 100644
@@ -310,7 +315,7 @@ index f8fa20522660..4767ed0661f7 100644
  	}
  
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index b40e80e19c6c..d83c907f4295 100644
+index b40e80e19c6c..a08667b70472 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -25,6 +25,7 @@
@@ -671,7 +676,7 @@ index b40e80e19c6c..d83c907f4295 100644
  
  	if (channel->device_id == HV_NIC) {
  		ret = vmbus_alloc_buffer_owned(channel, RECV_BUFFER_SIZE, false,
-@@ -372,12 +665,17 @@ static void
+@@ -372,12 +665,20 @@ static void
  hv_uio_remove(struct hv_device *dev)
  {
  	struct hv_uio_private_data *pdata = hv_get_drvdata(dev);
@@ -681,11 +686,14 @@ index b40e80e19c6c..d83c907f4295 100644
  		return;
  
  	hv_remove_ring_sysfs(dev->channel);
++	/* Keep event notification alive until channel callbacks are stopped. */
++	get_device(&pdata->info.uio_dev->dev);
  	uio_unregister_device(&pdata->info);
 +	/* unregister prevents the eventual fd close from calling .release. */
 +	ret = hv_uio_disconnect_if_open(dev->channel, vmbus_disconnect_ring);
 +	if (ret)
 +		dev_err(&dev->device, "channel disconnect failed: %d\n", ret);
++	put_device(&pdata->info.uio_dev->dev);
  	hv_uio_cleanup(dev, pdata);
  
  	vmbus_free_ring(dev->channel);

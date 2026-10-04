@@ -101,7 +101,9 @@ The CoCo static checker passes its six necessary invariants and all
 
 The owner-accounting tool passes sixteen fixtures, including distinct
 same-sized owners, missing owner creation, duplicate terminal events
-and reclaim with unresolved host ownership. The independent VM-reader
+and reclaim with unresolved host ownership. A native named-pipe burst
+fixture verifies the actual reader across chunk boundaries. The reader
+schedules its next read before file output; guest event rows are paced. The independent VM-reader
 observer passes three PowerShell fixtures and keeps heartbeat output
 out of the returned job handle. Guest phase markers include uptime;
 the observer records console progress and VM state even while the
@@ -123,18 +125,21 @@ unchanged flexible-protocol-structure warning from the new test TU,
 zero removed diagnostics and four unchanged. No new diagnostic kind
 is introduced; the series is not Sparse-clean.
 
-Historical hosted runs 37179681746 (build: success) and 37179681743
-(runtime: failure) tested an earlier byte set. One ordinary Hyper-V
-guest completed 100 normal rebind cycles, with four lifecycle
-subgates PASS and restore PARTIAL; the other timed out at the 1200 s
-reader backstop. No guest reached an integral lifecycle PASS.
-Fragmentation had two inconclusive readings and one exhausted-buddy
-allocation PASS. Timeout cause is unproven. These runs do not qualify
-the current recut. Runs 37239830275 and 37238479048 also failed: the
-former lacked Fixes commit objects in its shallow checkout; the latter
-reproduced baseline opened-channel restoration failure and incomplete
-serial owner capture. Both harness issues are corrected for a fresh
-hosted pair; no successful final runtime is claimed yet.
+Hosted build 37241455320 passed the thirteen sequential x86_64/arm64
+builds, strict cumulative/per-mail style, static checks, mainline KUnit
+51/51 and WSL-backport KUnit 16/16. Runtime 37241455209 on that
+preceding revision completed 100 cycles and all five lifecycle subgates
+on both candidate guests; both baselines failed device restoration.
+The windows-latest candidate also reached exhausted-buddy ring
+allocation and verified all 682 captured owners: 671 reclaimed, 11
+active, zero missing creates or unsafe dispositions. windows-2025
+fragmentation and owner transport remained PARTIAL. The workflow's
+failure conclusion reflects the baseline legs, not candidate success.
+
+These results precede the notifier-reference and paced-reader follow-up.
+A fresh pair must qualify those exact bytes. Earlier failed attempts
+37238479046, 37239830275 and 37238479048 remain historical evidence;
+missing Fixes objects and serial loss are not relabeled as code PASS.
 
 Limitations and review questions
 ---------------------------------
@@ -152,7 +157,8 @@ code retains uncertain ownership.
 
 UIO removal now disconnects an opened channel after withdrawing UIO
 callbacks, because unregister prevents the later fd close from calling
-.release. Mapping pins survive independently. This addresses the opened
+.release. The notifier stays referenced until channel callbacks stop. Mapping
+references survive independently. This addresses the opened
 channel observed on both baseline and candidate. A new matched runtime
 is required to qualify device restoration with live fd and mappings.
 
@@ -180,10 +186,10 @@ restore. PARTIAL and NO_RESULT remain distinct from PASS.
  drivers/net/hyperv/rndis_request_test.c     |  157 ++++
  drivers/uio/Kconfig                         |   11 +
  drivers/uio/uio.c                           |   20 +
- drivers/uio/uio_hv_generic.c                |  381 ++++++++--
+ drivers/uio/uio_hv_generic.c                |  384 ++++++++--
  drivers/uio/uio_hv_generic_mmap_test.c      |  830 ++++++++++++++++++++
  include/linux/hyperv.h                      |   72 +-
- 21 files changed, 3704 insertions(+), 380 deletions(-)
+ 21 files changed, 3707 insertions(+), 380 deletions(-)
 
 -- 
 2.43.0
