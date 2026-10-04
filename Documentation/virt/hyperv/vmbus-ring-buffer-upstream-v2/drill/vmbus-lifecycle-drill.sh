@@ -702,6 +702,20 @@ st_post_teardown_reads_cover_held_maps() {
 		echo "  partial post-hold coverage must FAIL even on the withdraw surface, got $MAP_SURFACE_VERDICT"
 		return 1
 	fi
+	# Excess is as wrong as shortfall. ok=10 on maps=5 is what a shared
+	# counter produces when one accumulator is used for both the
+	# establishment read and the post-hold read; it is a reporting fault,
+	# not extra coverage. The contract is equality, never >=.
+	derive_map_surface_verdict yes ok 5 yes no 5 10 yes yes
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  excess post-hold reads must FAIL (ok=10 maps=5), got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	derive_map_surface_verdict yes ok 5 yes no 5 10 yes no
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  excess post-hold reads must FAIL on the withdraw surface too, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
 	return 0
 }
 

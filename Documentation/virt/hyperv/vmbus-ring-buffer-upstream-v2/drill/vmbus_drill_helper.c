@@ -117,7 +117,7 @@ static int do_mmap_hold(int argc, char **argv)
 {
 	const char *path, *release_file = NULL;
 	long bytes, hold, count, i, mapped = 0;
-	long page, touch_ok = 0, waited_ms = 0;
+	long page, ready_ok = 0, after_ok = 0, waited_ms = 0;
 	int fd;
 	void **maps;
 
@@ -199,16 +199,16 @@ static int do_mmap_hold(int argc, char **argv)
 	 * the caller's node still exists; the post-hold read below is a
 	 * separate question and is scored per surface.
 	 */
-	touch_ok = 0;
+	ready_ok = 0;
 	for (i = 0; i < mapped; i++) {
 		volatile unsigned char *b = maps[i];
 		unsigned char v = *b;
 
 		(void)v;
-		touch_ok++;
+		ready_ok++;
 	}
 	printf("MMAP_HOLD touch_ready path=%s ok=%ld fail=0 maps=%ld\n",
-	       path, touch_ok, mapped);
+	       path, ready_ok, mapped);
 	fflush(stdout);
 
 	/*
@@ -250,15 +250,16 @@ static int do_mmap_hold(int argc, char **argv)
 	 * not survive; the scorer already turns that into a FAIL rather than
 	 * swallowing it.
 	 */
+	after_ok = 0;
 	for (i = 0; i < mapped; i++) {
 		volatile unsigned char *b = maps[i];
 		unsigned char v = *b;
 
 		(void)v;
-		touch_ok++;
+		after_ok++;
 	}
 	printf("MMAP_HOLD touch path=%s ok=%ld fail=0 maps=%ld\n",
-	       path, touch_ok, mapped);
+	       path, after_ok, mapped);
 	fflush(stdout);
 
 	for (i = 0; i < mapped; i++)
