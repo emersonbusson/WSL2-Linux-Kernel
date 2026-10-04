@@ -3,13 +3,14 @@ MANIFEST — VMBus upstream v2 reproduction dossier
 Updated: 2026-10-04
 Status: unsent; ordinary hosted validation pending; CoCo hardware unqualified.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
-Applied source tip: 4f60e973c983 (previous 33f6d2610ebb plus ownership recut)
+Applied source tip: 84be078d2389991432425aee245b96e198c814b1
+(previous 4f60e973c983 plus UIO removal closure)
 Mail shape: cover 0/13, thirteen code mails. Apply hashes, not the WSL fork.
 Cover is intentionally outside series/SHA256SUMS.
 
 COVER
-9cd60bdc1285462a18040e5644128359557b2b4a4ae1ca5e71db5f8298c8031c  series/0000-cover-letter.patch
-lines=182
+32a671d1db3dae748f59c28d7753dac5cfec9e24234c14e9c2d346e5bde76ff9  series/0000-cover-letter.patch
+lines=189
 
 PRODUCTION MAILS
 c962e2019a2404c9c57555a2bb8eef1cc87855b2111bd1208d77f9989967fd18  0001-ring-allocation.patch
@@ -21,28 +22,29 @@ b5a2cae1d081f0f21e3d4f621daeef0db8c70c09233d4b976e890b96be7a4e01  0002-allocatio
 66bbbd876db3e11ab5a0d3012b105241f4ecf0eb74f3e2ea18e82e89df7df209  0007-rescind-vs-unload.patch
 8fbd4907b146beed0f0dbd6a65f91cf2849431b30c1571bbbb4e43cb9bdc0643  0008-buffer-ownership.patch
 2d9dd093fd0282ef6f47e212900af7282e568fa8788ce46ce3f6c0ff941c9579  0009-alloc-buffer-prototype.patch
-5fa74c72e6cce449b78af1e423206f11a5ab7b5ef99a8525dde5c1820c0e8b88  0010-uio-mmap-pin.patch
+9ff6d4ad6e330b04d5241ac1481e09857dcd79bced45513f08e599a934ba98e2  0010-uio-mmap-pin.patch
 efca76ff8197c6b12baaa9afa7a9e753082a728b759a11bd47b5bda30660c31b  0011-requestor-kvcalloc.patch
 d11683ba206131556e38168e78d3091e3adebf8f6cbed244664312d876c9441b  0012-rndis-request-kvmalloc.patch
 800ef02e49cf5400b7c653e4186175f9a56c215bbdcd0b61ac10f121f48b4b4c  0013-netvsc-empty-completion-null.patch
 
 BUILD AND HARNESS FILES
-201f5debf72b8f49cad7edaa197b47636cd33961614582b546ac5167b35e3eb6  BUILD.md
-e9834e3aa2901e1cf182a512309c6e4cb788c82c88d0e14bc08d9d4ceed03352  SEQUENCE.md
+61370f986aae0a1393a5d788562b21bd617079ed10a543a9db1ede5e6df53989  BUILD.md
+0eb4773dc46d7bfa4f3591e4887e210f87fc2e921013fe4909dd045f5b2f1d55  SEQUENCE.md
 5753a1b2f07924a03f5f6dd1ef525d89c6f9e6964d57054ff1a96b9e606f202b  coco-capability-preflight.sh
-7a83945b5ede96b9f207b5f4e0ed35413ee5d093c7545b40cdc2cfc6f9a357c2  coco-collect.sh
+640fd94b56bab94532a44d1e2fb6328efa07eb452d0b6961504ec9160763fd0e  coco-collect.sh
 ee5f581ac79a080ec1a64cb23b9779b277b1d9ba9799a80b695e0a3a5cb234c5  coco-result.schema.json
 da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-invariants.py
+5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
 eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
-63bf2531d13559aa1472797a208bb3c2288eb5e7c610d45b91a85fd7063229a6  drill/build-drill-kernel.sh
-b60beabb1a4c73668f222415dd4afb63c8ec198bf867a24b2f6d33f2465d64b3  drill/init
+19321190c77a222d3199131f709000149d606b974a15b298681ec98232f03b49  drill/build-drill-kernel.sh
+7bf7b14e611399c7c49bf4837a86d7ff04039d31d3b922551feb2ee6be9678ea  drill/init
 a852ec4a5cab991de9feb797462b63c3977c9c28256e2a07ab2d2dca8b5036fe  drill/vmbus-lifecycle-drill.sh
 e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
 16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
 311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
 72b296da07dfa824760b7bb490580e382d837d60708c817ff74816897215c68f  drill/new-drill-vm.ps1
 ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
-43db1d839ad3de5ceb0e3175130c257bd0ac5066869f9a0fa8d05d5e9399462d  drill/owner-trace-accounting.py
+2c2f0254a855830606b195cf9263213e9d87af00d96f83d844b46f3ba3d872e5  drill/owner-trace-accounting.py
 
 Recipe: tinyconfig plus explicit symbols; embedded initramfs, static helper,
 EFI stub, serial console, boot-enabled opaque owner event tracing (512K/CPU).
@@ -52,15 +54,15 @@ assumed `.config` attached to an unbuilt candidate. BUILD.md has the exact
 command line and reproduction commands.
 
 CURRENT LOCAL EVIDENCE
-- Linked x86_64 QEMU/KUnit: 50/50, including the production rescind-retention
-  test and distinct-allocation identity assertions.
+- Linked x86_64 QEMU/KUnit: 51/51, including the production rescind-retention
+  test, UIO channel-removal closure and distinct-allocation identity assertions.
 - W=1/C=2 with Sparse v0.6.5-rc1: baseline 4 / candidate 5; INTRODUCED 1,
   REMOVED 0, UNCHANGED 4. Added count is an unchanged flexible protocol
   declaration re-emitted from a new test TU. No new diagnostic kind.
 - Strict per-mail checkpatch: zero errors/checks; exactly one accepted
   FILE_PATH_CHANGES warning on 0002, 0010, 0012, 0013, no others.
 - CoCo static predicates 6/6; validator fixtures 18/18.
-- Lifecycle decision fixtures 15/15; owner accounting fixtures 12/12;
+- Lifecycle decision fixtures 15/15; owner accounting fixtures 16/16;
   independent reader observer fixtures 3/3.
 - series/SHA256SUMS: verify all thirteen before applying/building.
 
@@ -70,7 +72,8 @@ full device restoration, live kernfs removal and non-NULL skb completion.
 Prior hosted runs 37179681746/37179681743 are older bytes, not this recut.
 The new workflow runs baseline and candidate using the same harness/config
 on both Windows runner images, and retries restoration after helpers close
-fds and mappings. Results are pending, not inherited.
+fds and mappings. Runs 37239830275/37238479048 failed before this UIO/transport revision.
+A fresh build/runtime pair must test these exact bytes; results are pending.
 
 BUNDLE LIMITS
 No confidential transition-failure injection delta is supplied. No runtime
@@ -79,7 +82,8 @@ not close COCO-1..5. Unobserved rows/subchecks remain not_run/PARTIAL.
 coco-collect.sh assembles a draft; TODO placeholders must be completed and
 JSON Schema validation performed before a result is usable.
 
-Owner capture must include boot metadata, complete per-CPU statistics,
+Owner capture must pass its compressed-transport SHA-256 checksum and
+include boot metadata, complete per-CPU statistics,
 zero overrun/dropped events and the end marker. The analyzer never logs
 raw lines or addresses. Active owners are not automatically leaks.
 No email has been sent. The operator sends the qualified frozen package.

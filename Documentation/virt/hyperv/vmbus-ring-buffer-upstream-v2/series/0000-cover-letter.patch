@@ -99,19 +99,21 @@ production and test translation units pass GCC W=1 syntax checking.
 The CoCo static checker passes its six necessary invariants and all
 18 validator self-tests. These are source checks, not platform proof.
 
-The owner-accounting tool passes twelve fixtures, including distinct
+The owner-accounting tool passes sixteen fixtures, including distinct
 same-sized owners, missing owner creation, duplicate terminal events
 and reclaim with unresolved host ownership. The independent VM-reader
 observer passes three PowerShell fixtures and keeps heartbeat output
 out of the returned job handle. Guest phase markers include uptime;
 the observer records console progress and VM state even while the
-serial reader is blocked. This instrumentation is prepared; no new
-runtime result is claimed for it.
+serial reader is blocked. Owner events now travel as compressed base64
+with a SHA-256 checksum: prior serial captures dropped characters even
+with zero ftrace overruns and cannot qualify owner accounting.
 
-The current recut passed all 50 KUnit tests after a linked x86_64
-kernel build and execution in QEMU: 21 VMBus, 12 UIO, 9 netvsc
+The current recut passed all 51 KUnit tests after a linked x86_64
+kernel build and execution in QEMU: 21 VMBus, 13 UIO, 9 netvsc
 completion, 4 RNDIS and 4 pre-existing refcount cases. The production
 rescind/retention case and distinct-owner assertions both passed.
+The UIO removal case checks closed, opened and failed disconnect paths.
 This KUnit configuration explicitly enables netvsc and its test suites.
 
 The current matched Sparse/W=1 comparison uses the same configured
@@ -128,7 +130,11 @@ subgates PASS and restore PARTIAL; the other timed out at the 1200 s
 reader backstop. No guest reached an integral lifecycle PASS.
 Fragmentation had two inconclusive readings and one exhausted-buddy
 allocation PASS. Timeout cause is unproven. These runs do not qualify
-the current recut; a new hosted build/runtime pair is required.
+the current recut. Runs 37239830275 and 37238479048 also failed: the
+former lacked Fixes commit objects in its shallow checkout; the latter
+reproduced baseline opened-channel restoration failure and incomplete
+serial owner capture. Both harness issues are corrected for a fresh
+hosted pair; no successful final runtime is claimed yet.
 
 Limitations and review questions
 ---------------------------------
@@ -144,10 +150,11 @@ host protocol guarantee permits GPADL reclamation after offer rescind,
 and which in-flight create/teardown orderings it covers. Until then the
 code retains uncertain ownership.
 
-UIO removal with /dev/uioN still open can leave the channel opened and
-prevent hv_netvsc rebinding. That existing restore limitation needs a
-matched baseline/candidate experiment after userspace closes its fd
-and mappings. A successful mmap is not successful device restoration.
+UIO removal now disconnects an opened channel after withdrawing UIO
+callbacks, because unregister prevents the later fd close from calling
+.release. Mapping pins survive independently. This addresses the opened
+channel observed on both baseline and candidate. A new matched runtime
+is required to qualify device restoration with live fd and mappings.
 
 Live kernfs node withdrawal, the non-NULL skb completion path and
 real confidential page-state failure injection remain unqualified.
@@ -173,10 +180,10 @@ restore. PARTIAL and NO_RESULT remain distinct from PASS.
  drivers/net/hyperv/rndis_request_test.c     |  157 ++++
  drivers/uio/Kconfig                         |   11 +
  drivers/uio/uio.c                           |   20 +
- drivers/uio/uio_hv_generic.c                |  366 +++++++--
- drivers/uio/uio_hv_generic_mmap_test.c      |  794 +++++++++++++++++++
+ drivers/uio/uio_hv_generic.c                |  381 ++++++++--
+ drivers/uio/uio_hv_generic_mmap_test.c      |  830 ++++++++++++++++++++
  include/linux/hyperv.h                      |   72 +-
- 21 files changed, 3653 insertions(+), 380 deletions(-)
+ 21 files changed, 3704 insertions(+), 380 deletions(-)
 
 -- 
 2.43.0

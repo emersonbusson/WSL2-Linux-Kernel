@@ -99,6 +99,7 @@ jobs:
             grep -q "KUNIT_CASE($case_name)" drivers/hv/vmbus_buffer_test.c
           done
           for case_name in \
+            hv_uio_remove_disconnects_open_channel_test \
             hv_uio_mmap_validate_test \
             hv_uio_ring_mmap_page_range_test \
             hv_uio_mmap_page_protection_test; do
@@ -113,11 +114,11 @@ jobs:
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-gpadl-lifetime' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'hyperv-uio-hv-generic-mmap \(3 subtests\)' \
+          grep -Eq 'hyperv-uio-hv-generic-mmap \(4 subtests\)' \
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 15 tests: passed: 15$' \
+          grep -Eq 'Testing complete\. Ran 16 tests: passed: 16$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
             vmbus_gpadl_rescind_retains_state_test \
@@ -129,6 +130,7 @@ jobs:
               vmbus-wsl-artifacts/kunit.log
           done
           for case_name in \
+            hv_uio_remove_disconnects_open_channel_test \
             hv_uio_mmap_validate_test \
             hv_uio_ring_mmap_page_range_test \
             hv_uio_mmap_page_protection_test; do
@@ -190,6 +192,17 @@ jobs:
           git -C linux checkout --detach FETCH_HEAD
           test "$(git -C linux rev-parse HEAD)" = "$BASE"
           printf '%s\n' "$BASE" > vmbus-artifacts/base-sha.txt
+          # checkpatch resolves Fixes tags even in this shallow checkout.
+          # Fetch their exact objects without changing the candidate base.
+          for fixes_sha in \
+            e8b7db38449ac5b950a3f00519171c4be3e226ff \
+            5b54dac856cb5bd6f33f4159012773e4a33704f7 \
+            8b31f8c982b738e4130539e47f03967c599d8e22; do
+            git -C linux fetch --depth=1 origin "$fixes_sha"
+            test "$(git -C linux cat-file -t "$fixes_sha")" = commit
+            printf '%s\n' "$fixes_sha" >> vmbus-artifacts/fixes-objects.txt
+          done
+          test "$(git -C linux rev-parse HEAD)" = "$BASE"
       - name: Configure candidate build
         env:
           ARCH: ${{ matrix.arch }}
@@ -439,6 +452,7 @@ jobs:
             vmbus_requestor_id_lifecycle_test \
             vmbus_requestor_invalid_ids_test \
             vmbus_requestor_exhaustion_test \
+            hv_uio_remove_disconnects_open_channel_test \
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \
@@ -479,11 +493,11 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'hyperv-uio-mmap \(12 subtests\)' \
+          grep -Eq 'hyperv-uio-mmap \(13 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 50 tests: passed: 50$' \
+          grep -Eq 'Testing complete\. Ran 51 tests: passed: 51$' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-rndis-request' \
             vmbus-artifacts/kunit.log
@@ -511,6 +525,7 @@ jobs:
             vmbus_requestor_id_lifecycle_test \
             vmbus_requestor_invalid_ids_test \
             vmbus_requestor_exhaustion_test \
+            hv_uio_remove_disconnects_open_channel_test \
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \

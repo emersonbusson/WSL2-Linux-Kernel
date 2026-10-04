@@ -121,6 +121,16 @@ static struct page **hv_uio_mmap_select_pages(struct page **pages,
 	return pages + offset;
 }
 
+/* Caller has withdrawn UIO callbacks before removing its backing memory. */
+static int hv_uio_disconnect_if_open(struct vmbus_channel *channel,
+				     int (*disconnect)(struct vmbus_channel *))
+{
+	if (channel->state != CHANNEL_OPENED_STATE)
+		return 0;
+
+	return disconnect(channel);
+}
+
 #if defined(CONFIG_UIO_HV_GENERIC_KUNIT_TEST)
 #include "uio_hv_generic_mmap_test.c"
 #endif
@@ -517,12 +527,17 @@ static void
 hv_uio_remove(struct hv_device *dev)
 {
 	struct hv_uio_private_data *pdata = hv_get_drvdata(dev);
+	int ret;
 
 	if (!pdata)
 		return;
 
 	hv_remove_ring_sysfs(dev->channel);
 	uio_unregister_device(&pdata->info);
+	/* unregister prevents the eventual fd close from calling .release. */
+	ret = hv_uio_disconnect_if_open(dev->channel, vmbus_disconnect_ring);
+	if (ret)
+		dev_err(&dev->device, "channel disconnect failed: %d\n", ret);
 	hv_uio_cleanup(dev, pdata);
 
 	vmbus_free_ring(dev->channel);

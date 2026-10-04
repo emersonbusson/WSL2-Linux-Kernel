@@ -247,6 +247,8 @@ echo "HYPERV_DRILL_FAULTS count=${FAULTS:-0}"
 # command line; enabling the event here would miss boot allocations. A
 # missing event or any per-CPU ring overrun leaves owner accounting partial.
 TRACE_DIR=/sys/kernel/tracing
+OWNER_CAPTURE=/var/tmp/owner-events.txt
+(
 if [ "$(cat "$TRACE_DIR/events/hyperv/vmbus_buffer_owner/enable" 2>/dev/null)" = 1 ] &&
 	grep -q 'trace_event=hyperv:vmbus_buffer_owner' /proc/cmdline; then
 	echo 0 >"$TRACE_DIR/tracing_on"
@@ -266,6 +268,20 @@ if [ "$(cat "$TRACE_DIR/events/hyperv/vmbus_buffer_owner/enable" 2>/dev/null)" =
 	echo "OWNER_TRACE end=1"
 else
 	echo "OWNER_TRACE status=UNAVAILABLE"
+fi
+) >"$OWNER_CAPTURE"
+# The serial path has dropped individual characters in large plain-text
+# dumps despite zero ftrace overruns. Compress the opaque payload and bind
+# every received byte to its digest; an incomplete transfer stays PARTIAL.
+if gzip -c "$OWNER_CAPTURE" >"$OWNER_CAPTURE.gz"; then
+	read -r OWNER_DIGEST OWNER_UNUSED <<EOF
+$(sha256sum "$OWNER_CAPTURE.gz")
+EOF
+	echo "OWNER_TRACE_BLOB format=gzip-base64 sha256=$OWNER_DIGEST"
+	base64 "$OWNER_CAPTURE.gz" | sed 's/^/OWNER_TRACE_DATA /'
+	echo "OWNER_TRACE_BLOB end=1"
+else
+	echo "OWNER_TRACE status=UNAVAILABLE reason=serialization_failed"
 fi
 
 # --- verdict -----------------------------------------------------------------

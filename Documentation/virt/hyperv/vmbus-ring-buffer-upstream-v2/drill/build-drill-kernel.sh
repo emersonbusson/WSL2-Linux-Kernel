@@ -84,6 +84,7 @@ APPLETS=(
 	tr head tail wc basename dirname readlink dmesg tee seq dd sync
 	poweroff reboot uname sort uniq cut paste ln chmod chown kill ps
 	id whoami env printf true false yes test '[' ']' which
+	gzip base64 sha256sum
 )
 for a in "${APPLETS[@]}"; do
 	ln -sf busybox "$ROOT/bin/$a"

@@ -66,7 +66,43 @@ static void hv_uio_mmap_page_protection_test(struct kunit *test)
 			pgprot_val(pgprot_decrypted(PAGE_SHARED)));
 }
 
+static unsigned int hv_uio_disconnect_calls;
+static int hv_uio_disconnect_result;
+
+static int hv_uio_test_disconnect(struct vmbus_channel *channel)
+{
+	hv_uio_disconnect_calls++;
+	channel->state = CHANNEL_OPEN_STATE;
+	return hv_uio_disconnect_result;
+}
+
+static void hv_uio_remove_disconnects_open_channel_test(struct kunit *test)
+{
+	struct vmbus_channel channel = { .state = CHANNEL_OPEN_STATE };
+
+	hv_uio_disconnect_calls = 0;
+	hv_uio_disconnect_result = 0;
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
+							hv_uio_test_disconnect), 0);
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 0U);
+	channel.state = CHANNEL_OPENED_STATE;
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
+							hv_uio_test_disconnect), 0);
+	KUNIT_EXPECT_EQ(test, channel.state, CHANNEL_OPEN_STATE);
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 1U);
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
+							hv_uio_test_disconnect), 0);
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 1U);
+
+	channel.state = CHANNEL_OPENED_STATE;
+	hv_uio_disconnect_result = -EIO;
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
+							hv_uio_test_disconnect), -EIO);
+	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 2U);
+}
+
 static struct kunit_case hv_uio_mmap_test_cases[] = {
+	KUNIT_CASE(hv_uio_remove_disconnects_open_channel_test),
 	KUNIT_CASE(hv_uio_mmap_validate_test),
 	KUNIT_CASE(hv_uio_ring_mmap_page_range_test),
 	KUNIT_CASE(hv_uio_mmap_page_protection_test),

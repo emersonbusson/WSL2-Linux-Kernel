@@ -70,23 +70,30 @@ the protection snapshot surviving a cleared descriptor. They are
 included from uio_hv_generic.c so they can reach the static helpers
 without exporting them.
 
+Disconnect an open channel after unregistering UIO callbacks. An
+eventual fd close cannot call .release after unregister, so removal must
+close the channel before releasing its ring and external buffers. Mapped
+pages retain their folio references until VMA close; disconnect failure
+leaves host ownership uncertain and retained. Test open, already closed,
+repeated and failed disconnection through the same helper used by
+remove.
+
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c                   |  92 +++
+ drivers/hv/channel.c                   |  92 ++++
  drivers/hv/vmbus_drv.c                 |  45 +-
  drivers/uio/Kconfig                    |  11 +
  drivers/uio/uio.c                      |  20 +
- drivers/uio/uio_hv_generic.c           | 297 ++++++++-
- drivers/uio/uio_hv_generic_mmap_test.c | 794 +++++++++++++++++++++++++
+ drivers/uio/uio_hv_generic.c           | 312 ++++++++++++-
+ drivers/uio/uio_hv_generic_mmap_test.c | 830 +++++++++++++++++++++++++++++++++
  include/linux/hyperv.h                 |  24 +
- 7 files changed, 1275 insertions(+), 8 deletions(-)
- create mode 100644 drivers/uio/uio_hv_generic_mmap_test.c
+ 7 files changed, 1326 insertions(+), 8 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index ee1b132d2649..0e0eb98f9132 100644
+index c08c140a00c0..2c6fa1edf6c7 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -1160,6 +1160,98 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+@@ -1134,6 +1134,98 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
  }
  EXPORT_SYMBOL_GPL(vmbus_release_buffer);
  
@@ -303,7 +310,7 @@ index f8fa20522660..4767ed0661f7 100644
  	}
  
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index b40e80e19c6c..05f09a922b4d 100644
+index b40e80e19c6c..d83c907f4295 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -25,6 +25,7 @@
@@ -323,7 +330,7 @@ index b40e80e19c6c..05f09a922b4d 100644
  
  	struct vmbus_buffer recv_buffer;
  	char	recv_name[32];	/* "recv_4294967295" */
-@@ -149,23 +152,299 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
+@@ -149,23 +152,309 @@ static void hv_uio_rescind(struct vmbus_channel *channel)
  }
  
  /* Function used for mmap of the ring buffer sysfs interface. */
@@ -623,6 +630,16 @@ index b40e80e19c6c..05f09a922b4d 100644
  	return 0;
  }
  
++/* Caller has withdrawn UIO callbacks before removing its backing memory. */
++static int hv_uio_disconnect_if_open(struct vmbus_channel *channel,
++				     int (*disconnect)(struct vmbus_channel *))
++{
++	if (channel->state != CHANNEL_OPENED_STATE)
++		return 0;
++
++	return disconnect(channel);
++}
++
 +#if defined(CONFIG_UIO_HV_GENERIC_KUNIT_TEST)
 +#include "uio_hv_generic_mmap_test.c"
 +#endif
@@ -630,7 +647,7 @@ index b40e80e19c6c..05f09a922b4d 100644
  /* Callback from VMBUS subsystem when new channel created. */
  static void
  hv_uio_new_channel(struct vmbus_channel *new_sc)
-@@ -272,6 +551,7 @@ hv_uio_probe(struct hv_device *dev,
+@@ -272,6 +561,7 @@ hv_uio_probe(struct hv_device *dev,
  	pdata->info.name = "uio_hv_generic";
  	pdata->info.version = DRIVER_VERSION;
  	pdata->info.irqcontrol = hv_uio_irqcontrol;
@@ -638,7 +655,7 @@ index b40e80e19c6c..05f09a922b4d 100644
  	pdata->info.open = hv_uio_open;
  	pdata->info.release = hv_uio_release;
  	pdata->info.irq = UIO_IRQ_CUSTOM;
-@@ -290,12 +570,15 @@ hv_uio_probe(struct hv_device *dev,
+@@ -290,12 +580,15 @@ hv_uio_probe(struct hv_device *dev,
  		= (uintptr_t)vmbus_connection.int_page;
  	pdata->info.mem[INT_PAGE_MAP].size = HV_HYP_PAGE_SIZE;
  	pdata->info.mem[INT_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
@@ -654,12 +671,30 @@ index b40e80e19c6c..05f09a922b4d 100644
  
  	if (channel->device_id == HV_NIC) {
  		ret = vmbus_alloc_buffer_owned(channel, RECV_BUFFER_SIZE, false,
+@@ -372,12 +665,17 @@ static void
+ hv_uio_remove(struct hv_device *dev)
+ {
+ 	struct hv_uio_private_data *pdata = hv_get_drvdata(dev);
++	int ret;
+ 
+ 	if (!pdata)
+ 		return;
+ 
+ 	hv_remove_ring_sysfs(dev->channel);
+ 	uio_unregister_device(&pdata->info);
++	/* unregister prevents the eventual fd close from calling .release. */
++	ret = hv_uio_disconnect_if_open(dev->channel, vmbus_disconnect_ring);
++	if (ret)
++		dev_err(&dev->device, "channel disconnect failed: %d\n", ret);
+ 	hv_uio_cleanup(dev, pdata);
+ 
+ 	vmbus_free_ring(dev->channel);
 diff --git a/drivers/uio/uio_hv_generic_mmap_test.c b/drivers/uio/uio_hv_generic_mmap_test.c
 new file mode 100644
-index 000000000000..513c7aea34ba
+index 000000000000..8d12d8808ef7
 --- /dev/null
 +++ b/drivers/uio/uio_hv_generic_mmap_test.c
-@@ -0,0 +1,794 @@
+@@ -0,0 +1,830 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * KUnit tests for the UIO Hyper-V generic mmap paths.
@@ -1432,7 +1467,43 @@ index 000000000000..513c7aea34ba
 +	__free_page(pages[0]);
 +}
 +
++static unsigned int hv_uio_disconnect_calls;
++static int hv_uio_disconnect_result;
++
++static int hv_uio_test_disconnect(struct vmbus_channel *channel)
++{
++	hv_uio_disconnect_calls++;
++	channel->state = CHANNEL_OPEN_STATE;
++	return hv_uio_disconnect_result;
++}
++
++static void hv_uio_remove_disconnects_open_channel_test(struct kunit *test)
++{
++	struct vmbus_channel channel = { .state = CHANNEL_OPEN_STATE };
++
++	hv_uio_disconnect_calls = 0;
++	hv_uio_disconnect_result = 0;
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
++							hv_uio_test_disconnect), 0);
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 0U);
++	channel.state = CHANNEL_OPENED_STATE;
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
++							hv_uio_test_disconnect), 0);
++	KUNIT_EXPECT_EQ(test, channel.state, CHANNEL_OPEN_STATE);
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 1U);
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
++							hv_uio_test_disconnect), 0);
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 1U);
++
++	channel.state = CHANNEL_OPENED_STATE;
++	hv_uio_disconnect_result = -EIO;
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_if_open(&channel,
++							hv_uio_test_disconnect), -EIO);
++	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 2U);
++}
++
 +static struct kunit_case hv_uio_ring_mmap_test_cases[] = {
++	KUNIT_CASE(hv_uio_remove_disconnects_open_channel_test),
 +	KUNIT_CASE(hv_uio_ring_mmap_range_test),
 +	KUNIT_CASE(hv_uio_ring_mmap_prepare_test),
 +	KUNIT_CASE(hv_uio_mmap_region_select_test),
@@ -1491,4 +1562,3 @@ index 0f482ed5c776..f0e8f1af8e75 100644
  extern int vmbus_recvpacket(struct vmbus_channel *channel,
 -- 
 2.43.0
-
