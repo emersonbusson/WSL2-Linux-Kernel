@@ -40,6 +40,7 @@ beside it under `drill/`. No other repository is needed.
 - `busybox` (static; the script defaults to `/bin/busybox`, override with
   `BUSYBOX=/path/to/busybox`)
 - A mainline kernel tree already at the candidate (section 3)
+- Python 3 with `jsonschema` on the report collection machine (offline schema validation)
 
 A dynamic helper would not run in an initramfs. The script builds the helper
 with `-static` and then proves it with `ldd`; if that check finds a dynamic

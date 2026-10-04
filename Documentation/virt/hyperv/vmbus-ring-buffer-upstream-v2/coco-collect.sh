@@ -642,51 +642,12 @@ cmd_validate() {
 	f="${1:-$RESULT_DEFAULT}"
 	test -f "$f" || die "validate: no such file '$f'"
 
-	bad=0
-	grep -q '"schema": "ramshared-coco-result/v1"' "$f" || { warn "validate: wrong or missing schema id"; bad=1; }
-	grep -q '"qualification_status"' "$f" || { warn "validate: missing qualification_status"; bad=1; }
-	grep -q '"infrastructure_status"' "$f" || { warn "validate: missing infrastructure_status"; bad=1; }
-	grep -q '"status_justification"' "$f" || { warn "validate: missing status_justification"; bad=1; }
-	grep -q '"log_safety"' "$f" || { warn "validate: missing log_safety"; bad=1; }
+	scan_file "$f" || die "validate: report hygiene failed"
+	command -v python3 >/dev/null 2>&1 || die "validate: python3 required"
+	python3 -c 'import jsonschema' 2>/dev/null || die "validate: Python jsonschema package required"
+	validator="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/coco-validate.py"
+	python3 "$validator" "$f" || die "validate: schema or report consistency failed"
 
-	if grep -q '"qualification_status": "PASS"' "$f"; then
-		grep -q '"infrastructure_status": "completed"' "$f" || \
-			{ warn "validate: PASS without infrastructure=completed"; bad=1; }
-		grep -qE '"isolation_mode": "(sev_snp|tdx_no_paravisor|arm_cca)"' "$f" || \
-			{ warn "validate: PASS without a proven isolation mode"; bad=1; }
-		grep -q 'bug_oops_panic_total' "$f" || \
-			{ warn "validate: PASS without a bug_oops_panic_total counter"; bad=1; }
-	fi
-
-	if grep -q '"row": "COCO-2"' "$f" && grep -q '"qualification_status": "PASS"' "$f"; then
-		grep -q '"isolation_mode": "tdx_no_paravisor"' "$f" || \
-			{ warn "validate: COCO-2 PASS without tdx_no_paravisor"; bad=1; }
-		grep -q '"paravisor": "absent"' "$f" || \
-			{ warn "validate: COCO-2 PASS without paravisor=absent"; bad=1; }
-	fi
-
-	if grep -q '"qualification_status": "ENVIRONMENT_UNAVAILABLE"' "$f"; then
-		grep -q '"infrastructure_status": "never_started"' "$f" || \
-			{ warn "validate: ENVIRONMENT_UNAVAILABLE without never_started"; bad=1; }
-	fi
-
-	grep -qE '/home/|/mnt/[a-z]/|/Users/' "$f" && \
-		{ warn "validate: absolute host path in result"; bad=1; }
-	grep -qE "$KVADDR_RE" "$f" && \
-		{ warn "validate: kernel virtual address in result"; bad=1; }
-
-	if grep -q 'TODO' "$f"; then
-		n=$(grep -c 'TODO' "$f" 2>/dev/null || echo 0)
-		warn "validate: $n TODO token(s) remain; the schema will reject them in required fields"
-		bad=1
-	fi
-
-	if [ "$bad" -eq 0 ]; then
-		ok "$f: structural checks passed"
-		ok "run a real JSON-Schema validator against coco-result.schema.json before returning"
-	else
-		die "validate: $f failed structural checks"
-	fi
 }
 
 # --- main ------------------------------------------------------------------

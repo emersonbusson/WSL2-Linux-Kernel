@@ -91,6 +91,7 @@ jobs:
           cp "$RUNNER_TEMP/wsl-kunitconfig" \
             vmbus-wsl-artifacts/config-kunit-requested
           for case_name in \
+            vmbus_gpadl_rescind_retains_state_test \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
             vmbus_vmalloc_mapping_ref_defers_free_test \
             vmbus_reclaim_busy_ref_defers_free_test \
@@ -119,6 +120,7 @@ jobs:
           grep -Eq 'Testing complete\. Ran 15 tests: passed: 15$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
+            vmbus_gpadl_rescind_retains_state_test \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
             vmbus_vmalloc_mapping_ref_defers_free_test \
             vmbus_reclaim_busy_ref_defers_free_test \
@@ -242,9 +244,17 @@ jobs:
               drivers/hv drivers/uio drivers/net/hyperv include/linux \
               | xargs -r -d '\n' git -C linux add -N --
             git -C linux diff --check
-            (cd linux && scripts/checkpatch.pl --strict --no-tree) \
+            if (cd linux && scripts/checkpatch.pl --strict --no-tree) \
               < <(git -C linux diff --no-ext-diff --no-color) 2>&1 \
-              | tee "vmbus-artifacts/checkpatch-${stage}.log"
+              | tee "vmbus-artifacts/checkpatch-${stage}.log"; then
+              :
+            else
+              check_status=("${PIPESTATUS[@]}")
+              test "${check_status[0]}" -eq 1
+              test "${check_status[1]}" -eq 0
+            fi
+            grep -Eq '^total: 0 errors, [01] warnings, 0 checks,' \
+              "vmbus-artifacts/checkpatch-${stage}.log"
             errors=$(grep -c '^ERROR:' "vmbus-artifacts/checkpatch-${stage}.log" || true)
             warns=$(grep -c '^WARNING:' "vmbus-artifacts/checkpatch-${stage}.log" || true)
             test "$errors" -eq 0
@@ -261,17 +271,24 @@ jobs:
                 <(git -C linux diff --no-ext-diff --no-color)
             fi
             # Per-mail shape: each format-patch is what gets sent, so each
-            # is also checked on its own complete input. Exactly 0002 and
-            # 0010 add a file and must carry exactly that one warning; the
-            # other eleven must be silent.
-            (cd linux && scripts/checkpatch.pl --strict --no-tree) \
+            # is also checked on its own complete input. Exactly 0002,
+            # 0010, 0012 and 0013 add files and carry that one warning.
+            if (cd linux && scripts/checkpatch.pl --strict --no-tree) \
               < "$GITHUB_WORKSPACE/$patch" 2>&1 \
-              | tee "vmbus-artifacts/checkpatch-mail-${stage}.log"
+              | tee "vmbus-artifacts/checkpatch-mail-${stage}.log"; then
+              :
+            else
+              check_status=("${PIPESTATUS[@]}")
+              test "${check_status[0]}" -eq 1
+              test "${check_status[1]}" -eq 0
+            fi
+            grep -Eq '^total: 0 errors, [01] warnings, 0 checks,' \
+              "vmbus-artifacts/checkpatch-mail-${stage}.log"
             merrors=$(grep -c '^ERROR:' "vmbus-artifacts/checkpatch-mail-${stage}.log" || true)
             mwarns=$(grep -c '^WARNING:' "vmbus-artifacts/checkpatch-mail-${stage}.log" || true)
             test "$merrors" -eq 0
             case "$stage" in
-            2 | 10)
+            2 | 10 | 12 | 13)
               test "$mwarns" -eq 1
               grep -q '^WARNING: added, moved or deleted file(s)' \
                 "vmbus-artifacts/checkpatch-mail-${stage}.log"

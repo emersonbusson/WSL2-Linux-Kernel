@@ -160,27 +160,9 @@ int vmbus_gpadl_teardown_result(struct vmbus_channel *channel,
 		return 0;
 	}
 
-	/*
-	 * A host rescind revokes GPADLs that were already established. A create
-	 * request with an uncertain response may still have a partial GPADL at
-	 * the host, so retain that state. vmbus_free_buffer() separately retains
-	 * backing pages while user mappings still reference them. Ownerless callers
-	 * manage their own pages and must quiesce them before relying on host
-	 * rescind; DXG stops the allocation before teardown.
-	 */
-	if (event == VMBUS_GPADL_TEARDOWN_HOST_RESCIND) {
-		WARN_ON_ONCE(vmbus_channel_rescind_source(channel) !=
-			     VMBUS_RESCIND_HOST);
-		if (buffer->gpadl_state == VMBUS_GPADL_LIVE ||
-		    buffer->gpadl_state == VMBUS_GPADL_TEARING_DOWN) {
-			buffer->gpadl_handle = 0;
-			buffer->gpadl_state = VMBUS_GPADL_NONE;
-		}
-		return 0;
-	}
-
-	/* Local unload/suspend rescinds do not prove host-side revocation. */
-	if (event == VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND)
+	/* A channel offer rescind does not acknowledge GPADL teardown. */
+	if (event == VMBUS_GPADL_TEARDOWN_HOST_RESCIND ||
+	    event == VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND)
 		return ret ? ret : -ENODEV;
 
 	return ret ? ret : -EIO;

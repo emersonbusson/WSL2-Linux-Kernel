@@ -162,13 +162,17 @@ What to look for:
 ## Step 8 — collect
 
 ```sh
+mkdir -p artifacts
+cp /var/tmp/coco-lifecycle.log artifacts/
+cp /var/tmp/coco-fragment.log artifacts/
 ./coco-collect.sh finish \
   --row COCO-1 \
   --status PARTIAL \
-  --dmesg dmesg.txt \
-  --preflight preflight-booted.txt \
-  --log /var/tmp/coco-lifecycle.log \
-  --log /var/tmp/coco-fragment.log \
+  --justification "Available subchecks measured; transition injection not supplied" \
+  --artifact dmesg:dmesg.txt \
+  --artifact preflight_report:preflight-booted.txt \
+  --artifact drill_log:artifacts/coco-lifecycle.log \
+  --artifact drill_log:artifacts/coco-fragment.log \
   --out result.json
 ```
 

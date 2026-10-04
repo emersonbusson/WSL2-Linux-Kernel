@@ -117,63 +117,44 @@ static void vmbus_shared_buffer_path_selection_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, vmbus_uses_shared_page_chunks(true, true));
 }
 
-static void vmbus_gpadl_rescind_remote_vs_unload_test(struct kunit *test)
+static void vmbus_gpadl_rescind_retains_state_test(struct kunit *test)
 {
-	struct vmbus_buffer_retained *owner;
-	struct vmbus_channel channel = {};
-	struct vmbus_buffer buffer = {
-		.gpadl_handle = 42,
-		.gpadl_state = VMBUS_GPADL_LIVE,
+	static const enum vmbus_gpadl_state states[] = {
+		VMBUS_GPADL_PENDING, VMBUS_GPADL_LIVE,
+		VMBUS_GPADL_TEARING_DOWN, VMBUS_GPADL_UNCERTAIN,
 	};
-	int ret;
+	struct vmbus_channel channel = { .rescind = true };
+	struct vmbus_buffer buffer = {};
+	unsigned int origin, i;
+	int ret, expected;
 
-	owner = vmbus_buffer_owner_alloc();
-	KUNIT_ASSERT_NOT_NULL(test, owner);
-	buffer.owner = owner;
-	WRITE_ONCE(channel.rescind, true);
-	WRITE_ONCE(channel.rescind_from_host, true);
-	KUNIT_EXPECT_EQ(test, vmbus_channel_rescind_source(&channel),
-			VMBUS_RESCIND_HOST);
-	ret = vmbus_gpadl_teardown_result(&channel, &buffer,
-					  VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
-					  -ENODEV);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-	KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 0U);
-	KUNIT_EXPECT_EQ(test, buffer.gpadl_state, VMBUS_GPADL_NONE);
-	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
+	for (origin = 0; origin < 2; origin++) {
+		enum vmbus_gpadl_teardown_event event = origin ?
+			VMBUS_GPADL_TEARDOWN_HOST_RESCIND :
+			VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND;
 
-	buffer.gpadl_handle = 43;
-	buffer.gpadl_state = VMBUS_GPADL_TEARING_DOWN;
-	ret = vmbus_gpadl_teardown_result(&channel, &buffer,
-					  VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
-					  -ENODEV);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
+		channel.rescind_from_host = origin;
+		for (i = 0; i < ARRAY_SIZE(states); i++) {
+			buffer.gpadl_handle = 42;
+			buffer.gpadl_state = states[i];
+			ret = vmbus_gpadl_teardown_result(&channel, &buffer,
+							  event, -ENODEV);
+			KUNIT_EXPECT_EQ(test, ret, -ENODEV);
+			KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 42U);
+			KUNIT_EXPECT_EQ(test, buffer.gpadl_state, states[i]);
+			KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
 
-	memset(&channel, 0, sizeof(channel));
-	buffer.gpadl_handle = 42;
-	buffer.gpadl_state = VMBUS_GPADL_LIVE;
-	buffer.owner = NULL;
-	WRITE_ONCE(channel.rescind_from_host, true);
-	WRITE_ONCE(channel.rescind, true);
-	ret = vmbus_gpadl_teardown_result(&channel, &buffer,
-					  VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
-					  -ENODEV);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&buffer));
-
-	buffer.gpadl_handle = 42;
-	buffer.gpadl_state = VMBUS_GPADL_LIVE;
-	WRITE_ONCE(channel.rescind_from_host, false);
-	KUNIT_EXPECT_EQ(test, vmbus_channel_rescind_source(&channel),
-			VMBUS_RESCIND_LOCAL);
-	ret = vmbus_gpadl_teardown_result(&channel, &buffer,
-					  VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND,
-					  -ENODEV);
-	KUNIT_EXPECT_EQ(test, ret, -ENODEV);
-	KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 42U);
-	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
-	kfree(owner);
+			ret = __vmbus_teardown_gpadl(&channel, &buffer,
+						     vmbus_test_alloc_teardown_fail);
+			expected = states[i] == VMBUS_GPADL_PENDING ||
+				   states[i] == VMBUS_GPADL_TEARING_DOWN ?
+				   -EINPROGRESS : -ENODEV;
+			KUNIT_EXPECT_EQ(test, ret, expected);
+			KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 42U);
+			KUNIT_EXPECT_EQ(test, buffer.gpadl_state, states[i]);
+			KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&buffer));
+		}
+	}
 }
 
 static void vmbus_gpadl_create_response_rescind_test(struct kunit *test)
@@ -230,7 +211,7 @@ static void vmbus_gpadl_partial_post_rescind_test(struct kunit *test)
 
 	ret = __vmbus_teardown_gpadl(&channel, &buffer,
 				     vmbus_test_alloc_teardown_fail);
-	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, ret, -ENODEV);
 	KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 44U);
 	KUNIT_EXPECT_EQ(test, buffer.gpadl_state, VMBUS_GPADL_UNCERTAIN);
 	before = vmbus_test_retained_count();
@@ -467,7 +448,7 @@ static void vmbus_buffer_cleanup_repeated_test(struct kunit *test)
 static struct kunit_case vmbus_gpadl_lifetime_test_cases[] = {
 	KUNIT_CASE(vmbus_buffer_size_rounding_test),
 	KUNIT_CASE(vmbus_shared_buffer_path_selection_test),
-	KUNIT_CASE(vmbus_gpadl_rescind_remote_vs_unload_test),
+	KUNIT_CASE(vmbus_gpadl_rescind_retains_state_test),
 	KUNIT_CASE(vmbus_gpadl_create_response_rescind_test),
 	KUNIT_CASE(vmbus_gpadl_partial_post_rescind_test),
 	KUNIT_CASE(vmbus_gpadl_teardown_alloc_failure_test),
