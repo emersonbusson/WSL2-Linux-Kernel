@@ -193,6 +193,25 @@ static int do_mmap_hold(int argc, char **argv)
 	fflush(stdout);
 
 	/*
+	 * Liveness at establishment, before any hold. The window this hold
+	 * covers is only as real as the mapping is at its start: a map that
+	 * is already dead here is not a hold. This is the read taken while
+	 * the caller's node still exists; the post-hold read below is a
+	 * separate question and is scored per surface.
+	 */
+	touch_ok = 0;
+	for (i = 0; i < mapped; i++) {
+		volatile unsigned char *b = maps[i];
+		unsigned char v = *b;
+
+		(void)v;
+		touch_ok++;
+	}
+	printf("MMAP_HOLD touch_ready path=%s ok=%ld fail=0 maps=%ld\n",
+	       path, touch_ok, mapped);
+	fflush(stdout);
+
+	/*
 	 * Hold the mappings alive across the caller's teardown. This is the
 	 * BUG-3 window: the ring is freed while a userspace mapping still
 	 * references it. The unbind races this hold on purpose.

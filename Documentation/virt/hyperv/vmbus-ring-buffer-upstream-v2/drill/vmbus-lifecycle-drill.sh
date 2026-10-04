@@ -273,6 +273,53 @@ hold_already_released() {
 	' "$LOG"
 }
 
+# Permitted page reads. Two of them, and they answer different questions.
+# touch_ready is taken at establishment, while the caller's node still
+# exists: it is the only read inside the window the hold claims to cover.
+# touch is taken after the release signal and may legitimately fault on a
+# surface whose node is gone. They must not be conflated: a scraper that
+# takes whichever ok= it saw last would report the establishment read as
+# if it were the post-teardown one.
+hold_touch_ready() {
+	awk -v p="$1" '
+		$1 == "MMAP_HOLD" {
+			path = ""; ok = ""; tag = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^path=/) path = substr($i, 6)
+				if ($i ~ /^ok=/) ok = substr($i, 4)
+				if ($i == "touch_ready") tag = "ready"
+			}
+			if (path == p && tag == "ready" && ok != "") last = ok
+		}
+		END { if (last != "") print last }
+	' "$LOG"
+}
+hold_touch_after() {
+	awk -v p="$1" '
+		$1 == "MMAP_HOLD" {
+			path = ""; ok = ""; tag = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^path=/) path = substr($i, 6)
+				if ($i ~ /^ok=/) ok = substr($i, 4)
+				if ($i == "touch") tag = "after"
+			}
+			if (path == p && tag == "after" && ok != "") last = ok
+		}
+		END { if (last != "") print last }
+	' "$LOG"
+}
+hold_release_waited() {
+	awk -v p="$1" '
+		$1 == "MMAP_HOLD" && $2 == "release_wait" {
+			path = ""
+			for (i = 1; i <= NF; i++)
+				if ($i ~ /^path=/) path = substr($i, 6)
+			if (path == p) last = "yes"
+		}
+		END { if (last != "") print last }
+	' "$LOG"
+}
+
 # derive_map_accounting_verdict <settle> <pre> <base> <rebind> <unknown_sizes>
 # Sets MAP_ACCOUNTING_VERDICT and MAP_ACCOUNTING_WHY. This is the size-class
 # ledger and the end-tuple band. It is explicitly scoped to what map
@@ -297,45 +344,90 @@ derive_map_accounting_verdict() {
 	fi
 }
 
-# derive_map_surface_verdict <launched> <status> <maps> <ready_published> <released_early> <touch_ok> <touch_maps>
+# derive_map_surface_verdict <launched> <status> <maps> <ready_published>
+#   <released_early> <ready_ok> <after_ok> <release_waited> <sustain>
 # Sets MAP_SURFACE_VERDICT and MAP_SURFACE_WHY for one mmap surface. One
 # call per surface; the caller copies the result into MAP_UIO_* or
-# MAP_SYSFS_*. Success requires all of: a helper that held something, a
-# READY ack, a hold that is still live when the caller releases it, and
-# post-teardown page reads covering every held map. A helper that died, or
-# that released on its own before the teardown finished, is a FAIL even
-# when its READY line is sitting in the log.
+# MAP_SYSFS_*.
+#
+# Two contracts, because the two surfaces do not promise the same
+# lifetime. The UIO char device keeps its pin until the VMA closes, so its
+# pages must still be readable after teardown: sustain=yes. The sysfs
+# "ring" node is a kernfs bin attribute and is removed by
+# hv_remove_ring_sysfs() before vmbus_free_ring() runs; its mapping is
+# withdrawn there by design, and kernfs then zaps the PTEs. On that
+# surface a post-teardown SIGBUS is the withdraw-before-free ordering,
+# not a freed-under-mapping: sustain=no. Requiring the sysfs read to
+# succeed would be requiring a lifetime the surface never promised.
+#
+# Both contracts require the same hard floor: the mapping was live at
+# establishment (ready_ok), the hold survived the window (not released
+# early, reached the release signal), and the READY ack is real.
 derive_map_surface_verdict() {
 	_launched="${1:-no}"
 	_status="${2:-absent}"
 	_maps="${3:-0}"
 	_ready="${4:-no}"
 	_early="${5:-no}"
-	_tok="${6:-}"
-	_tmaps="${7:-}"
+	_readyok="${6:-}"
+	_afterok="${7:-}"
+	_waited="${8:-no}"
+	_sustain="${9:-yes}"
 	if [ "$_launched" != yes ]; then
 		MAP_SURFACE_VERDICT=SKIP
 		MAP_SURFACE_WHY="surface not launched"
 		return 0
 	fi
-	if [ "$_status" != ok ]; then
-		MAP_SURFACE_VERDICT=FAIL
-		MAP_SURFACE_WHY="helper status=$_status (a failed mmap, or a post-teardown read that faulted on a revoked mapping, takes the helper with it)"
-	elif [ "$_maps" -eq 0 ]; then
+	if [ "$_maps" -eq 0 ]; then
 		MAP_SURFACE_VERDICT=FAIL
 		MAP_SURFACE_WHY="published maps=0 (opened nothing)"
-	elif [ "$_ready" != yes ]; then
+		return 0
+	fi
+	if [ "$_ready" != yes ]; then
 		MAP_SURFACE_VERDICT=FAIL
 		MAP_SURFACE_WHY="no READY ack within ${READY_BUDGET_S:-10}s"
-	elif [ "$_early" = yes ]; then
+		return 0
+	fi
+	if [ "$_early" = yes ]; then
 		MAP_SURFACE_VERDICT=FAIL
 		MAP_SURFACE_WHY="hold released before the teardown completed; $_maps maps claimed, none spanning the window"
-	elif [ -z "$_tok" ] || [ "$_tok" != "$_maps" ] || [ "${_tmaps:-0}" != "$_maps" ]; then
+		return 0
+	fi
+	if [ -z "$_readyok" ] || [ "$_readyok" != "$_maps" ]; then
 		MAP_SURFACE_VERDICT=FAIL
-		MAP_SURFACE_WHY="post-teardown page reads did not cover the held maps (touch_ok=$_tok maps=$_maps)"
-	else
+		MAP_SURFACE_WHY="liveness at establishment did not cover the held maps (touch_ready=${_readyok:-none} maps=$_maps)"
+		return 0
+	fi
+	if [ "$_sustain" = yes ]; then
+		if [ "$_status" = ok ] && [ -n "$_afterok" ] && [ "$_afterok" = "$_maps" ]; then
+			MAP_SURFACE_VERDICT=PASS
+			MAP_SURFACE_WHY="maps=$_maps pinned across teardown, post-teardown reads=$_afterok"
+		else
+			MAP_SURFACE_VERDICT=FAIL
+			MAP_SURFACE_WHY="pin contract: pages must stay readable after teardown (status=$_status touch_ready=$_readyok touch_after=${_afterok:-none} maps=$_maps)"
+		fi
+		return 0
+	fi
+	# sustain=no: the node goes away at teardown and takes the mapping
+	# with it. The helper must have lived through the hold window to the
+	# release signal. After that, either the mapping still reads, or the
+	# helper died on the post-hold read because the PTEs were already
+	# zapped -- both are the correct outcome. Death before the release
+	# signal is not.
+	if [ "$_waited" != yes ]; then
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="helper did not reach the release signal (status=$_status); the hold window is unproven"
+		return 0
+	fi
+	if [ -n "$_afterok" ] && [ "$_afterok" = "$_maps" ]; then
 		MAP_SURFACE_VERDICT=PASS
-		MAP_SURFACE_WHY="maps=$_maps held across teardown, status=$_status, post-teardown reads=$_tok"
+		MAP_SURFACE_WHY="maps=$_maps live at establishment and still readable after teardown (touch_ready=$_readyok touch_after=$_afterok)"
+	elif [ "$_status" != ok ]; then
+		MAP_SURFACE_VERDICT=PASS
+		MAP_SURFACE_WHY="maps=$_maps live at establishment, mapping withdrawn at node removal after a live hold (touch_ready=$_readyok, post-hold read took the helper: status=$_status)"
+	else
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="post-hold reads did not cover the held maps (touch_after=${_afterok:-none} maps=$_maps)"
 	fi
 }
 
@@ -541,34 +633,49 @@ LOGE
 
 # Point 3. The helper died after publishing READY. A non-zero status is not
 # a quiet skip and must not become a PASS on the strength of the READY line.
+# Two shapes, one per contract. On the pin surface a dead helper is a FAIL
+# however far it got. On the withdraw surface a death before the release
+# signal leaves the claimed window unproven and is also a FAIL.
 st_helper_dies_after_ready() {
-	derive_map_surface_verdict yes failed 5 yes no 5 5
+	derive_map_surface_verdict yes failed 5 yes no 5 "" no yes
 	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
-		echo "  a dead helper must not PASS, got $MAP_SURFACE_VERDICT"
+		echo "  a dead helper on the pin surface must not PASS, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	derive_map_surface_verdict yes failed 5 yes no 5 "" no no
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  a helper that died before the release signal must FAIL, got $MAP_SURFACE_VERDICT"
 		return 1
 	fi
 	return 0
 }
 
 # Point 3. Teardown exceeded the hold: the helper released on its own before
-# the caller published the release signal.
+# the caller published the release signal. That is the same fault on either
+# contract -- the window was never covered.
 st_teardown_exceeds_the_hold() {
-	derive_map_surface_verdict yes ok 5 yes yes 5 5
+	derive_map_surface_verdict yes ok 5 yes yes 5 5 yes yes
 	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
 		echo "  a hold that ended before teardown must FAIL, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	derive_map_surface_verdict yes ok 1 yes yes 1 1 yes no
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  a sysfs hold that ended before teardown must FAIL too, got $MAP_SURFACE_VERDICT"
 		return 1
 	fi
 	return 0
 }
 
-# Point 3. Both paths stayed alive until the caller released them.
+# Point 3. Both paths stayed alive until the caller released them, and both
+# were still readable afterwards. That is the full outcome on either contract.
 st_both_paths_alive_until_release() {
-	derive_map_surface_verdict yes ok 5 yes no 5 5
+	derive_map_surface_verdict yes ok 5 yes no 5 5 yes yes
 	if [ "$MAP_SURFACE_VERDICT" != PASS ]; then
 		echo "  a hold that spanned teardown must PASS, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
 		return 1
 	fi
-	derive_map_surface_verdict yes ok 1 yes no 1 1
+	derive_map_surface_verdict yes ok 1 yes no 1 1 yes no
 	if [ "$MAP_SURFACE_VERDICT" != PASS ]; then
 		echo "  the sysfs ring hold must PASS too, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
 		return 1
@@ -576,17 +683,111 @@ st_both_paths_alive_until_release() {
 	return 0
 }
 
-# Point 3. The post-teardown reads must cover every held map. A read that
-# never happened is not evidence the mapping survived.
+# Point 3. The post-hold reads must cover every held map when the surface
+# promises to stay readable. A read that never happened is not evidence the
+# mapping survived; a read that covered only part of the maps is a fault.
 st_post_teardown_reads_cover_held_maps() {
-	derive_map_surface_verdict yes ok 5 yes no 3 5
+	derive_map_surface_verdict yes ok 5 yes no 5 3 yes yes
 	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
-		echo "  partial post-teardown coverage must FAIL, got $MAP_SURFACE_VERDICT"
+		echo "  partial post-teardown coverage must FAIL on the pin surface, got $MAP_SURFACE_VERDICT"
 		return 1
 	fi
-	derive_map_surface_verdict yes ok 5 yes no "" 5
+	derive_map_surface_verdict yes ok 5 yes no 5 "" yes yes
 	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
-		echo "  missing post-teardown coverage must FAIL, got $MAP_SURFACE_VERDICT"
+		echo "  missing post-teardown coverage must FAIL on the pin surface, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	derive_map_surface_verdict yes ok 5 yes no 5 3 yes no
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  partial post-hold coverage must FAIL even on the withdraw surface, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
+# The outcome drill 37170656270 produced on both legs: the sysfs "ring" map
+# was live at establishment, the hold reached the release signal, and the
+# post-hold read faulted because hv_remove_ring_sysfs() had already zapped
+# the PTEs -- it runs before vmbus_free_ring(). That is the mapping being
+# withdrawn at node removal, the surface's own lifetime, not a mapping
+# freed under an active VMA. It must PASS on the withdraw contract and must
+# still FAIL on the pin contract, where the pages are promised to hold.
+st_withdrawn_at_node_removal_is_pass() {
+	derive_map_surface_verdict yes failed 1 yes no 1 "" yes no
+	if [ "$MAP_SURFACE_VERDICT" != PASS ]; then
+		echo "  withdrawal at node removal must PASS on the withdraw contract, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
+		return 1
+	fi
+	derive_map_surface_verdict yes failed 5 yes no 5 "" yes yes
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  the pin surface must not accept a dead helper, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
+# A helper that dies inside the hold window never prints release_wait. The
+# window it claimed is then unproven, and no amount of establishment liveness
+# can substitute for it -- that is the measurement hole this protocol closes.
+st_death_before_release_is_fail() {
+	derive_map_surface_verdict yes failed 1 yes no 1 "" no no
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  death before the release signal must FAIL on the withdraw contract, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
+		return 1
+	fi
+	derive_map_surface_verdict yes failed 5 yes no 5 "" no yes
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  death before the release signal must FAIL on the pin contract, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	derive_map_surface_verdict yes ok 1 yes no 1 1 no no
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  an unproven hold window must FAIL even with a live helper, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
+		return 1
+	fi
+	return 0
+}
+
+# The two reads are different questions and the scrapers must not collapse
+# them. A scraper that takes whichever ok= it saw last would report the
+# establishment read as if it were the post-teardown one, and a surface that
+# withdrew at node removal would look like it sustained. This fixture pins
+# the emit strings the helper actually prints against the scrapers.
+st_touch_scrapers_separate_ready_from_after() {
+	cat >"$LOG" <<'LOGE'
+MMAP_HOLD path=/dev/uio0 bytes=4096 maps=5 hold=8
+MMAP_HOLD touch_ready path=/dev/uio0 ok=5 fail=0 maps=5
+MMAP_HOLD release_wait path=/dev/uio0 waited_ms=200 cap_ms=60000
+MMAP_HOLD touch path=/dev/uio0 ok=5 fail=0 maps=5
+MMAP_HOLD released path=/dev/uio0 maps=5
+LOGE
+	_r="$(hold_touch_ready /dev/uio0)"
+	_a="$(hold_touch_after /dev/uio0)"
+	_w="$(hold_release_waited /dev/uio0)"
+	if [ "$_r" != 5 ] || [ "$_a" != 5 ] || [ "$_w" != yes ]; then
+		echo "  UIO scrape mismatch: ready=$_r after=$_a waited=$_w (want 5 5 yes)"
+		return 1
+	fi
+	# The withdraw shape: establishment read is there, the post-hold read
+	# never lands because the helper faulted on it.
+	cat >"$LOG" <<'LOGE'
+MMAP_HOLD path=/sys/devices/1/ring bytes=2097152 maps=1 hold=60
+MMAP_HOLD touch_ready path=/sys/devices/1/ring ok=1 fail=0 maps=1
+MMAP_HOLD release_wait path=/sys/devices/1/ring waited_ms=200 cap_ms=60000
+LOGE
+	_r="$(hold_touch_ready /sys/devices/1/ring)"
+	_a="$(hold_touch_after /sys/devices/1/ring)"
+	_w="$(hold_release_waited /sys/devices/1/ring)"
+	if [ "$_r" != 1 ]; then
+		echo "  ring touch_ready lost, got '${_r}'"
+		return 1
+	fi
+	if [ -n "$_a" ]; then
+		echo "  a missing post-hold read must stay empty, got '$_a' (the scrapers conflated the two reads)"
+		return 1
+	fi
+	if [ "$_w" != yes ]; then
+		echo "  release_wait not seen, got '${_w}'"
 		return 1
 	fi
 	return 0
@@ -645,6 +846,9 @@ run_self_test() {
 		st_teardown_exceeds_the_hold \
 		st_both_paths_alive_until_release \
 		st_post_teardown_reads_cover_held_maps \
+		st_withdrawn_at_node_removal_is_pass \
+		st_death_before_release_is_fail \
+		st_touch_scrapers_separate_ready_from_after \
 		st_aggregate_is_an_explicit_conjunction \
 		st_band_refuses_growth_and_overfree; do
 		if "$_f"; then
@@ -923,8 +1127,12 @@ UIO_MAPS_HELD=0
 RING_MAPS_HELD=0
 UIO_HOLD_STATUS=absent
 RING_HOLD_STATUS=absent
-UIO_TOUCH_OK=""
-RING_TOUCH_OK=""
+UIO_TOUCH_READY=""
+RING_TOUCH_READY=""
+UIO_TOUCH_AFTER=""
+RING_TOUCH_AFTER=""
+UIO_WAITED=no
+RING_WAITED=no
 UIO_RELEASED_EARLY=no
 RING_RELEASED_EARLY=no
 HOLD_CAP_S=60
@@ -1071,27 +1279,14 @@ grep 'MMAP_HOLD\|HELPER mmap\|HELPER open' "$LOG" | tee -a "$LOG" || true
 RELEASED_LINES="$(grep -c 'MMAP_HOLD released' "$LOG" 2>/dev/null || echo 0)"
 say "RELEASE acks=$RELEASED_LINES (one per helper that reached munmap)"
 
-# Post-teardown permitted page reads. The helper reports how many of the
-# held maps it could still read after the release signal; a mapping whose
-# pages were revoked underneath faults on the read and takes the helper
-# with it, which is already recorded as a non-zero status above.
-hold_touch_ok() {
-	awk -v p="$1" '
-		$1 == "MMAP_HOLD" {
-			path = ""; ok = ""
-			for (i = 1; i <= NF; i++) {
-				if ($i ~ /^path=/) path = substr($i, 6)
-				if ($i ~ /^ok=/) ok = substr($i, 4)
-			}
-			if (path == p && ok != "") last = ok
-		}
-		END { if (last != "") print last }
-	' "$LOG"
-}
-UIO_TOUCH_OK="$(hold_touch_ok "$UIO_DEV" || true)"
-RING_TOUCH_OK="$(hold_touch_ok "$RING" || true)"
-say "TOUCH UIO ok=${UIO_TOUCH_OK:-none} maps=$UIO_MAPS_HELD"
-say "TOUCH SYSFS ok=${RING_TOUCH_OK:-none} maps=$RING_MAPS_HELD"
+UIO_TOUCH_READY="$(hold_touch_ready "$UIO_DEV" || true)"
+RING_TOUCH_READY="$(hold_touch_ready "$RING" || true)"
+UIO_TOUCH_AFTER="$(hold_touch_after "$UIO_DEV" || true)"
+RING_TOUCH_AFTER="$(hold_touch_after "$RING" || true)"
+UIO_WAITED="$(hold_release_waited "$UIO_DEV" || true)"
+RING_WAITED="$(hold_release_waited "$RING" || true)"
+say "TOUCH UIO ready=${UIO_TOUCH_READY:-none} after=${UIO_TOUCH_AFTER:-none} maps=$UIO_MAPS_HELD waited=${UIO_WAITED:-no}"
+say "TOUCH SYSFS ready=${RING_TOUCH_READY:-none} after=${RING_TOUCH_AFTER:-none} maps=$RING_MAPS_HELD waited=${RING_WAITED:-no}"
 
 # --- phase 3: reconciliation -------------------------------------------------
 say "=== PHASE 3: reconciliation ==="
@@ -1371,11 +1566,16 @@ fi
 # Independent by construction: each surface has its own helper, its own READY
 # ack, its own exit status, its own early-release check and its own
 # post-teardown read count. One path's success is not the other's.
-derive_map_surface_verdict 	"$([ -n "$HOLD_PID_UIO" ] && echo yes || echo no)" 	"$UIO_HOLD_STATUS" 	"${UIO_MAPS_HELD:-0}" 	"$READY_UIO_PUBLISHED" 	"$UIO_RELEASED_EARLY" 	"${UIO_TOUCH_OK:-}" 	"${UIO_MAPS_HELD:-0}"
+# UIO sustain=yes: hv_uio_pin_vm_ops holds the pin until the VMA closes,
+# so the pages must still read after teardown.
+derive_map_surface_verdict 	"$([ -n "$HOLD_PID_UIO" ] && echo yes || echo no)" 	"$UIO_HOLD_STATUS" 	"${UIO_MAPS_HELD:-0}" 	"$READY_UIO_PUBLISHED" 	"$UIO_RELEASED_EARLY" 	"${UIO_TOUCH_READY:-}" 	"${UIO_TOUCH_AFTER:-}" 	"${UIO_WAITED:-no}" 	yes
 MAP_UIO_VERDICT="$MAP_SURFACE_VERDICT"
 MAP_UIO_WHY="$MAP_SURFACE_WHY"
 
-derive_map_surface_verdict 	"$([ -n "$HOLD_PID_RING" ] && echo yes || echo no)" 	"$RING_HOLD_STATUS" 	"${RING_MAPS_HELD:-0}" 	"$READY_RING_PUBLISHED" 	"$RING_RELEASED_EARLY" 	"${RING_TOUCH_OK:-}" 	"${RING_MAPS_HELD:-0}"
+# sysfs sustain=no: kernfs removes the node at teardown and zaps the
+# mapping before vmbus_free_ring() runs. The surface never promised to
+# outlive its node.
+derive_map_surface_verdict 	"$([ -n "$HOLD_PID_RING" ] && echo yes || echo no)" 	"$RING_HOLD_STATUS" 	"${RING_MAPS_HELD:-0}" 	"$READY_RING_PUBLISHED" 	"$RING_RELEASED_EARLY" 	"${RING_TOUCH_READY:-}" 	"${RING_TOUCH_AFTER:-}" 	"${RING_WAITED:-no}" 	no
 MAP_SYSFS_VERDICT="$MAP_SURFACE_VERDICT"
 MAP_SYSFS_WHY="$MAP_SURFACE_WHY"
 
