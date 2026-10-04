@@ -174,17 +174,22 @@ Mapping to the 2026-09-22 review
 Testing
 -------
 
-The qualifying pair for these thirteen bytes is
-37173468641 / 37173468629 on fork commit 07c1c8ce4d7f, against
+The candidate pair for these thirteen bytes is
+37179681746 / 37179681743 on fork commit 4758db878447, against
 pinned mainline base
 93f51579e7df ("Linux 7.3-rc4"), with all thirteen series/SHA256SUMS
-entries verified before build.
+entries verified before build in both runs. 37179681746 is the
+build, style, KUnit and CoCo-static run and is success.
+37179681743 is the runtime drill and is failure: one hosted guest
+was starved at the reader backstop and produced no lifecycle
+verdict. The runtime numbers below are one complete leg and one
+starved one, not two complete legs.
 
 Build: all thirteen stages applied on x86_64 and arm64. The
 per-stage gate is scripts/checkpatch.pl --strict --no-tree over
 the cumulative working-tree git diff left by git apply, the shape
-CI runs: 0 ERROR / 0 WARNING at every stage, "total: 0 errors, 0
-warnings, 0 checks" thirteen times in the run's logs. Diffing
+CI runs: 0 ERROR / 0 WARNING at every stage -- thirteen stage totals of
+"total: 0 errors, 0 warnings, 0 checks" per arch job. Diffing
 committed trees instead reports 0 ERROR and one WARNING from
 stage 2 on -- FILE_PATH_CHANGES, "added, moved or deleted
 file(s), does MAINTAINERS need updating?" -- because that shape
@@ -209,26 +214,51 @@ a commit message is not in one.
 WSL backport builds with W=1 and Sparse. Baseline diagnostics that
 pre-exist this series are not introduced by it.
 
-Runtime: both hosted guests booted the same bytes as Gen2
-(kernel=7.3.0-rc4+). Both legs printed HYPERV_DRILL_RESULT
-status=PARTIAL with lifecycle=3 fragment=0 splats=0 faults=0 and
+Runtime: the drill run is 37179681743. Both hosted guests booted the
+same bytes as Gen2 (kernel=7.3.0-rc4+, one bzImage SHA). The run's
+conclusion is failure, and the cause is runner starvation on one guest,
+not a kernel defect. The windows-latest leg completed. The windows-2025
+leg hit the 1200 s guest reader backstop on both attempts
+(reader_status=TIMEOUT, drill_result=NO_RESULT) and printed no lifecycle
+verdict at all. The discriminators match the known hosted-runner
+starvation class on both attempts: the same bzImage SHA as the passing
+leg, zero BUG/Oops/panic under oops=panic, zero cycleN lines (so fewer
+than ten of a hundred rebinds), and the last guest kernel line
+"hv_balloon: Max. dynamic memory size: 2048 MB" -- the host starting
+dynamic-memory negotiation while the 2004 MiB hog still held the guest.
+
+The complete leg is windows-latest. It printed HYPERV_DRILL_RESULT
+status=PARTIAL with lifecycle=3 fragment=3 splats=0 faults=0 and
 scope=lifecycle-inconclusive. PHASE1 returned to its exact map
-baseline after 100 hv_netvsc bind/unbind cycles (cycle_fails=0, 400
-steps) at 12 maps / 20279296 bytes / 4939 pages. The hold-in-mmap
-window was open on both surfaces and both were live at
-establishment: /dev/uio0 touch_ready=5 and the channel "ring" sysfs
-node touch_ready=1, each reaching its own release signal
+baseline after 100 hv_netvsc bind/unbind cycles (cycle_fails=0,
+400 steps) at 12 maps / 20279296 bytes / 4939 pages. The
+hold-in-mmap window was open on both surfaces and both were live
+at establishment: /dev/uio0 touch_ready=5 and the channel "ring"
+sysfs node touch_ready=1, each reaching its own release signal
 (MMAP_HOLD release_wait on both; waited_ms 100-200 of 60000). The
-UIO hold then still read on every map after teardown (touch ok=5 on
-maps=5, and MMAP_HOLD released maps=5). The sysfs hold's post-hold
-read took the helper (status=failed), which is that surface's own
-lifetime rather than a defect: the mapping is withdrawn at node
-removal.
-high_order_7plus driven to zero with exhausted=1, order7_dmesg=0
-accept4_failures=0 oops=0. Both legs printed
-VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION with
-VERDICT_SCOPE ordinary-x86_64-vzalloc-path;
-co-co-chunked-fallback-not-exercised.
+UIO hold then still read on every map after teardown (touch ok=5
+on maps=5, and MMAP_HOLD released maps=5). The sysfs hold's
+post-hold read took the helper (status=failed), which is that
+surface's own lifetime rather than a defect: the mapping is
+withdrawn at node removal.
+
+Fragmentation was measured three times across the two guests and is
+load-dependent rather than a constant. The windows-latest leg stopped at
+its cap with one order-7 block still free: high_order_7plus=500->26->1,
+exhausted=0, unsplit=315, VERDICT=INCONCLUSIVE_CAP_REACHED,
+HYPERV_DRILL_FRAGMENT status=3. The first windows-2025 attempt also
+stopped with exhausted=0 (high_order_7plus=500->26->1, unsplit=125,
+stop=chase-unsplit-floor). The second windows-2025 attempt drove the
+buddy to exhaustion before the reader backstop:
+high_order_7plus=503->26->0, exhausted=1, unsplit=412,
+VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION with VERDICT_SCOPE
+ordinary-x86_64-vzalloc-path; co-co-chunked-fallback-not-exercised,
+HYPERV_DRILL_FRAGMENT status=0. INCONCLUSIVE_CAP_REACHED is a measured
+stop, not a failure and not a pass: the loop hit its cap while the buddy
+could still satisfy an order-7 request outright. All three readings
+agree on the outcomes that matter -- order7_dmesg=0, accept4_failures=0,
+oops=0, rebind=yes -- and none produced an order-7 allocation failure in
+dmesg.
 
 The lifecycle gate scores five verdicts independently: buffer
 cleanup, the /dev/uioN maps, the sysfs "ring" maps, the size-class
@@ -243,15 +273,15 @@ under an active VMA. Both surfaces require the map to be live at
 establishment and the hold to reach the release signal rather than
 ending on its own.
 
-Both legs reported CLEANUP_VERDICT=PASS, MAP_UIO_VERDICT=PASS,
-MAP_SYSFS_VERDICT=PASS, MAP_ACCOUNTING_VERDICT=PASS and
-RESTORE_VERDICT=PARTIAL (rebind=no), and the aggregate
-LIFECYCLE_VERDICT=PARTIAL. An earlier aggregate let one successful
-mapping surface stand for both; the sysfs ring specifically failed
-to mmap on run 37149993984 (maps=0, EINVAL) because the path
-installed .close on a kernfs vma. That is fixed in 10/13 and this
-run reports maps=5 on /dev/uio0 and maps=1 on the sysfs ring on
-both legs.
+The complete leg reported CLEANUP_VERDICT=PASS,
+MAP_UIO_VERDICT=PASS, MAP_SYSFS_VERDICT=PASS,
+MAP_ACCOUNTING_VERDICT=PASS and RESTORE_VERDICT=PARTIAL
+(rebind=no), and the aggregate LIFECYCLE_VERDICT=PARTIAL. An
+earlier aggregate let one successful mapping surface stand for
+both; the sysfs ring specifically failed to mmap on run
+37149993984 (maps=0, EINVAL) because the path installed .close on
+a kernfs vma. That is fixed in 10/13 and the complete leg reports
+maps=5 on /dev/uio0 and maps=1 on the sysfs ring.
 
 RESTORE_VERDICT answers one question: did hv_netvsc come back. With
 rebind=no it is PARTIAL and the aggregate cannot be a complete PASS.
@@ -262,17 +292,16 @@ The end-of-run map gate scores a band, not a point. The settled
 post-unbind tuple is 7 maps / 307200 bytes / 68 pages. UIO
 teardown is not the inverse of UIO probe under the hv_uio_remove()
 gap below, so the end must land between that tuple and the boot
-baseline with the retained ring set bounded. Both legs settled at
-9 / 4517888 / 1094 after two samples: a retained gap of 2 maps /
-4210688 bytes / 1026 pages against a 4 / 8388608 / 2048 budget,
-with PHASE 2 having released its own buffers. The owner ledger is
-a size-class ledger, not an instance ledger: it reports
+baseline with the retained ring set bounded. The complete leg
+settled at 9 / 4517888 / 1094 after two samples: a retained gap of
+2 maps / 4210688 bytes / 1026 pages against a 4 / 8388608 / 2048
+budget, with PHASE 2 having released its own buffers. The owner
+ledger is a size-class ledger, not an instance ledger: it reports
 owner_attribution=size_class_only because /proc/vmallocinfo names
 the allocating symbol and never the instance. Under that
-granularity it found unidentified_retained_sizes: none on both
-legs, so every retained size class is one a prior state already
-accounted for. PHASE 1 returned to 12 / 20279296 / 4939 exactly on
-both legs.
+granularity it found unidentified_retained_sizes: none, so every
+retained size class is one a prior state already accounted for.
+PHASE 1 returned to 12 / 20279296 / 4939 exactly.
 
 What is not proven here
 -----------------------
@@ -285,6 +314,18 @@ is set aside for this submission; the row stays PARTIAL. The
 chunked degrade only runs under vmbus_needs_shared_pages(); an
 ordinary x86_64 guest takes the vzalloc() path, so the runtime
 numbers do not speak to the confidential fallback.
+
+Lifecycle is qualified on one hosted guest. The other was starved at the
+1200 s reader backstop twice and produced no lifecycle verdict, so the
+five verdicts and the end-of-run map band are measured on windows-latest
+only. The fragment phase did complete on both guests; the lifecycle
+phase did not. That is a gap in the runtime evidence for these bytes.
+The discriminators that separate runner starvation from a kernel hang
+all point away from the kernel: the starved guest ran the same bzImage
+SHA the passing leg ran, printed no BUG/Oops/panic under oops=panic, and
+stopped before ten rebind cycles with the host still negotiating
+dynamic memory. This guest has completed the full drill on other
+series bytes in earlier runs; for these thirteen bytes it has not.
 
 Patches 0011-0013 add no named KUnit case. The netvsc completion
 path and RNDIS allocation have no targeted regression test here.
