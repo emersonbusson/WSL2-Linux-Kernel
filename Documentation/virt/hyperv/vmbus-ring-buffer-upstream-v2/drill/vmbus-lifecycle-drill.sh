@@ -23,48 +23,49 @@
 # dependency, not a shim.
 set -euo pipefail
 
+# --self-test exercises this scorer's own decision code against fixtures.
+# It runs before the guest guards so it can execute on any host. Every
+# fixture is a validator demonstration; none of them is a reproduced kernel
+# leak, and none of them authorizes a claim about a running kernel.
+SELF_TEST=0
+if [ "${1:-}" = --self-test ]; then
+	SELF_TEST=1
+	shift
+fi
+
 CYCLES="${1:-100}"
-LOG="${2:-/var/tmp/vmbus-lifecycle-drill.log}"
-: >"$LOG"
+if [ "$SELF_TEST" -eq 1 ]; then
+	LOG="$(mktemp /tmp/vmbus-lifecycle-selftest.XXXXXX)"
+else
+	LOG="${2:-/var/tmp/vmbus-lifecycle-drill.log}"
+	: >"$LOG"
+fi
 
 HELPER="${HELPER:-$(command -v vmbus_drill_helper || true)}"
-
-# --- guards: refuse to run on the daily WSL2 host -----------------------------
-guard() {
-	if grep -qiE 'microsoft-standard-WSL2' /proc/version 2>/dev/null; then
-		echo "REFUSE: this is the daily WSL2 host. Run only in a disposable Hyper-V guest." >&2
-		exit 2
-	fi
-	if [ ! -d /sys/bus/vmbus ]; then
-		echo "REFUSE: no VMBus on this kernel; drill requires a Hyper-V guest." >&2
-		exit 2
-	fi
-	if ! grep -qi 'hyperv' /sys/bus/vmbus/devices/*/modalias 2>/dev/null &&
-		[ "$(ls /sys/bus/vmbus/devices 2>/dev/null | wc -l)" -eq 0 ]; then
-		echo "REFUSE: no VMBus devices visible." >&2
-		exit 2
-	fi
-}
-guard
 
 say() { echo "$@" | tee -a "$LOG"; }
 
 # emit_verdicts_and_exit <code>
-# Every exit path prints the same four independent verdicts and then the
+# Every exit path prints the same five independent verdicts and then the
 # aggregate. A refusal that fires before phase 2 reports MAP_* as SKIP with
 # "not launched" rather than folding an unmeasured surface into a claim. The
 # aggregate is narrowed by construction: it repeats what was measured and
-# says when a surface was not.
+# says when a surface was not. owner_attribution is printed on every path so
+# no reader can mistake the size-class ledger for an owner ledger.
 emit_verdicts_and_exit() {
 	say "CLEANUP_VERDICT=${CLEANUP_VERDICT:-SKIP} ${CLEANUP_WHY:-not reached}"
 	say "MAP_UIO_VERDICT=${MAP_UIO_VERDICT:-SKIP} ${MAP_UIO_WHY:-not launched}"
 	say "MAP_SYSFS_VERDICT=${MAP_SYSFS_VERDICT:-SKIP} ${MAP_SYSFS_WHY:-not launched}"
+	say "MAP_ACCOUNTING_VERDICT=${MAP_ACCOUNTING_VERDICT:-SKIP} ${MAP_ACCOUNTING_WHY:-not reached}"
 	say "RESTORE_VERDICT=${RESTORE_VERDICT:-SKIP} ${RESTORE_WHY:-not reached}"
-	say "LIFECYCLE_VERDICT=${LIFE:-FAIL} cleanup=${CLEANUP_VERDICT:-SKIP} map_uio=${MAP_UIO_VERDICT:-SKIP} map_sysfs=${MAP_SYSFS_VERDICT:-SKIP} restore=${RESTORE_VERDICT:-SKIP} cycles=$CYCLES maps=(${SETTLE_TUPLE:-}) gap_retained=(${GAP_N:-0}/${GAP_B:-0}/${GAP_P:-0}) settle_tries=${SETTLE_TRIES:-0} rebind=${REBIND_OK:-no}"
+	say "owner_attribution=size_class_only (/proc/vmallocinfo names the allocating symbol, not the instance)"
+	say "LIFECYCLE_VERDICT=${LIFE:-FAIL} cleanup=${CLEANUP_VERDICT:-SKIP} map_uio=${MAP_UIO_VERDICT:-SKIP} map_sysfs=${MAP_SYSFS_VERDICT:-SKIP} map_accounting=${MAP_ACCOUNTING_VERDICT:-SKIP} restore=${RESTORE_VERDICT:-SKIP} cycles=$CYCLES maps=(${SETTLE_TUPLE:-}) gap_retained=(${GAP_N:-0}/${GAP_B:-0}/${GAP_P:-0}) settle_tries=${SETTLE_TRIES:-0} rebind=${REBIND_OK:-no}"
 	if [ "${LIFE:-FAIL}" != PASS ]; then
 		say "  aggregate is narrowed: it reports only the surfaces that were measured"
 		say "  map_uio=${MAP_UIO_WHY:-not launched}"
 		say "  map_sysfs=${MAP_SYSFS_WHY:-not launched}"
+		say "  map_accounting=${MAP_ACCOUNTING_WHY:-not reached}"
+		say "  restore=${RESTORE_WHY:-not reached}"
 	fi
 	say "=== END vmbus-lifecycle-drill ==="
 	say "log=$LOG"
@@ -116,34 +117,571 @@ vmbus_map_sizes() {
 	awk ' /vmbus_alloc_buffer/ { print $2 } ' /proc/vmallocinfo
 }
 
-# sizes_unknown_after <before> <after>
-# Prints each size in <after> with no match in <before>, one per line.
-# Exit 0 when at least one is unknown, 1 when every after-size is accounted.
-sizes_unknown_after() {
+# GAP_RING_BUDGET bounds what the disclosed hv_uio_remove() gap may retain.
+# Sized to the ring class only: 4 maps (main send/recv plus up to two
+# subchannel rings), 8 MiB, 2048 pages. One leaked UIO buffer is 12349440
+# bytes / 3015 pages and blows the byte and page budget on its own.
+GAP_RING_BUDGET_N=4
+GAP_RING_BUDGET_B=8388608
+GAP_RING_BUDGET_P=2048
+
+# tuple_within_end_band <settle> <pre> <base> <rebind>
+# Prints a reason and returns 1 outside the band; prints nothing and returns 0
+# inside it. Safe under set -euo pipefail: every field is defaulted before use.
+tuple_within_end_band() {
+	_tws="${1:-}"
+	_twp="${2:-}"
+	_twb="${3:-}"
+	_twr="${4:-no}"
+	_sn=$(printf '%s\n' "$_tws" | awk '{print $1+0}')
+	_sb=$(printf '%s\n' "$_tws" | awk '{print $2+0}')
+	_sp=$(printf '%s\n' "$_tws" | awk '{print $3+0}')
+	_pn=$(printf '%s\n' "$_twp" | awk '{print $1+0}')
+	_pb=$(printf '%s\n' "$_twp" | awk '{print $2+0}')
+	_pp=$(printf '%s\n' "$_twp" | awk '{print $3+0}')
+	_bn=$(printf '%s\n' "$_twb" | awk '{print $1+0}')
+	_bb=$(printf '%s\n' "$_twb" | awk '{print $2+0}')
+	if [ "$_sn" -eq 0 ] && [ "$_sb" -eq 0 ]; then
+		echo "tuple unreadable"
+		return 1
+	fi
+	if [ "$_sn" -gt "$_bn" ] || [ "$_sb" -gt "$_bb" ]; then
+		echo "growth above the boot baseline ($_sn/$_sb > $_bn/$_bb)"
+		return 1
+	fi
+	if [ "$_twr" = yes ]; then
+		if [ "$_sn" -ne "$_bn" ] || [ "$_sb" -ne "$_bb" ]; then
+			echo "rebind=yes but the end is not the boot baseline ($_sn/$_sb != $_bn/$_bb)"
+			return 1
+		fi
+		return 0
+	fi
+	if [ "$_sn" -lt "$_pn" ] || [ "$_sb" -lt "$_pb" ]; then
+		echo "over-free below the settled pre-UIO tuple ($_sn/$_sb < $_pn/$_pb)"
+		return 1
+	fi
+	_dn=$((_sn - _pn))
+	_db=$((_sb - _pb))
+	_dp=$((_sp - _pp))
+	if [ "$_dn" -gt "$GAP_RING_BUDGET_N" ] || [ "$_db" -gt "$GAP_RING_BUDGET_B" ] || [ "$_dp" -gt "$GAP_RING_BUDGET_P" ]; then
+		echo "ring retention over budget ($_dn maps $_db bytes $_dp pages > $GAP_RING_BUDGET_N/$GAP_RING_BUDGET_B/$GAP_RING_BUDGET_P); UIO buffers are not released"
+		return 1
+	fi
+	return 0
+}
+
+# size_class_max_counts <snapshot>...
+# Each snapshot is one line per live map instance, so multiplicity is
+# preserved. Emit "size maxcount" using the highest count any single
+# snapshot showed for that class. Snapshots are observations of the same
+# areas at different times, so the known multiset is the per-class maximum,
+# never the sum across snapshots: summing would "account for" a class that
+# only ever appeared twice in total by crediting it with four.
+size_class_max_counts() {
 	awk '
-		NR == FNR { seen[$1] = 1; next }
-		!($1 in seen) { print $1; found = 1 }
-		END { exit(found ? 0 : 1) }
+		FNR == 1 { snap++ }
+		{ key = snap SUBSEP $1; c[key]++ }
+		END {
+			for (key in c) {
+				split(key, k, SUBSEP)
+				if (c[key] > max[k[2]])
+					max[k[2]] = c[key]
+			}
+			for (s in max) printf "%s %d\n", s, max[s]
+		}
+	' "$@"
+}
+
+# sizes_excess_after <known_counts> <after_instances>
+# Multiset, never set membership. <known_counts> is "size maxcount" lines
+# from size_class_max_counts; <after_instances> is one line per live
+# map at the end. Print "size new" for a class no prior state held and
+# "size excess N" when the end holds more of a known class than any prior
+# state did.
+#
+# A duplicate of a known size is not owner identity: two 65536-byte areas
+# are two areas, and a second map of a familiar size is exactly the
+# retention a set-membership check accepts. Exit 0 when at least one class
+# is unaccounted, 1 when the end multiset is covered.
+sizes_excess_after() {
+	awk '
+		NR == FNR { known[$1] = $2 + 0; next }
+		{ after[$1]++ }
+		END {
+			found = 0
+			for (s in after) {
+				k = (s in known) ? known[s] : 0
+				if (after[s] > k) {
+					if (k == 0)
+						printf "%s new\n", s
+					else
+						printf "%s excess %d\n", s, after[s] - k
+					found = 1
+				}
+			}
+			exit(found ? 0 : 1)
+		}
 	' "$1" "$2"
 }
 
 # hold_ready_maps <path>
-# Prints the maps= count from this path's MMAP_HOLD READY line, or nothing.
+# Prints the maps= count from this path's MMAP_HOLD READY line, but only
+# while that hold is still live. A READY line followed by a RELEASE line
+# for the same path is a historical hold: those mappings were gone before
+# teardown and must never be counted as an active one. That is the
+# eight-second-hold-versus-ten-second-readiness race -- a stale message
+# accepted as an active map.
+#
 # The path is compared as a whole field, never as a regex: a sysfs path is
-# not a pattern.
+# not a pattern. "released" is matched as a whole field for the same reason.
 hold_ready_maps() {
 	awk -v p="$1" '
 		$1 == "MMAP_HOLD" {
-			path = ""; maps = ""
+			path = ""; maps = ""; released = 0
 			for (i = 1; i <= NF; i++) {
 				if ($i ~ /^path=/) path = substr($i, 6)
 				if ($i ~ /^maps=/) maps = substr($i, 6)
+				if ($i == "released") released = 1
 			}
-			if (path == p && maps != "") last = maps
+			if (path == p) {
+				if (released)
+					last = ""
+				else if (maps != "")
+					last = maps
+			}
 		}
 		END { if (last != "") print last }
 	' "$LOG"
 }
+
+# hold_already_released <path>
+# True when this path's RELEASE line is already in the log. Used right
+# before the caller publishes its release signal: if the hold ended on its
+# own before that point, it ended before the teardown finished and the
+# surface did not span the window it claims to.
+hold_already_released() {
+	awk -v p="$1" '
+		$1 == "MMAP_HOLD" {
+			path = ""; released = 0
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^path=/) path = substr($i, 6)
+				if ($i == "released") released = 1
+			}
+			if (path == p && released) found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	' "$LOG"
+}
+
+# derive_map_accounting_verdict <settle> <pre> <base> <rebind> <unknown_sizes>
+# Sets MAP_ACCOUNTING_VERDICT and MAP_ACCOUNTING_WHY. This is the size-class
+# ledger and the end-tuple band. It is explicitly scoped to what map
+# accounting can observe and says nothing about whether a device returned.
+derive_map_accounting_verdict() {
+	_ma_settle="${1:-}"
+	_ma_pre="${2:-}"
+	_ma_base="${3:-}"
+	_ma_rebind="${4:-no}"
+	_ma_unknown="${5:-}"
+	MAP_ACCOUNTING_VERDICT=PASS
+	MAP_ACCOUNTING_WHY="end tuple in band, retained size classes identified"
+	if [ -z "$_ma_settle" ]; then
+		MAP_ACCOUNTING_VERDICT=PARTIAL
+		MAP_ACCOUNTING_WHY="map accounting unavailable"
+	elif ! BAND_WHY="$(tuple_within_end_band "$_ma_settle" "$_ma_pre" "$_ma_base" "$_ma_rebind")"; then
+		MAP_ACCOUNTING_VERDICT=FAIL
+		MAP_ACCOUNTING_WHY="outside the expected band: ${BAND_WHY:-unknown}"
+	elif [ -n "$_ma_unknown" ]; then
+		MAP_ACCOUNTING_VERDICT=FAIL
+		MAP_ACCOUNTING_WHY="unknown_size_class_inside_retention_budget_is_not_complete_pass: $(printf '%s' "$_ma_unknown" | tr '\n' ' ')"
+	fi
+}
+
+# derive_map_surface_verdict <launched> <status> <maps> <ready_published> <released_early> <touch_ok> <touch_maps>
+# Sets MAP_SURFACE_VERDICT and MAP_SURFACE_WHY for one mmap surface. One
+# call per surface; the caller copies the result into MAP_UIO_* or
+# MAP_SYSFS_*. Success requires all of: a helper that held something, a
+# READY ack, a hold that is still live when the caller releases it, and
+# post-teardown page reads covering every held map. A helper that died, or
+# that released on its own before the teardown finished, is a FAIL even
+# when its READY line is sitting in the log.
+derive_map_surface_verdict() {
+	_launched="${1:-no}"
+	_status="${2:-absent}"
+	_maps="${3:-0}"
+	_ready="${4:-no}"
+	_early="${5:-no}"
+	_tok="${6:-}"
+	_tmaps="${7:-}"
+	if [ "$_launched" != yes ]; then
+		MAP_SURFACE_VERDICT=SKIP
+		MAP_SURFACE_WHY="surface not launched"
+		return 0
+	fi
+	if [ "$_status" != ok ]; then
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="helper status=$_status (a failed mmap, or a post-teardown read that faulted on a revoked mapping, takes the helper with it)"
+	elif [ "$_maps" -eq 0 ]; then
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="published maps=0 (opened nothing)"
+	elif [ "$_ready" != yes ]; then
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="no READY ack within ${READY_BUDGET_S:-10}s"
+	elif [ "$_early" = yes ]; then
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="hold released before the teardown completed; $_maps maps claimed, none spanning the window"
+	elif [ -z "$_tok" ] || [ "$_tok" != "$_maps" ] || [ "${_tmaps:-0}" != "$_maps" ]; then
+		MAP_SURFACE_VERDICT=FAIL
+		MAP_SURFACE_WHY="post-teardown page reads did not cover the held maps (touch_ok=$_tok maps=$_maps)"
+	else
+		MAP_SURFACE_VERDICT=PASS
+		MAP_SURFACE_WHY="maps=$_maps held across teardown, status=$_status, post-teardown reads=$_tok"
+	fi
+}
+
+# derive_restore_verdict <rebind>
+# Sets RESTORE_VERDICT and RESTORE_WHY. This verdict is about one thing:
+# did the selected NIC actually come back. Map accounting is somebody
+# else's verdict. With rebind=no the device did not return, so this cannot
+# be a complete PASS -- the hv_uio_remove() gap is pre-existing mainline and
+# is disclosed, and a PARTIAL is the honest reading of a run that proved
+# the maps and not the device.
+derive_restore_verdict() {
+	if [ "${1:-no}" = yes ]; then
+		RESTORE_VERDICT=PASS
+		RESTORE_WHY="hv_netvsc rebound onto the selected NIC"
+	else
+		RESTORE_VERDICT=PARTIAL
+		RESTORE_WHY="rebind=no (hv_netvsc did not rebind; open channel is the known hv_uio_remove gap); device restoration not proven"
+	fi
+}
+
+# derive_aggregate
+# Sets LIFE and LIFE_CODE from the five independent verdicts. PASS requires
+# every one of them to be PASS. A skipped or partial surface makes the
+# aggregate PARTIAL and never PASS.
+derive_aggregate() {
+	LIFE=PASS
+	LIFE_CODE=0
+	for _v in "$CLEANUP_VERDICT" "$MAP_UIO_VERDICT" "$MAP_SYSFS_VERDICT" \
+		"$MAP_ACCOUNTING_VERDICT" "$RESTORE_VERDICT"; do
+		case "$_v" in
+		FAIL)
+			LIFE=FAIL
+			LIFE_CODE=1
+			break
+			;;
+		SKIP | PARTIAL)
+			if [ "$LIFE" = PASS ]; then
+				LIFE=PARTIAL
+				LIFE_CODE=3
+			fi
+			;;
+		esac
+	done
+}
+
+# --- self-test fixtures ------------------------------------------------------
+# Each fixture feeds the same decision functions the real run uses. A
+# fixture that assigned the verdict by hand and then checked it would skip
+# the very decision it exists to catch. Fixtures are validator
+# demonstrations: they prove the scorer refuses a shape, and claim nothing
+# about a reproduced kernel leak.
+ST_PASS=0
+ST_FAIL=0
+
+st_ok() {
+	ST_PASS=$((ST_PASS + 1))
+	printf 'PASS %s\n' "$1"
+}
+
+st_no() {
+	ST_FAIL=$((ST_FAIL + 1))
+	printf 'FAIL %s\n' "$1"
+}
+
+st_check() {
+	if "$@"; then
+		return 0
+	fi
+	return 1
+}
+
+# Point 1. A balanced end tuple with rebind=no. Map accounting may pass;
+# the device verdict may not, and the aggregate may not become a complete
+# lifecycle PASS. Merely assigning RESTORE_VERDICT=FAIL in a fixture would
+# skip the decision, so this calls the real derive_* bodies.
+st_rebind_no_is_not_device_restore_pass() {
+	derive_map_accounting_verdict "9 4517888 1094" "7 307200 68" "12 20279296 4939" no ""
+	derive_restore_verdict no
+	CLEANUP_VERDICT=PASS
+	MAP_UIO_VERDICT=PASS
+	MAP_SYSFS_VERDICT=PASS
+	derive_aggregate
+	if [ "$MAP_ACCOUNTING_VERDICT" != PASS ]; then
+		echo "  map accounting should pass inside the band, got $MAP_ACCOUNTING_VERDICT"
+		return 1
+	fi
+	if [ "$RESTORE_VERDICT" = PASS ]; then
+		echo "  rebind=no must not be a device-restore PASS"
+		return 1
+	fi
+	if [ "$LIFE" = PASS ]; then
+		echo "  aggregate must not be a complete lifecycle PASS with rebind=no (got $LIFE/$LIFE_CODE)"
+		return 1
+	fi
+	return 0
+}
+
+# Point 2. Set membership would accept a second map of a size that was
+# already known. A multiset must not.
+st_duplicate_known_size_is_not_owner_identity() {
+	printf '65536\n' >"$LOG.known1"
+	printf '65536 1\n' >"$LOG.knownc"
+	printf '65536\n65536\n' >"$LOG.after"
+	_out="$(sizes_excess_after "$LOG.knownc" "$LOG.after" || true)"
+	if [ -z "$_out" ]; then
+		echo "  a second 65536-byte map was accepted as a known size"
+		return 1
+	fi
+	printf '%s\n' "$_out" | grep -q '65536 excess 1' || {
+		echo "  expected '65536 excess 1', got '$_out'"
+		return 1
+	}
+	return 0
+}
+
+# Point 2. The end holds three of a class no prior state held more than one
+# of. Multiplicity must survive the comparison.
+st_known_size_with_unexpected_multiplicity_is_not_complete_pass() {
+	printf '4096 2\n' >"$LOG.knownc"
+	printf '4096\n4096\n4096\n4096\n' >"$LOG.after"
+	_out="$(sizes_excess_after "$LOG.knownc" "$LOG.after" || true)"
+	if [ -z "$_out" ]; then
+		echo "  multiplicity jump was folded into set membership"
+		return 1
+	fi
+	printf '%s\n' "$_out" | grep -q '4096 excess 2' || {
+		echo "  expected '4096 excess 2', got '$_out'"
+		return 1
+	}
+	return 0
+}
+
+# Point 2. One 65536-byte area goes away and a different one arrives: the
+# counts balance, so the multiset is clean. That is not owner identity, and
+# the scorer must not claim it is. The qualification is narrowed to size
+# classes and says so.
+st_replacement_owner_same_size_is_not_complete_pass() {
+	printf '65536 1\n' >"$LOG.knownc"
+	printf '65536\n' >"$LOG.after"
+	_out="$(sizes_excess_after "$LOG.knownc" "$LOG.after" || true)"
+	if [ -n "$_out" ]; then
+		echo "  a same-size replacement was reported as excess ($_out); counts balance"
+		return 1
+	fi
+	derive_map_accounting_verdict "9 4517888 1094" "7 307200 68" "12 20279296 4939" no ""
+	case "$MAP_ACCOUNTING_WHY" in
+	*size\ class*)
+		:
+		;;
+	*)
+		echo "  the claim must be narrowed to size classes, got: $MAP_ACCOUNTING_WHY"
+		return 1
+		;;
+	esac
+	case "$MAP_ACCOUNTING_WHY" in
+	*owner\ ident*)
+		echo "  the claim must not assert owner identity: $MAP_ACCOUNTING_WHY"
+		return 1
+		;;
+	esac
+	return 0
+}
+
+# Point 2. The original refusal: a 64 KiB area present at the end and in no
+# prior ledger, well inside the ring-retention budget.
+st_unknown_64k_retention_is_refused() {
+	printf '4096 1\n' >"$LOG.knownc"
+	printf '4096\n65536\n' >"$LOG.after"
+	_out="$(sizes_excess_after "$LOG.knownc" "$LOG.after" || true)"
+	printf '%s\n' "$_out" | grep -q '65536 new' || {
+		echo "  expected '65536 new', got '$_out'"
+		return 1
+	}
+	derive_map_accounting_verdict "9 4583424 1109" "7 307200 68" "12 20279296 4939" no "$_out"
+	if [ "$MAP_ACCOUNTING_VERDICT" != FAIL ]; then
+		echo "  an unattributed 64 KiB retention must FAIL map accounting, got $MAP_ACCOUNTING_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
+# Point 3. The first helper released before the second was even ready. Its
+# READY line is in the log and must not be accepted as an active hold.
+st_first_helper_releases_before_second_ready() {
+	cat >"$LOG" <<'LOGE'
+MMAP_HOLD path=/dev/uio0 bytes=4096 maps=5 hold=8
+MMAP_HOLD released path=/dev/uio0 maps=5
+LOGE
+	if [ -n "$(hold_ready_maps /dev/uio0)" ]; then
+		echo "  a released hold was accepted as an active map"
+		return 1
+	fi
+	cat >>"$LOG" <<'LOGE'
+MMAP_HOLD path=/sys/devices/1/ring bytes=2097152 maps=1 hold=8
+LOGE
+	_r="$(hold_ready_maps /sys/devices/1/ring)"
+	if [ "$_r" != 1 ]; then
+		echo "  the still-live ring hold must be visible, got '${_r}'"
+		return 1
+	fi
+	return 0
+}
+
+# Point 3. The helper died after publishing READY. A non-zero status is not
+# a quiet skip and must not become a PASS on the strength of the READY line.
+st_helper_dies_after_ready() {
+	derive_map_surface_verdict yes failed 5 yes no 5 5
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  a dead helper must not PASS, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
+# Point 3. Teardown exceeded the hold: the helper released on its own before
+# the caller published the release signal.
+st_teardown_exceeds_the_hold() {
+	derive_map_surface_verdict yes ok 5 yes yes 5 5
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  a hold that ended before teardown must FAIL, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
+# Point 3. Both paths stayed alive until the caller released them.
+st_both_paths_alive_until_release() {
+	derive_map_surface_verdict yes ok 5 yes no 5 5
+	if [ "$MAP_SURFACE_VERDICT" != PASS ]; then
+		echo "  a hold that spanned teardown must PASS, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
+		return 1
+	fi
+	derive_map_surface_verdict yes ok 1 yes no 1 1
+	if [ "$MAP_SURFACE_VERDICT" != PASS ]; then
+		echo "  the sysfs ring hold must PASS too, got $MAP_SURFACE_VERDICT ($MAP_SURFACE_WHY)"
+		return 1
+	fi
+	return 0
+}
+
+# Point 3. The post-teardown reads must cover every held map. A read that
+# never happened is not evidence the mapping survived.
+st_post_teardown_reads_cover_held_maps() {
+	derive_map_surface_verdict yes ok 5 yes no 3 5
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  partial post-teardown coverage must FAIL, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	derive_map_surface_verdict yes ok 5 yes no "" 5
+	if [ "$MAP_SURFACE_VERDICT" != FAIL ]; then
+		echo "  missing post-teardown coverage must FAIL, got $MAP_SURFACE_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
+# Aggregate conjunction, carried forward: a FAIL anywhere is a FAIL, and a
+# skipped surface is never folded into PASS.
+st_aggregate_is_an_explicit_conjunction() {
+	CLEANUP_VERDICT=PASS
+	MAP_UIO_VERDICT=PASS
+	MAP_SYSFS_VERDICT=FAIL
+	MAP_ACCOUNTING_VERDICT=PASS
+	RESTORE_VERDICT=FAIL
+	derive_aggregate
+	if [ "$LIFE" != FAIL ] || [ "$LIFE_CODE" -ne 1 ]; then
+		echo "  expected FAIL/1, got $LIFE/$LIFE_CODE"
+		return 1
+	fi
+	MAP_SYSFS_VERDICT=SKIP
+	RESTORE_VERDICT=PASS
+	derive_aggregate
+	if [ "$LIFE" != PARTIAL ] || [ "$LIFE_CODE" -ne 3 ]; then
+		echo "  expected PARTIAL/3 for a skipped surface, got $LIFE/$LIFE_CODE"
+		return 1
+	fi
+	return 0
+}
+
+# Band refusals, carried forward from the register's counterexamples.
+st_band_refuses_growth_and_overfree() {
+	if tuple_within_end_band "999 999999999 99999" "7 307200 68" "12 20279296 4939" no >/dev/null; then
+		echo "  growth above the boot baseline was accepted"
+		return 1
+	fi
+	if tuple_within_end_band "3 1000 10" "7 307200 68" "12 20279296 4939" no >/dev/null; then
+		echo "  an over-free below the settled pre-UIO tuple was accepted"
+		return 1
+	fi
+	if tuple_within_end_band "20 60000000 14000" "7 307200 68" "12 20279296 4939" no >/dev/null; then
+		echo "  a ring retention over budget was accepted"
+		return 1
+	fi
+	return 0
+}
+
+run_self_test() {
+	echo "scope: synthetic validator fixtures, not reproduced kernel leaks."
+	for _f in \
+		st_rebind_no_is_not_device_restore_pass \
+		st_duplicate_known_size_is_not_owner_identity \
+		st_known_size_with_unexpected_multiplicity_is_not_complete_pass \
+		st_replacement_owner_same_size_is_not_complete_pass \
+		st_unknown_64k_retention_is_refused \
+		st_first_helper_releases_before_second_ready \
+		st_helper_dies_after_ready \
+		st_teardown_exceeds_the_hold \
+		st_both_paths_alive_until_release \
+		st_post_teardown_reads_cover_held_maps \
+		st_aggregate_is_an_explicit_conjunction \
+		st_band_refuses_growth_and_overfree; do
+		if "$_f"; then
+			st_ok "$_f"
+		else
+			st_no "$_f"
+		fi
+	done
+	echo "self-test: $ST_PASS passed, $ST_FAIL failed"
+	rm -f "$LOG" "$LOG.knownc" "$LOG.known1" "$LOG.after"
+	if [ "$ST_FAIL" -gt 0 ]; then
+		exit 1
+	fi
+	exit 0
+}
+
+if [ "$SELF_TEST" -eq 1 ]; then
+	run_self_test
+fi
+
+# --- guards: refuse to run on the daily WSL2 host -----------------------------
+guard() {
+	if grep -qiE 'microsoft-standard-WSL2' /proc/version 2>/dev/null; then
+		echo "REFUSE: this is the daily WSL2 host. Run only in a disposable Hyper-V guest." >&2
+		exit 2
+	fi
+	if [ ! -d /sys/bus/vmbus ]; then
+		echo "REFUSE: no VMBus on this kernel; drill requires a Hyper-V guest." >&2
+		exit 2
+	fi
+	if ! grep -qi 'hyperv' /sys/bus/vmbus/devices/*/modalias 2>/dev/null &&
+		[ "$(ls /sys/bus/vmbus/devices 2>/dev/null | wc -l)" -eq 0 ]; then
+		echo "REFUSE: no VMBus devices visible." >&2
+		exit 2
+	fi
+}
+guard
 
 say "=== BEGIN vmbus-lifecycle-drill cycles=$CYCLES ==="
 say "kernel=$(uname -r)  cmdline=$(cat /proc/cmdline 2>/dev/null | tr -d '\n')"
@@ -335,13 +873,16 @@ while [ "$PRE_UIO_TRIES" -le "$PRE_UIO_BUDGET_S" ]; do
 	sleep 1
 done
 if [ "$PRE_UIO_RUN" -lt "$PRE_UIO_STABLE" ]; then
-	LIFE=PARTIAL
 	CLEANUP_VERDICT=PARTIAL
 	CLEANUP_WHY="pre-UIO tuple did not settle (instant='$PRE_UIO_INSTANT' last='$PRE_UIO_MAPS' run=$PRE_UIO_RUN)"
-	RESTORE_VERDICT=PARTIAL
-	RESTORE_WHY="the expected end tuple is unreadable while the unbind is still freeing"
+	MAP_ACCOUNTING_VERDICT=PARTIAL
+	MAP_ACCOUNTING_WHY="the expected end tuple is unreadable while the unbind is still freeing"
+	RESTORE_VERDICT=SKIP
+	RESTORE_WHY="not reached (phase 2 teardown has not run)"
 	say "  instant='$PRE_UIO_INSTANT'"
 	say "  last='$PRE_UIO_MAPS' run=$PRE_UIO_RUN"
+	LIFE=PARTIAL
+	LIFE_CODE=3
 	emit_verdicts_and_exit 3
 fi
 say "PRE_UIO $PRE_UIO_MAPS"
@@ -356,30 +897,46 @@ for u in /sys/class/uio/uio*; do
 	say "UIO $(basename "$u") name=$(cat "$u/name" 2>/dev/null) maps=$(ls "$u/maps" 2>/dev/null | tr '\n' ' ')"
 done
 
-# mmap-hold sleeps `hold` seconds before releasing, so it has to run
-# CONCURRENTLY with the teardown. Running it in the foreground mapped, held,
-# released, and only then let restore_nic run -- the mapping was already gone
-# when the ring was freed, so the BUG-3 window was never open and a green run
-# proved nothing about mmap-versus-release.
+# mmap-hold must run CONCURRENTLY with the teardown. Running it in the
+# foreground mapped, held, released, and only then let restore_nic run --
+# the mapping was already gone when the ring was freed, so the BUG-3 window
+# was never open and a green run proved nothing about mmap-versus-release.
 #
-# Two surfaces, two helpers, two verdicts. A sysfs ring map that never opened
-# is not cured by a UIO map that did, and the reverse. Each helper publishes
-# its own READY line (MMAP_HOLD path=... maps=N) after the maps exist and
-# before the hold sleep, and its RELEASE line (MMAP_HOLD released maps=N)
-# after munmap. Those are the barriers. A blind sleep is not: it scores a
-# closed window as open whenever the helper is slower than the nap.
+# A fixed sleep cannot span a teardown it does not know about. Each helper
+# is therefore given a release file: it holds until that path exists, or
+# until HOLD_CAP_S elapses as a hard cap, whichever comes first. This run
+# writes the release files only after restore_nic returns, so the mappings
+# are alive for the whole window by construction rather than by luck. The
+# cap bounds the guest; the release file bounds the window.
+#
+# Two surfaces, two helpers, two verdicts. A sysfs ring map that never
+# opened is not cured by a UIO map that did, and the reverse. Each helper
+# publishes its own READY line (MMAP_HOLD path=... maps=N) after the maps
+# exist and before the hold, and its RELEASE line (MMAP_HOLD released
+# path=... maps=N) after munmap. Those are the barriers. A blind sleep is
+# not: it scores a closed window as open whenever the helper is slower than
+# the nap, and a READY line whose RELEASE has already landed is history,
+# not an active hold.
 HOLD_PID_UIO=""
 HOLD_PID_RING=""
 UIO_MAPS_HELD=0
 RING_MAPS_HELD=0
 UIO_HOLD_STATUS=absent
 RING_HOLD_STATUS=absent
+UIO_TOUCH_OK=""
+RING_TOUCH_OK=""
+UIO_RELEASED_EARLY=no
+RING_RELEASED_EARLY=no
+HOLD_CAP_S=60
+RELEASE_UIO="$LOG.release-uio"
+RELEASE_RING="$LOG.release-ring"
+rm -f "$RELEASE_UIO" "$RELEASE_RING"
 
 if [ -n "$UIO_DEV" ] && [ -e "$UIO_DEV" ] && [ -n "$HELPER" ]; then
 	say "PHASE2 mmap all maps of $UIO_DEV (held across teardown)"
 	# UIO map N lives at offset N * pagesize. 8 maps of 4 KiB covers every
 	# map the driver advertises.
-	"$HELPER" mmap-hold "$UIO_DEV" 4096 8 8 >>"$LOG" 2>&1 &
+	"$HELPER" mmap-hold "$UIO_DEV" 4096 "$HOLD_CAP_S" 8 "$RELEASE_UIO" >>"$LOG" 2>&1 &
 	HOLD_PID_UIO=$!
 	HOLD_PIDS="$HOLD_PIDS $HOLD_PID_UIO"
 else
@@ -400,7 +957,7 @@ if [ -n "$RING" ]; then
 		# is not discoverable from stat(); it is fixed at SZ_2M by the
 		# driver.
 		say "PHASE2 ring mmap 2097152 bytes = SZ_2M subchannel ring (held across teardown)"
-		"$HELPER" mmap-hold "$RING" 2097152 8 1 >>"$LOG" 2>&1 &
+		"$HELPER" mmap-hold "$RING" 2097152 "$HOLD_CAP_S" 1 "$RELEASE_RING" >>"$LOG" 2>&1 &
 		HOLD_PID_RING=$!
 		HOLD_PIDS="$HOLD_PIDS $HOLD_PID_RING"
 	else
@@ -455,9 +1012,11 @@ if [ -n "$HOLD_PID_RING" ] && [ "$READY_RING_PUBLISHED" = no ]; then
 	say "READY SYSFS timeout after ${READY_BUDGET_S}s (helper published no MMAP_HOLD line)"
 fi
 
-# Snapshot the sizes the teardown is allowed to leave behind, before it runs.
-# This is the owner ledger: anything present afterwards that is not in this
-# set is a retention no prior state accounts for.
+# Snapshot the sizes the teardown is allowed to leave behind, before it
+# runs. This is the SIZE-CLASS ledger, not an owner ledger: /proc/vmallocinfo
+# names the allocating symbol for every one of these, so one kernel owner
+# cannot be told from another. What can be told is whether the end holds
+# more of a size class than any prior state did, with multiplicity.
 : >"$LOG.sizes-before"
 vmbus_map_sizes >>"$LOG.sizes-before" 2>/dev/null || true
 
@@ -466,6 +1025,22 @@ PHASE2_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
 say "PHASE2-BEFORE-TEARDOWN $PHASE2_MAPS"
 restore_nic
 say "PHASE2-AFTER-TEARDOWN $(vmbus_maps || echo 'MAPS unavailable')"
+
+# The hold ends now, and only now. If a helper already released on its own,
+# its maps were gone before this point and the surface did not span the
+# window it would otherwise claim. Record that rather than discovering it
+# from a READY line that outlived its hold.
+if [ -n "$HOLD_PID_UIO" ] && hold_already_released "$UIO_DEV"; then
+	UIO_RELEASED_EARLY=yes
+	say "RELEASE UIO early: hold ended before the teardown completed"
+fi
+if [ -n "$HOLD_PID_RING" ] && hold_already_released "$RING"; then
+	RING_RELEASED_EARLY=yes
+	say "RELEASE SYSFS early: hold ended before the teardown completed"
+fi
+: >"$RELEASE_UIO" 2>/dev/null || true
+: >"$RELEASE_RING" 2>/dev/null || true
+say "RELEASE signal published (post-teardown)"
 
 # Collect the hold results with their real exit status. mmap-hold returns 0
 # when at least one map was held and 1 when none were: swallowing that turns
@@ -495,6 +1070,28 @@ say "--- MMAP_HOLD evidence ---"
 grep 'MMAP_HOLD\|HELPER mmap\|HELPER open' "$LOG" | tee -a "$LOG" || true
 RELEASED_LINES="$(grep -c 'MMAP_HOLD released' "$LOG" 2>/dev/null || echo 0)"
 say "RELEASE acks=$RELEASED_LINES (one per helper that reached munmap)"
+
+# Post-teardown permitted page reads. The helper reports how many of the
+# held maps it could still read after the release signal; a mapping whose
+# pages were revoked underneath faults on the read and takes the helper
+# with it, which is already recorded as a non-zero status above.
+hold_touch_ok() {
+	awk -v p="$1" '
+		$1 == "MMAP_HOLD" {
+			path = ""; ok = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^path=/) path = substr($i, 6)
+				if ($i ~ /^ok=/) ok = substr($i, 4)
+			}
+			if (path == p && ok != "") last = ok
+		}
+		END { if (last != "") print last }
+	' "$LOG"
+}
+UIO_TOUCH_OK="$(hold_touch_ok "$UIO_DEV" || true)"
+RING_TOUCH_OK="$(hold_touch_ok "$RING" || true)"
+say "TOUCH UIO ok=${UIO_TOUCH_OK:-none} maps=$UIO_MAPS_HELD"
+say "TOUCH SYSFS ok=${RING_TOUCH_OK:-none} maps=$RING_MAPS_HELD"
 
 # --- phase 3: reconciliation -------------------------------------------------
 say "=== PHASE 3: reconciliation ==="
@@ -569,71 +1166,19 @@ maps_tuple() {
 # maps while a third netvsc map was still draining and the settled state was
 # 9 -- so an instant PRE_UIO invents an over-free that never happened.
 #
-# GAP_RING_BUDGET bounds what the disclosed hv_uio_remove() gap may retain.
-# Sized to the ring class only: 4 maps (main send/recv plus up to two
-# subchannel rings), 8 MiB, 2048 pages. One leaked UIO buffer is 12349440
-# bytes / 3015 pages and blows the byte and page budget on its own.
-GAP_RING_BUDGET_N=4
-GAP_RING_BUDGET_B=8388608
-GAP_RING_BUDGET_P=2048
-
-# tuple_within_end_band <settle> <pre> <base> <rebind>
-# Prints a reason and returns 1 outside the band; prints nothing and returns 0
-# inside it. Safe under set -euo pipefail: every field is defaulted before use.
-tuple_within_end_band() {
-	_tws="${1:-}"
-	_twp="${2:-}"
-	_twb="${3:-}"
-	_twr="${4:-no}"
-	_sn=$(printf '%s\n' "$_tws" | awk '{print $1+0}')
-	_sb=$(printf '%s\n' "$_tws" | awk '{print $2+0}')
-	_sp=$(printf '%s\n' "$_tws" | awk '{print $3+0}')
-	_pn=$(printf '%s\n' "$_twp" | awk '{print $1+0}')
-	_pb=$(printf '%s\n' "$_twp" | awk '{print $2+0}')
-	_pp=$(printf '%s\n' "$_twp" | awk '{print $3+0}')
-	_bn=$(printf '%s\n' "$_twb" | awk '{print $1+0}')
-	_bb=$(printf '%s\n' "$_twb" | awk '{print $2+0}')
-	if [ "$_sn" -eq 0 ] && [ "$_sb" -eq 0 ]; then
-		echo "tuple unreadable"
-		return 1
-	fi
-	if [ "$_sn" -gt "$_bn" ] || [ "$_sb" -gt "$_bb" ]; then
-		echo "growth above the boot baseline ($_sn/$_sb > $_bn/$_bb)"
-		return 1
-	fi
-	if [ "$_twr" = yes ]; then
-		if [ "$_sn" -ne "$_bn" ] || [ "$_sb" -ne "$_bb" ]; then
-			echo "rebind=yes but the end is not the boot baseline ($_sn/$_sb != $_bn/$_bb)"
-			return 1
-		fi
-		return 0
-	fi
-	if [ "$_sn" -lt "$_pn" ] || [ "$_sb" -lt "$_pb" ]; then
-		echo "over-free below the settled pre-UIO tuple ($_sn/$_sb < $_pn/$_pb)"
-		return 1
-	fi
-	_dn=$((_sn - _pn))
-	_db=$((_sb - _pb))
-	_dp=$((_sp - _pp))
-	if [ "$_dn" -gt "$GAP_RING_BUDGET_N" ] || [ "$_db" -gt "$GAP_RING_BUDGET_B" ] || [ "$_dp" -gt "$GAP_RING_BUDGET_P" ]; then
-		echo "ring retention over budget ($_dn maps $_db bytes $_dp pages > $GAP_RING_BUDGET_N/$GAP_RING_BUDGET_B/$GAP_RING_BUDGET_P); UIO buffers are not released"
-		return 1
-	fi
-	return 0
-}
-
 BASE_TUPLE="$(maps_tuple "$BASE_MAPS")" || BASE_TUPLE=""
 PRE_TUPLE="$(maps_tuple "${PRE_UIO_MAPS:-}")" || PRE_TUPLE=""
 if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
-	LIFE=PARTIAL
 	CLEANUP_VERDICT=PARTIAL
 	CLEANUP_WHY="map accounting unavailable, release unprovable"
-	RESTORE_VERDICT=PARTIAL
-	RESTORE_WHY="a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
+	MAP_ACCOUNTING_VERDICT=PARTIAL
+	MAP_ACCOUNTING_WHY="a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
+	derive_restore_verdict "${REBIND_OK:-no}"
 	say "  baseline='$BASE_MAPS'"
 	say "  pre_uio='${PRE_UIO_MAPS:-}'"
 	say "  final='$FINAL_MAPS'"
-	emit_verdicts_and_exit 3
+	derive_aggregate
+	emit_verdicts_and_exit "$LIFE_CODE"
 fi
 # The unbind may only remove maps. A settled PRE_UIO above the boot baseline
 # means the unbind itself grew the accounting, and scoring the end against it
@@ -646,15 +1191,16 @@ BASE_N=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $1}')
 BASE_B=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $2}')
 if [ -n "$PRE_N" ] && [ -n "$BASE_N" ]; then
 	if [ "$PRE_N" -gt "$BASE_N" ] || [ "$PRE_B" -gt "$BASE_B" ]; then
-		LIFE=FAIL
 		CLEANUP_VERDICT=FAIL
 		CLEANUP_WHY="the unbind grew the accounting (baseline=$BASE_TUPLE pre_uio=$PRE_TUPLE); not a reachable end state"
-		RESTORE_VERDICT=FAIL
-		RESTORE_WHY="pre-UIO tuple exceeds the boot baseline"
+		MAP_ACCOUNTING_VERDICT=FAIL
+		MAP_ACCOUNTING_WHY="pre-UIO tuple exceeds the boot baseline"
+		derive_restore_verdict "${REBIND_OK:-no}"
 		say "  baseline=$BASE_TUPLE"
 		say "  pre_uio=$PRE_TUPLE"
 		say "  the unbind grew the accounting; that is not a reachable end state"
-		emit_verdicts_and_exit 1
+		derive_aggregate
+		emit_verdicts_and_exit "$LIFE_CODE"
 	fi
 fi
 if [ "${REBIND_OK:-no}" = yes ]; then
@@ -763,19 +1309,27 @@ if [ -n "$SETTLE_TUPLE" ] && [ -n "$PRE_TUPLE" ]; then
 	GAP_P=$(($(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $3+0}') - $(printf '%s\n' "$PRE_TUPLE" | awk '{print $3+0}')))
 fi
 
-# Owner ledger. Anything the end holds whose size no prior state showed is a
-# retention this run cannot attribute.
+# Size-class ledger, with multiplicity. Anything the end holds more of than
+# any prior state showed, or of a class no prior state ever held, is a
+# retention this run cannot attribute. Set membership is not enough: a
+# second map of a size that was already known is exactly the retention a
+# size-only match accepts, and two 65536-byte areas are two areas.
 : >"$LOG.sizes-after"
 vmbus_map_sizes >>"$LOG.sizes-after" 2>/dev/null || true
 UNKNOWN_SIZES=""
-if [ -s "$LOG.sizes-before" ]; then
-	cat "$LOG.sizes-base" "$LOG.sizes-before" 2>/dev/null | sort -n -u >"$LOG.sizes-known" || true
+if [ -s "$LOG.sizes-before" ] && [ -s "$LOG.sizes-base" ]; then
+	size_class_max_counts "$LOG.sizes-base" "$LOG.sizes-before" >"$LOG.sizes-known" 2>/dev/null || true
 	if [ -s "$LOG.sizes-after" ] && [ -s "$LOG.sizes-known" ]; then
-		UNKNOWN_SIZES="$(sizes_unknown_after "$LOG.sizes-known" "$LOG.sizes-after" || true)"
+		UNKNOWN_SIZES="$(sizes_excess_after "$LOG.sizes-known" "$LOG.sizes-after" || true)"
+	fi
+elif [ -s "$LOG.sizes-before" ]; then
+	size_class_max_counts "$LOG.sizes-before" >"$LOG.sizes-known" 2>/dev/null || true
+	if [ -s "$LOG.sizes-after" ] && [ -s "$LOG.sizes-known" ]; then
+		UNKNOWN_SIZES="$(sizes_excess_after "$LOG.sizes-known" "$LOG.sizes-after" || true)"
 	fi
 elif [ -s "$LOG.sizes-after" ]; then
-	# No prior ledger: the retention cannot be attributed to anything.
-	UNKNOWN_SIZES="$(sort -n -u "$LOG.sizes-after")"
+	# No prior ledger: every retained class is unattributed, with its count.
+	UNKNOWN_SIZES="$(awk '{ c[$1]++ } END { for (s in c) printf "%s new x%d\n", s, c[s] }' "$LOG.sizes-after")"
 fi
 
 say "  baseline=$BASE_TUPLE"
@@ -815,77 +1369,35 @@ fi
 
 # --- MAP_UIO_VERDICT / MAP_SYSFS_VERDICT ------------------------------------
 # Independent by construction: each surface has its own helper, its own READY
-# ack and its own exit status. One path's success is not the other's.
-MAP_UIO_VERDICT=SKIP
-MAP_UIO_WHY="surface not launched"
-if [ -n "$HOLD_PID_UIO" ]; then
-	if [ "$UIO_HOLD_STATUS" != ok ]; then
-		MAP_UIO_VERDICT=FAIL
-		MAP_UIO_WHY="helper status=$UIO_HOLD_STATUS (mmap-hold returns 1 when no map was held)"
-	elif [ "${UIO_MAPS_HELD:-0}" -eq 0 ]; then
-		MAP_UIO_VERDICT=FAIL
-		MAP_UIO_WHY="published maps=0 (opened nothing)"
-	elif [ "$READY_UIO_PUBLISHED" != yes ]; then
-		MAP_UIO_VERDICT=FAIL
-		MAP_UIO_WHY="no READY ack within ${READY_BUDGET_S}s"
-	else
-		MAP_UIO_VERDICT=PASS
-		MAP_UIO_WHY="maps=$UIO_MAPS_HELD held across teardown, status=$UIO_HOLD_STATUS"
-	fi
-fi
+# ack, its own exit status, its own early-release check and its own
+# post-teardown read count. One path's success is not the other's.
+derive_map_surface_verdict 	"$([ -n "$HOLD_PID_UIO" ] && echo yes || echo no)" 	"$UIO_HOLD_STATUS" 	"${UIO_MAPS_HELD:-0}" 	"$READY_UIO_PUBLISHED" 	"$UIO_RELEASED_EARLY" 	"${UIO_TOUCH_OK:-}" 	"${UIO_MAPS_HELD:-0}"
+MAP_UIO_VERDICT="$MAP_SURFACE_VERDICT"
+MAP_UIO_WHY="$MAP_SURFACE_WHY"
 
-MAP_SYSFS_VERDICT=SKIP
-MAP_SYSFS_WHY="surface not launched"
-if [ -n "$HOLD_PID_RING" ]; then
-	if [ "$RING_HOLD_STATUS" != ok ]; then
-		MAP_SYSFS_VERDICT=FAIL
-		MAP_SYSFS_WHY="helper status=$RING_HOLD_STATUS (mmap-hold returns 1 when no map was held)"
-	elif [ "${RING_MAPS_HELD:-0}" -eq 0 ]; then
-		MAP_SYSFS_VERDICT=FAIL
-		MAP_SYSFS_WHY="published maps=0 (opened nothing)"
-	elif [ "$READY_RING_PUBLISHED" != yes ]; then
-		MAP_SYSFS_VERDICT=FAIL
-		MAP_SYSFS_WHY="no READY ack within ${READY_BUDGET_S}s"
-	else
-		MAP_SYSFS_VERDICT=PASS
-		MAP_SYSFS_WHY="maps=$RING_MAPS_HELD held across teardown, status=$RING_HOLD_STATUS"
-	fi
-fi
+derive_map_surface_verdict 	"$([ -n "$HOLD_PID_RING" ] && echo yes || echo no)" 	"$RING_HOLD_STATUS" 	"${RING_MAPS_HELD:-0}" 	"$READY_RING_PUBLISHED" 	"$RING_RELEASED_EARLY" 	"${RING_TOUCH_OK:-}" 	"${RING_MAPS_HELD:-0}"
+MAP_SYSFS_VERDICT="$MAP_SURFACE_VERDICT"
+MAP_SYSFS_WHY="$MAP_SURFACE_WHY"
+
+# --- MAP_ACCOUNTING_VERDICT -------------------------------------------------
+# The end-tuple band and the size-class ledger. Explicitly scoped to what
+# map accounting can observe, and it says so: this is size classes with
+# multiplicity, never owner identity.
+derive_map_accounting_verdict "$SETTLE_TUPLE" "$PRE_TUPLE" "$BASE_TUPLE" 	"${REBIND_OK:-no}" "$UNKNOWN_SIZES"
 
 # --- RESTORE_VERDICT --------------------------------------------------------
-RESTORE_VERDICT=PASS
-RESTORE_WHY="end tuple in band, retained sizes identified"
-if [ -z "$SETTLE_TUPLE" ]; then
-	RESTORE_VERDICT=PARTIAL
-	RESTORE_WHY="map accounting unavailable"
-elif ! BAND_WHY="$(tuple_within_end_band "$SETTLE_TUPLE" "$PRE_TUPLE" "$BASE_TUPLE" "${REBIND_OK:-no}")"; then
-	RESTORE_VERDICT=FAIL
-	RESTORE_WHY="outside the expected band: ${BAND_WHY:-unknown}"
-elif [ -n "$UNKNOWN_SIZES" ]; then
-	RESTORE_VERDICT=FAIL
-	RESTORE_WHY="unknown_owner_inside_retention_budget_is_not_complete_pass: retained sizes no prior state accounted for"
-fi
+# One question only: did the selected NIC come back. Map accounting is the
+# verdict above. With rebind=no the device did not return, so this cannot be
+# a complete PASS: the hv_uio_remove() gap is pre-existing mainline, it is
+# disclosed, and a PARTIAL is the honest reading of a run that proved the
+# maps and not the device.
+derive_restore_verdict "${REBIND_OK:-no}"
 
 # --- aggregate --------------------------------------------------------------
 # PASS requires every verdict to be PASS. A skipped or partial surface makes
 # the aggregate PARTIAL, never PASS: a green line that silently omitted a
-# mapping path is the exact failure this scorer exists to refuse.
-LIFE=PASS
-LIFE_CODE=0
-for _v in "$CLEANUP_VERDICT" "$MAP_UIO_VERDICT" "$MAP_SYSFS_VERDICT" "$RESTORE_VERDICT"; do
-	case "$_v" in
-	FAIL)
-		LIFE=FAIL
-		LIFE_CODE=1
-		break
-		;;
-	SKIP | PARTIAL)
-		if [ "$LIFE" = PASS ]; then
-			LIFE=PARTIAL
-			LIFE_CODE=3
-		fi
-		;;
-	esac
-done
+# mapping path, or that called a non-returning device a restore, is the
+# exact failure this scorer exists to refuse.
+derive_aggregate
 
 emit_verdicts_and_exit "$LIFE_CODE"

@@ -10,14 +10,22 @@
  * single dependency and the initramfs stays free of an interpreter.
  *
  * Usage:
- *   vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count]
+ *   vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count] [release_file]
  *   vmbus_drill_helper mlock-hog <mib> <hold_seconds>
  *   vmbus_drill_helper fragment-buddy <mib> <hold_seconds>
  *
  * mmap-hold maps <count> regions of <bytes> at sequential page-aligned
- * offsets and keeps them alive for <hold_seconds>. UIO map N lives at offset
- * N * pagesize, so this is exactly the UIO ABI. Count defaults to 1 and is
- * how the sysfs ring file is mapped whole.
+ * offsets and keeps them alive. UIO map N lives at offset N * pagesize, so
+ * this is exactly the UIO ABI. Count defaults to 1 and is how the sysfs ring
+ * file is mapped whole.
+ *
+ * The hold is bounded by <hold_seconds> in every case. When <release_file>
+ * is given it is the explicit release signal: the mappings are released the
+ * moment that path exists, or when <hold_seconds> elapses as a hard cap,
+ * whichever comes first. That is what lets the caller keep the maps alive
+ * across a teardown it controls and release them only afterwards. Without a
+ * release file the hold is a plain sleep of <hold_seconds>, which cannot
+ * prove the maps were still alive when the caller's teardown ran.
  *
  * mlock-hog allocates <mib> MiB anonymously, populates every page, locks it
  * with mlock(2) and holds for <hold_seconds>. Locked pages resist compaction
@@ -107,21 +115,28 @@ static long parse_long(const char *s, const char *what)
 
 static int do_mmap_hold(int argc, char **argv)
 {
-	const char *path;
+	const char *path, *release_file = NULL;
 	long bytes, hold, count, i, mapped = 0;
-	long page;
+	long page, touch_ok = 0, waited_ms = 0;
 	int fd;
 	void **maps;
 
 	if (argc < 4) {
 		fprintf(stderr,
-			"usage: mmap-hold <path> <bytes> <hold_seconds> [count]\n");
+			"usage: mmap-hold <path> <bytes> <hold_seconds> [count] [release_file]\n");
 		return 2;
 	}
 	path = argv[1];
 	bytes = parse_long(argv[2], "bytes");
 	hold = parse_long(argv[3], "hold_seconds");
 	count = (argc > 4) ? parse_long(argv[4], "count") : 1;
+	if (argc > 5 && argv[5][0] != '\0')
+		release_file = argv[5];
+	if (release_file && hold <= 0) {
+		fprintf(stderr,
+			"HELPER release_file requires a positive hold_seconds hard cap\n");
+		return 2;
+	}
 
 	page = sysconf(_SC_PAGESIZE);
 	if (page <= 0)
@@ -180,16 +195,63 @@ static int do_mmap_hold(int argc, char **argv)
 	/*
 	 * Hold the mappings alive across the caller's teardown. This is the
 	 * BUG-3 window: the ring is freed while a userspace mapping still
-	 * references it. The unbind races this sleep on purpose.
+	 * references it. The unbind races this hold on purpose.
+	 *
+	 * With a release_file the hold lasts until the caller publishes that
+	 * path -- an explicit release it issues after its own teardown -- or
+	 * until <hold_seconds> elapses as a hard cap, whichever comes first.
+	 * A bounded hold cannot hang the guest; an explicit release cannot
+	 * end the window before the teardown it is meant to cover. Without a
+	 * release file the hold is the plain sleep, kept for callers that
+	 * have no teardown to span.
 	 */
-	if (hold > 0)
+	if (release_file) {
+		while (waited_ms < hold * 1000L) {
+			struct stat st;
+
+			if (stat(release_file, &st) == 0)
+				break;
+			usleep(100 * 1000);
+			waited_ms += 100;
+		}
+		printf("MMAP_HOLD release_wait path=%s waited_ms=%ld cap_ms=%ld\n",
+		       path, waited_ms, hold * 1000L);
+		fflush(stdout);
+	} else if (hold > 0) {
 		sleep((unsigned int)hold);
+	}
+
+	/*
+	 * Permitted reads of the retained mappings, taken after the hold
+	 * window and before munmap. Reads only: nothing is written back to
+	 * the device. The read is a probe that the mapping still has a
+	 * present page after the caller's teardown. A mapping whose pages
+	 * were revoked underneath faults here and takes this process with
+	 * it, so the non-zero exit status is the evidence that the hold did
+	 * not survive; the scorer already turns that into a FAIL rather than
+	 * swallowing it.
+	 */
+	for (i = 0; i < mapped; i++) {
+		volatile unsigned char *b = maps[i];
+		unsigned char v = *b;
+
+		(void)v;
+		touch_ok++;
+	}
+	printf("MMAP_HOLD touch path=%s ok=%ld fail=0 maps=%ld\n",
+	       path, touch_ok, mapped);
+	fflush(stdout);
 
 	for (i = 0; i < mapped; i++)
 		munmap(maps[i], (size_t)bytes);
 	free(maps);
 	close(fd);
-	printf("MMAP_HOLD released maps=%ld\n", mapped);
+	/*
+	 * The RELEASE line carries the path so the caller can tell which
+	 * hold ended. Without it a release is indistinguishable from another
+	 * path's READY line and a stale hold is accepted as a live one.
+	 */
+	printf("MMAP_HOLD released path=%s maps=%ld\n", path, mapped);
 	fflush(stdout);
 	return mapped > 0 ? 0 : 1;
 }
@@ -1514,7 +1576,7 @@ static int do_fragment_buddy(int argc, char **argv)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count]\n"
+		"usage: vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count] [release_file]\n"
 		"       vmbus_drill_helper mlock-hog <mib> <hold_seconds>\n"
 		"       vmbus_drill_helper fragment-buddy <mib> <hold_seconds>\n");
 }
