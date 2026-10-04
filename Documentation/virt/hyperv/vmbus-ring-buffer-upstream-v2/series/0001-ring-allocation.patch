@@ -1,4 +1,4 @@
-From eae33ea646b779786b99cd0244c1df7e402d9f9d Mon Sep 17 00:00:00 2001
+From 9cc36d473361d61353066182a8c197a42d1bc085 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
 Subject: [PATCH v2 01/13] hv: vmbus: convert ring buffer allocation to
@@ -23,6 +23,15 @@ created when one high-order block is unavailable, and retains
 chunk-based CoCo handling. Platform support still requires hardware
 validation.
 
+The shared-page decision has to be correct before any caller is routed
+through it. Mainline's vmbus_alloc_buffer() takes the chunked decrypt
+path from hv_is_isolation_supported() alone, so an Arm CCA or Intel TDX
+guest without a Hyper-V isolation property falls through to vzalloc()
+and cannot re-encrypt its buffer. Routed through that allocator, a ring
+would inherit the gap. Guest-memory encryption is reported through
+CC_ATTR_GUEST_MEM_ENCRYPT independently of Hyper-V isolation, so both
+are consulted here. Ordinary private guests still take vzalloc().
+
 vmbus_alloc_buffer() currently decides host-visibility from
 channel->co_external_memory alone. A ring buffer on the same channel
 is governed by channel->co_ring_buffer instead, so the caller has to
@@ -39,28 +48,29 @@ this patch together with 9/13 for the final shape.
 Suggested-by: Michael Kelley <mhklinux@outlook.com>
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c            | 151 +++++++++++++++++++++-----------
+ drivers/hv/channel.c            | 153 +++++++++++++++++++++-----------
  drivers/hv/hyperv_vmbus.h       |   4 +-
  drivers/hv/ring_buffer.c        |   9 +-
  drivers/net/hyperv/hyperv_net.h |  10 +--
  drivers/net/hyperv/netvsc.c     |  60 ++++++++-----
  drivers/uio/uio_hv_generic.c    |  37 ++++----
  include/linux/hyperv.h          |  20 +++--
- 7 files changed, 180 insertions(+), 111 deletions(-)
+ 7 files changed, 182 insertions(+), 111 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f55237..87b806a4846d 100644
+index 7e4cc6f55237..464b890ab34b 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -12,6 +12,7 @@
+@@ -12,6 +12,8 @@
  #include <linux/sched.h>
  #include <linux/wait.h>
  #include <linux/mm.h>
++#include <linux/cc_platform.h>
 +#include <linux/overflow.h>
  #include <linux/slab.h>
  #include <linux/log2.h>
  #include <linux/module.h>
-@@ -42,7 +43,6 @@ static inline u32 hv_gpadl_size(enum hv_gpadl_type type, u32 size)
+@@ -42,7 +44,6 @@ static inline u32 hv_gpadl_size(enum hv_gpadl_type type, u32 size)
  {
  	switch (type) {
  	case HV_GPADL_BUFFER:
@@ -68,7 +78,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  		return size;
  	case HV_GPADL_RING:
  		/* The size of a ringbuffer must be page-aligned */
-@@ -103,7 +103,6 @@ static inline u64 hv_gpadl_hvpfn(enum hv_gpadl_type type, void *kbuffer,
+@@ -103,7 +104,6 @@ static inline u64 hv_gpadl_hvpfn(enum hv_gpadl_type type, void *kbuffer,
  
  	switch (type) {
  	case HV_GPADL_BUFFER:
@@ -76,7 +86,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  		break;
  	case HV_GPADL_RING:
  		if (i == 0)
-@@ -154,17 +153,15 @@ EXPORT_SYMBOL_GPL(vmbus_setevent);
+@@ -154,17 +154,15 @@ EXPORT_SYMBOL_GPL(vmbus_setevent);
  /* vmbus_free_ring - drop mapping of ring buffer */
  void vmbus_free_ring(struct vmbus_channel *channel)
  {
@@ -100,7 +110,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_free_ring);
  
-@@ -172,26 +169,32 @@ EXPORT_SYMBOL_GPL(vmbus_free_ring);
+@@ -172,26 +170,32 @@ EXPORT_SYMBOL_GPL(vmbus_free_ring);
  int vmbus_alloc_ring(struct vmbus_channel *newchannel,
  		     u32 send_size, u32 recv_size)
  {
@@ -147,7 +157,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  
  	return 0;
  }
-@@ -442,7 +445,8 @@ static void vmbus_free_channel_msginfo(struct vmbus_channel_msginfo *msginfo)
+@@ -442,7 +446,8 @@ static void vmbus_free_channel_msginfo(struct vmbus_channel_msginfo *msginfo)
   */
  static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  				   enum hv_gpadl_type type, void *kbuffer,
@@ -157,7 +167,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  				   struct vmbus_gpadl *gpadl)
  {
  	struct vmbus_channel_gpadl_header *gpadlmsg;
-@@ -452,8 +456,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -452,8 +457,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	struct list_head *curr;
  	u32 next_gpadl_handle;
  	unsigned long flags;
@@ -171,7 +181,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  	next_gpadl_handle =
  		(atomic_inc_return(&vmbus_connection.next_gpadl_handle) - 1);
  
-@@ -463,9 +472,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -463,9 +473,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  		return ret;
  	}
  
@@ -184,7 +194,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  	if (gpadl->decrypted) {
  		/*
  		 * The "decrypted" flag being true assumes that set_memory_decrypted() succeeds.
-@@ -504,6 +513,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -504,6 +514,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  		goto cleanup;
  	}
  
@@ -193,7 +203,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  	ret = vmbus_post_msg(gpadlmsg, msginfo->msgsize -
  			     sizeof(*msginfo), true);
  
-@@ -534,6 +545,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -534,6 +546,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	wait_for_completion(&msginfo->waitevent);
  
  	if (msginfo->response.gpadl_created.creation_status != 0) {
@@ -201,7 +211,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  		pr_err("Failed to establish GPADL: err = 0x%x\n",
  		       msginfo->response.gpadl_created.creation_status);
  
-@@ -542,6 +554,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -542,6 +555,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	}
  
  	if (channel->rescind) {
@@ -209,7 +219,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  		ret = -ENODEV;
  		goto cleanup;
  	}
-@@ -550,6 +563,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -550,6 +564,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	gpadl->gpadl_handle = gpadlmsg->gpadl;
  	gpadl->buffer = kbuffer;
  	gpadl->size = size;
@@ -217,7 +227,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  
  
  cleanup:
-@@ -559,7 +573,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -559,7 +574,13 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	vmbus_free_channel_msginfo(msginfo);
  
@@ -232,7 +242,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  		/*
  		 * If set_memory_encrypted() fails, the decrypted flag is
  		 * left as true so the memory is leaked instead of being
-@@ -586,7 +606,7 @@ int vmbus_establish_gpadl(struct vmbus_channel *channel, void *kbuffer,
+@@ -586,7 +607,7 @@ int vmbus_establish_gpadl(struct vmbus_channel *channel, void *kbuffer,
  			  u32 size, struct vmbus_gpadl *gpadl)
  {
  	return __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, kbuffer, size,
@@ -241,7 +251,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
  
-@@ -597,16 +617,19 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
+@@ -597,16 +618,19 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
   * @channel: a channel
   * @kbuffer: from kmalloc or vmalloc; must already be decrypted by the caller
   * @size: page-size multiple
@@ -263,7 +273,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_establish_gpadl_caller_decrypted);
  
-@@ -648,11 +671,26 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+@@ -648,11 +672,26 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
  }
  EXPORT_SYMBOL_GPL(vmbus_free_buffer);
  
@@ -290,7 +300,7 @@ index 7e4cc6f55237..87b806a4846d 100644
   * @chunks_out: on success, set to the array of underlying chunks, or NULL when
   *              the buffer was allocated with vzalloc()
   * @chunk_cnt_out: on success, set to the number of chunks
-@@ -669,6 +707,7 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
+@@ -669,6 +708,7 @@ EXPORT_SYMBOL_GPL(vmbus_free_buffer);
   */
  void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  			 u32 size,
@@ -298,16 +308,17 @@ index 7e4cc6f55237..87b806a4846d 100644
  			 struct page ***chunks_out,
  			 u32 *chunk_cnt_out)
  {
-@@ -690,7 +729,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -690,7 +730,8 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  		return NULL;
  
  	/* If the buffer does not need to be decrypted, just use vzalloc() */
 -	if (!hv_is_isolation_supported() || channel->co_external_memory)
-+	if (!hv_is_isolation_supported() || confidential)
++	if ((!hv_is_isolation_supported() &&
++	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
  		return vzalloc(nr_pages << PAGE_SHIFT);
  
  	/* Worst case: every chunk is a single page. */
-@@ -832,7 +871,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -832,7 +873,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  {
  	struct vmbus_channel_open_channel *open_msg;
  	struct vmbus_channel_msginfo *open_info = NULL;
@@ -316,7 +327,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  	u32 send_pages, recv_pages;
  	unsigned long flags;
  	int err;
-@@ -860,22 +899,24 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -860,22 +901,24 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  		newchannel->max_pkt_size = VMBUS_DEFAULT_MAX_PKT_SIZE;
  
  	/* Establish the gpadl for the ring buffer */
@@ -346,7 +357,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  				 recv_pages, newchannel->max_pkt_size,
  				 newchannel->co_ring_buffer);
  	if (err)
-@@ -897,8 +938,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -897,8 +940,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  	open_msg->header.msgtype = CHANNELMSG_OPENCHANNEL;
  	open_msg->openid = newchannel->offermsg.child_relid;
  	open_msg->child_relid = newchannel->offermsg.child_relid;
@@ -356,7 +367,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  	/*
  	 * The unit of ->downstream_ringbuffer_pageoffset is HV_HYP_PAGE and
  	 * the unit of ->ringbuffer_send_offset (i.e. send_pages) is PAGE, so
-@@ -956,7 +996,8 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -956,7 +998,8 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  error_free_info:
  	kfree(open_info);
  error_free_gpadl:
@@ -366,7 +377,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  error_clean_ring:
  	hv_ringbuffer_cleanup(&newchannel->outbound);
  	hv_ringbuffer_cleanup(&newchannel->inbound);
-@@ -1058,15 +1099,20 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1058,15 +1101,20 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  
  	kfree(info);
  
@@ -395,7 +406,7 @@ index 7e4cc6f55237..87b806a4846d 100644
  
  	return ret;
  }
-@@ -1142,9 +1188,10 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
+@@ -1142,9 +1190,10 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
  	}
  
  	/* Tear down the gpadl for the channel's ring buffer */

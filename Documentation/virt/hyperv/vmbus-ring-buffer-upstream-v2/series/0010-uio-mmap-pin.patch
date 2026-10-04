@@ -1,4 +1,4 @@
-From 934acd7ce76d447ab5c16f510fb469c46fda4e08 Mon Sep 17 00:00:00 2001
+From 66b77e3f20dffbea08a4212bd34bc80869d3b618 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Sat, 3 Oct 2026 16:08:58 -0300
 Subject: [PATCH v2 10/13] hv: vmbus: pin buffer pages across UIO mmap to close

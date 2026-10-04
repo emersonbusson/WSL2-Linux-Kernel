@@ -1,4 +1,4 @@
-From dfe4599ccd12d9424cd8358e34adbe0af70cab13 Mon Sep 17 00:00:00 2001
+From dc7a7172ad7d9385105413dfe17b6af115ab50c1 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 21:41:54 -0300
 Subject: [PATCH v2 09/13] hv: vmbus: restore the vmbus_alloc_buffer()

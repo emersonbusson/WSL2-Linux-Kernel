@@ -1,4 +1,4 @@
-From 8763ddd3b3705794622f8c60c7ee789d712750e7 Mon Sep 17 00:00:00 2001
+From 1c8317840631cfe12fcdc66bf6c8086111daff29 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 21:34:10 -0300
 Subject: [PATCH v2 08/13] hv: vmbus: retain buffer ownership across GPADL and

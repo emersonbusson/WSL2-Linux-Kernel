@@ -1,4 +1,4 @@
-From f3a6049bf8e8f41590e946519e82c25e81e5b85c Mon Sep 17 00:00:00 2001
+From 8a07ef9a6130673b08f726f82d44fb62c9216918 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
 Subject: [PATCH v2 02/13] hv: vmbus: validate chunk buffer allocation and
@@ -24,15 +24,6 @@ them is a use-after-free from the host's side and a Confidential
 Computing hazard. Such a buffer is marked leaked and its chunks are
 retained instead of freed.
 
-The shared-page condition stops being a bare hv_is_isolation_supported()
-test. Mainline took the chunked decrypt path from that call alone, so an
-Arm CCA or Intel TDX guest without a Hyper-V isolation property fell
-through to vzalloc() and could not re-encrypt its ring. Guest-memory
-encryption is reported through CC_ATTR_GUEST_MEM_ENCRYPT independently
-of Hyper-V isolation, so both are consulted here, together with the
-per-buffer confidential flag. Ordinary private guests still take
-vzalloc().
-
 The new cases live in drivers/hv/vmbus_buffer_test.c, which is built
 into the hv_vmbus object rather than a separate module. That keeps the
 cases off the production sources while still letting them call the
@@ -47,10 +38,10 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/Kconfig             |  11 ++++
  drivers/hv/Makefile            |   1 +
- drivers/hv/channel.c           |  71 ++++++++++++++++++-----
+ drivers/hv/channel.c           |  67 ++++++++++++++++++----
  drivers/hv/hyperv_vmbus.h      |  12 ++++
  drivers/hv/vmbus_buffer_test.c | 102 +++++++++++++++++++++++++++++++++
- 5 files changed, 184 insertions(+), 13 deletions(-)
+ 5 files changed, 181 insertions(+), 12 deletions(-)
  create mode 100644 drivers/hv/vmbus_buffer_test.c
 
 diff --git a/drivers/hv/Kconfig b/drivers/hv/Kconfig
@@ -88,18 +79,10 @@ index 888a748cc7cb..80d33e9c0e57 100644
  mshv_root-y := mshv_root_main.o mshv_synic.o mshv_eventfd.o mshv_irq.o \
  	       mshv_root_hv_call.o mshv_portid_table.o mshv_regions.o
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 87b806a4846d..d6e5f26577b9 100644
+index 464b890ab34b..d6e5f26577b9 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -12,6 +12,7 @@
- #include <linux/sched.h>
- #include <linux/wait.h>
- #include <linux/mm.h>
-+#include <linux/cc_platform.h>
- #include <linux/overflow.h>
- #include <linux/slab.h>
- #include <linux/log2.h>
-@@ -27,6 +28,44 @@
+@@ -28,6 +28,44 @@
  
  #include "hyperv_vmbus.h"
  
@@ -144,7 +127,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  /*
   * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
   *
-@@ -655,7 +694,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+@@ -656,7 +694,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
  		return;
  	}
  
@@ -154,7 +137,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  
  	for (i = 0; i < chunk_cnt; i++) {
  		unsigned long vaddr =
-@@ -677,8 +717,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+@@ -678,8 +717,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
  		return;
  
  	kvfree(buffer->pages);
@@ -164,7 +147,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  		vmbus_free_buffer(buffer->addr, buffer->chunks,
  				  buffer->chunk_cnt);
  	memset(buffer, 0, sizeof(*buffer));
-@@ -711,12 +750,13 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -712,12 +750,13 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  			 struct page ***chunks_out,
  			 u32 *chunk_cnt_out)
  {
@@ -181,7 +164,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  	u32 chunk_cnt = 0;
  	void *addr;
  	u32 i;
-@@ -725,12 +765,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -726,13 +765,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  	*chunks_out = NULL;
  	*chunk_cnt_out = 0;
  
@@ -192,15 +175,14 @@ index 87b806a4846d..d6e5f26577b9 100644
 +	remaining = nr_pages;
  
  	/* If the buffer does not need to be decrypted, just use vzalloc() */
--	if (!hv_is_isolation_supported() || confidential)
+ 	if ((!hv_is_isolation_supported() &&
+ 	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
 -		return vzalloc(nr_pages << PAGE_SHIFT);
-+	if ((!hv_is_isolation_supported() &&
-+	     !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) || confidential)
 +		return vzalloc(rounded_size);
  
  	/* Worst case: every chunk is a single page. */
  	chunks = kvmalloc_objs(*chunks, nr_pages, GFP_KERNEL | __GFP_ZERO);
-@@ -745,7 +788,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -747,7 +788,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  		struct page *page;
  		gfp_t gfp;
  
@@ -209,7 +191,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  
  		/*
  		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
-@@ -760,7 +803,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -762,7 +803,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
  					gfp, order);
  		if (!page) {
@@ -218,7 +200,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  				goto err;
  			continue;
  		}
-@@ -787,7 +830,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -789,7 +830,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  	if (!addr)
  		goto err;
  
@@ -227,7 +209,7 @@ index 87b806a4846d..d6e5f26577b9 100644
  
  	kvfree(pages);
  	*chunks_out = chunks;
-@@ -1052,8 +1095,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1054,8 +1095,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  
  	info = kzalloc(sizeof(*info) +
  		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
