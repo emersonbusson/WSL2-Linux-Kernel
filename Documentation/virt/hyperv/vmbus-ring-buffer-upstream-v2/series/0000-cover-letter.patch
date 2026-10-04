@@ -65,9 +65,19 @@ What changed
   across two lifetimes.
 
 - vmbus_buffer_pin_pages()/vmbus_buffer_unpin_pages() close the
-  mmap-versus-reclaimer race. Uncertain cleanup preserves chunks
-  rather than freeing them; unproven GPADL or encryption state is
-  retained and flagged.
+  mmap-versus-reclaimer race. The pin record is filled entirely
+  under vmbus_buffer_owners_lock, so a pin taken during teardown
+  snapshots the protection state the teardown is still holding.
+  Uncertain cleanup preserves chunks rather than freeing them;
+  unproven GPADL or encryption state is retained and flagged.
+
+- The sysfs "ring" mmap path installs no vm_ops.
+  kernfs_fop_mmap() rejects any vma->vm_ops that carries .close
+  and reads its state from file->private_data, never from
+  vma->vm_private_data, so the pin cannot ride the vma the way the
+  /dev/uioN path does. The synchronous wrapper owns that pin and
+  releases it after __compat_vma_mmap() on every outcome. The UIO
+  path keeps { .mapped, .close }; that path is not kernfs.
 
 - GPADL post-failure injection and order-descent fallback are
   factored for KUnit. The same helpers run in production.
@@ -107,17 +117,22 @@ Fixes: tag rather than an invented one. Routing 0011-0013 to the
 netvsc maintainers as a follow-up is fine if they prefer that
 split; the bytes are independent of 0001-0010.
 
-Patch granularity is deliberate. 8/13 is the largest at 898
-changed lines across six files (778 insertions, 120 deletions) and
-it adds five KUnit cases. It is one patch because it is one
-lifecycle: the owner record, the three encryption facts, the
-reclaim scheduling and the workqueue teardown are one state
-machine. Splitting it would produce intermediate revisions in which
-a buffer can be freed with an unproven encryption state, or a
-module unload can strand an armed reclaim timer against a destroyed
-workqueue. 10/13 is next at 785 lines across seven files and adds
-the six UIO mmap cases. The other eleven patches are 14 to 340
-lines each.
+Patch granularity is deliberate. 10/13 is the largest at 1283
+changed lines across seven files (1275 insertions, 8 deletions) and
+it adds twelve KUnit cases. It is one patch because it is one
+contract: the pin record and its lock, the kernfs-safe mmap path,
+the synchronous wrapper that owns the pin, and the named cases that
+prove each release path are one thing. Splitting it produces a
+revision where a pin outlives the lock that proved its protection
+state, or where the sysfs path installs vm_ops kernfs will reject.
+8/13 is next at 898 changed lines across six files (778 insertions,
+120 deletions) and adds five KUnit cases; it is one lifecycle: the
+owner record, the three encryption facts, the reclaim scheduling
+and the workqueue teardown are one state machine. Splitting it
+would produce intermediate revisions in which a buffer can be freed
+with an unproven encryption state, or a module unload can strand an
+armed reclaim timer against a destroyed workqueue. The other
+eleven patches are 14 to 340 lines each.
 
 Mapping to the 2026-09-22 review
 --------------------------------
@@ -153,50 +168,99 @@ Testing
 -------
 
 The qualifying pair for these thirteen bytes is
-37155088526 / 37155088537 on fork commit ee583038864e, against
+37173468641 / 37173468629 on fork commit 07c1c8ce4d7f, against
 pinned mainline base
 93f51579e7df ("Linux 7.3-rc4"), with all thirteen series/SHA256SUMS
 entries verified before build.
 
-Build: all thirteen stages applied on x86_64 and arm64; 0 ERROR /
-0 WARNING from scripts/checkpatch.pl --strict --no-tree at every
-stage (cumulative git diff shape). The 22 named KUnit cases this
-series adds all pass on x86_64 (hyperv-vmbus-buffer 16,
-hyperv-uio-mmap 6); the run reports 26 of 26 including the
-pre-existing refcount_interrupt 4. All four CoCo gate self-test
-injections rejected on both arches. WSL backport: 15 of 15 named cases
+Build: all thirteen stages applied on x86_64 and arm64. The
+per-stage gate is scripts/checkpatch.pl --strict --no-tree over
+the cumulative working-tree git diff left by git apply, the shape
+CI runs: 0 ERROR / 0 WARNING at every stage, "total: 0 errors, 0
+warnings, 0 checks" thirteen times in the run's logs. Diffing
+committed trees instead reports 0 ERROR and one WARNING from
+stage 2 on -- FILE_PATH_CHANGES, "added, moved or deleted
+file(s), does MAINTAINERS need updating?" -- because that shape
+carries the new files' "new file mode" line and git apply leaves
+them untracked. The 28 named KUnit cases this series adds all
+pass on x86_64 (hyperv-vmbus-buffer 16, hyperv-uio-mmap 12); the
+run reports "Ran 32 tests: passed: 32" including the pre-existing
+refcount_interrupt 4. All four CoCo gate self-test injections
+rejected on both arches. WSL backport: "Ran 15 tests: passed: 15"
 (hyperv-vmbus-gpadl-lifetime 12, hyperv-uio-hv-generic-mmap 3).
 
-As a mail patch rather than cumulative diff, 2/13 and 10/13 each
-print one FILE_PATH_CHANGES warning about MAINTAINERS. The test
+As a mail patch, 2/13 and 10/13 print that same FILE_PATH_CHANGES
+nudge once; those are the two patches that add a file. The test
 files are covered by the existing Hyper-V and UIO directory
-entries; the warning is a generic nudge on any file add. Nothing
-was reshaped to silence it.
+entries. Nothing was reshaped to silence it.
 
 WSL backport builds with W=1 and Sparse. Baseline diagnostics that
 pre-exist this series are not introduced by it.
 
-Runtime: both hosted guests booted the same bytes as Gen2. Both
-legs printed HYPERV_DRILL_RESULT status=PASS with
-scope=ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation and
-lifecycle=0 fragment=0 splats=0 faults=0. PHASE1 returned to its
-exact map baseline after 100 hv_netvsc bind/unbind cycles
-(cycle_fails=0, 400 steps). Hold-in-mmap window held across
-teardown. high_order_7plus driven to zero with exhausted=1,
-order7_dmesg=0 accept4_failures=0 oops=0. Both legs printed
-VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION. The drill scope
-is ordinary-hyperv-gpadl-uio-and-ring-under-fragmentation, noted
-no-co-co-hardware; co-co-chunked-fallback-not-exercised.
+Runtime: both hosted guests booted the same bytes as Gen2
+(kernel=7.3.0-rc4+). Both legs printed HYPERV_DRILL_RESULT
+status=PARTIAL with lifecycle=3 fragment=0 splats=0 faults=0 and
+scope=lifecycle-inconclusive. PHASE1 returned to its exact map
+baseline after 100 hv_netvsc bind/unbind cycles (cycle_fails=0, 400
+steps) at 12 maps / 20279296 bytes / 4939 pages. The hold-in-mmap
+window was open on both surfaces and both were live at
+establishment: /dev/uio0 touch_ready=5 and the channel "ring" sysfs
+node touch_ready=1, each reaching its own release signal
+(MMAP_HOLD release_wait on both; waited_ms 100-200 of 60000). The
+UIO hold then still read on every map after teardown (touch ok=5 on
+maps=5, and MMAP_HOLD released maps=5). The sysfs hold's post-hold
+read took the helper (status=failed), which is that surface's own
+lifetime rather than a defect: the mapping is withdrawn at node
+removal.
+high_order_7plus driven to zero with exhausted=1, order7_dmesg=0
+accept4_failures=0 oops=0. Both legs printed
+VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION with
+VERDICT_SCOPE ordinary-x86_64-vzalloc-path;
+co-co-chunked-fallback-not-exercised.
+
+The lifecycle gate scores five verdicts independently: buffer
+cleanup, the /dev/uioN maps, the sysfs "ring" maps, the size-class
+map accounting, and device restore. The two mmap surfaces are scored
+against the lifetimes they actually promise. /dev/uioN keeps its pin
+until the VMA closes (hv_uio_pin_vm_ops), so its pages must still
+read after teardown. The channel "ring" sysfs node is a kernfs bin
+attribute with no vm_ops; hv_remove_ring_sysfs() runs before
+vmbus_free_ring() and the mapping is withdrawn with the node, so a
+post-teardown fault there is that ordering and not a mapping freed
+under an active VMA. Both surfaces require the map to be live at
+establishment and the hold to reach the release signal rather than
+ending on its own.
+
+Both legs reported CLEANUP_VERDICT=PASS, MAP_UIO_VERDICT=PASS,
+MAP_SYSFS_VERDICT=PASS, MAP_ACCOUNTING_VERDICT=PASS and
+RESTORE_VERDICT=PARTIAL (rebind=no), and the aggregate
+LIFECYCLE_VERDICT=PARTIAL. An earlier aggregate let one successful
+mapping surface stand for both; the sysfs ring specifically failed
+to mmap on run 37149993984 (maps=0, EINVAL) because the path
+installed .close on a kernfs vma. That is fixed in 10/13 and this
+run reports maps=5 on /dev/uio0 and maps=1 on the sysfs ring on
+both legs.
+
+RESTORE_VERDICT answers one question: did hv_netvsc come back. With
+rebind=no it is PARTIAL and the aggregate cannot be a complete PASS.
+That is the known hv_uio_remove() gap described below, and scoring
+it as PASS would be the exact over-claim the gate exists to prevent.
 
 The end-of-run map gate scores a band, not a point. The settled
-post-unbind tuple is 7 maps / 307200 bytes / 68 pages. UIO teardown
-is not the inverse of UIO probe under the hv_uio_remove() gap below,
-so the end must land between that tuple and the boot baseline with
-the retained ring set bounded. Both legs settled at
+post-unbind tuple is 7 maps / 307200 bytes / 68 pages. UIO
+teardown is not the inverse of UIO probe under the hv_uio_remove()
+gap below, so the end must land between that tuple and the boot
+baseline with the retained ring set bounded. Both legs settled at
 9 / 4517888 / 1094 after two samples: a retained gap of 2 maps /
 4210688 bytes / 1026 pages against a 4 / 8388608 / 2048 budget,
-with PHASE 2 having released its own buffers. PHASE 1 returned to
-12 / 20279296 / 4939 exactly on both legs.
+with PHASE 2 having released its own buffers. The owner ledger is
+a size-class ledger, not an instance ledger: it reports
+owner_attribution=size_class_only because /proc/vmallocinfo names
+the allocating symbol and never the instance. Under that
+granularity it found unidentified_retained_sizes: none on both
+legs, so every retained size class is one a prior state already
+accounted for. PHASE 1 returned to 12 / 20279296 / 4939 exactly on
+both legs.
 
 What is not proven here
 -----------------------
@@ -235,6 +299,20 @@ That is pre-existing in mainline and is not fixed here. This series
 does not make it worse: the ring pages stay alive while pinned
 instead of being freed under an open mapping.
 
+Device restoration is therefore not proven while the drill holds
+/dev/uioN open across the unbind. That is the harder condition and
+it is the one the drill measures. The verdict says so rather than
+scoring a mapping as a restore.
+
+The lifecycle drill scores five verdicts independently -- buffer
+cleanup, the /dev/uioN maps, the sysfs "ring" maps, map accounting
+and device restore -- and the aggregate is their conjunction: any
+FAIL is a FAIL, any SKIP or PARTIAL is a PARTIAL, and only all five
+PASS is a PASS. A run that establishes one mapping surface and not
+the other is PARTIAL. That is deliberate: an earlier aggregate let
+a single successful surface stand for both, so a sysfs ring that
+never opened could be carried by a UIO map that did.
+
 The design follows Kelley's review of v1. Comments welcome.
 
 Emerson Busson (13):
@@ -254,21 +332,21 @@ Emerson Busson (13):
 
  drivers/hv/Kconfig                     |   11 +
  drivers/hv/Makefile                    |    1 +
- drivers/hv/channel.c                   | 1110 ++++++++++++++++++++++++++------
+ drivers/hv/channel.c                   | 1129 ++++++++++++++++++++++++++------
  drivers/hv/channel_mgmt.c              |   36 +-
  drivers/hv/hyperv_vmbus.h              |   91 ++-
  drivers/hv/ring_buffer.c               |    9 +-
  drivers/hv/vmbus_buffer_test.c         |  474 ++++++++++++++
- drivers/hv/vmbus_drv.c                 |   32 +-
+ drivers/hv/vmbus_drv.c                 |   59 +-
  drivers/net/hyperv/hyperv_net.h        |   10 +-
  drivers/net/hyperv/netvsc.c            |  119 ++--
  drivers/net/hyperv/rndis_filter.c      |   19 +-
  drivers/uio/Kconfig                    |   11 +
  drivers/uio/uio.c                      |   20 +
- drivers/uio/uio_hv_generic.c           |  336 ++++++++--
- drivers/uio/uio_hv_generic_mmap_test.c |  391 +++++++++++
- include/linux/hyperv.h                 |   53 +-
- 16 files changed, 2388 insertions(+), 335 deletions(-)
+ drivers/uio/uio_hv_generic.c           |  366 +++++++++--
+ drivers/uio/uio_hv_generic_mmap_test.c |  794 ++++++++++++++++++++++
+ include/linux/hyperv.h                 |   72 +-
+ 16 files changed, 2887 insertions(+), 334 deletions(-)
 
 --
 2.43.0
