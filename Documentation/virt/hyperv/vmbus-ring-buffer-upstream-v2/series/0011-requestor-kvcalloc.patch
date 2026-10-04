@@ -1,4 +1,4 @@
-From 4e01222ee21d2d209c7c5319e736b8c08adbf212 Mon Sep 17 00:00:00 2001
+From ccbc87fdf9b903f1e86941695e10f9f755a2c38c Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 11/13] hv: vmbus: allocate the requestor array with
@@ -42,21 +42,38 @@ Free side is kfree(rqstor->req_arr) and the error path in
 vmbus_alloc_requestor(); both must become kvfree() because the
 allocation may now come from vmalloc.
 
+The three requestor lifetime helpers lose their static so
+vmbus_buffer_test.c can reach them, matching the sizing, owner and
+GPADL helpers already declared in hyperv_vmbus.h. They stay
+unexported: request_arr_init() returns a kvcalloc()ed array the
+caller must kvfree(), vmbus_alloc_requestor() pairs that with a
+bitmap and takes ownership of both on success, and
+vmbus_free_requestor() is the paired teardown.
+
+Five KUnit cases cover the conversion: the free-list shape after
+alloc, vmalloc backing at a size past KMALLOC_MAX_SIZE where kcalloc()
+cannot return memory at all, ID allocation and consumption with LIFO
+slot reuse, invalid and replayed IDs, and exhaustion versus an
+uninitialized requestor.
+
 Revert this patch if a channel open under buddy fragmentation starts
-reporting -ENOMEM from vmbus_alloc_requestor() again, or if any path
-begins to treat req_arr as host-visible or direct-mapped memory.
+reporting -ENOMEM from vmbus_alloc_requestor() again, if any path
+begins to treat req_arr as host-visible or direct-mapped memory, or
+if any of the five requestor cases regresses.
 
 Fixes: e8b7db38449ac ("Drivers: hv: vmbus: Add vmbus_requestor data structure for VMBus hardening")
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c | 14 +++++++++++---
- 1 file changed, 11 insertions(+), 3 deletions(-)
+ drivers/hv/channel.c           |  20 +++--
+ drivers/hv/hyperv_vmbus.h      |  11 +++
+ drivers/hv/vmbus_buffer_test.c | 151 +++++++++++++++++++++++++++++++++
+ 3 files changed, 176 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 0e0eb98f9132..b93b13dbd4e2 100644
+index 0e0eb98f9132..bfa1adad95d3 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -1426,6 +1426,14 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
+@@ -1426,14 +1426,22 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
   * keeps track of the next available slot in the array. Initially, each
   * slot points to the next one (as in a Linked List). The last slot
   * does not point to anything, so its value is U64_MAX by default.
@@ -70,8 +87,9 @@ index 0e0eb98f9132..b93b13dbd4e2 100644
 + * Computing implication and needs no set_memory_decrypted().
   * @size: The size of the array
   */
- static u64 *request_arr_init(u32 size)
-@@ -1433,7 +1441,7 @@ static u64 *request_arr_init(u32 size)
+-static u64 *request_arr_init(u32 size)
++u64 *request_arr_init(u32 size)
+ {
  	int i;
  	u64 *req_arr;
  
@@ -80,6 +98,15 @@ index 0e0eb98f9132..b93b13dbd4e2 100644
  	if (!req_arr)
  		return NULL;
  
+@@ -1451,7 +1459,7 @@ static u64 *request_arr_init(u32 size)
+  * Index 0 is the first free slot
+  * @size: Size of the requestor array
+  */
+-static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
++int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+ {
+ 	u64 *rqst_arr;
+ 	unsigned long *bitmap;
 @@ -1462,7 +1470,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  
  	bitmap = bitmap_zalloc(size, GFP_KERNEL);
@@ -89,14 +116,213 @@ index 0e0eb98f9132..b93b13dbd4e2 100644
  		return -ENOMEM;
  	}
  
-@@ -1481,7 +1489,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1479,9 +1487,9 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+  * vmbus_free_requestor - Frees memory allocated for @rqstor
+  * @rqstor: Pointer to the requestor struct
   */
- static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
+-static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
++void vmbus_free_requestor(struct vmbus_requestor *rqstor)
  {
 -	kfree(rqstor->req_arr);
 +	kvfree(rqstor->req_arr);
  	bitmap_free(rqstor->req_bitmap);
  }
+ 
+diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
+index 8035a231a288..6138a74e05b6 100644
+--- a/drivers/hv/hyperv_vmbus.h
++++ b/drivers/hv/hyperv_vmbus.h
+@@ -638,4 +638,15 @@ int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
+ 			      vmbus_gpadl_post_fn post_msg,
+ 			      void *context);
+ 
++/*
++ * Requestor array lifetime helpers, shared with vmbus_buffer_test.c for
++ * the same reason as the sizing helpers. Defined in channel.c, unexported.
++ * request_arr_init() returns a kvcalloc()ed array the caller must kvfree();
++ * vmbus_alloc_requestor() pairs that with a bitmap and takes ownership of
++ * both on success.
++ */
++u64 *request_arr_init(u32 size);
++int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size);
++void vmbus_free_requestor(struct vmbus_requestor *rqstor);
++
+ #endif /* _HYPERV_VMBUS_H */
+diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
+index 8bee402ccd78..171f188085f7 100644
+--- a/drivers/hv/vmbus_buffer_test.c
++++ b/drivers/hv/vmbus_buffer_test.c
+@@ -9,6 +9,7 @@
+ #include <kunit/test.h>
+ #include <linux/hyperv.h>
+ #include <linux/mm.h>
++#include <linux/sizes.h>
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ 
+@@ -446,6 +447,151 @@ static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
+ 	KUNIT_EXPECT_EQ(test, context.attempts, (unsigned int)MAX_PAGE_ORDER + 1);
+ }
+ 
++/*
++ * Requestor array regressions for the kvcalloc() conversion (patch 0011).
++ *
++ * The requestor is guest-private bookkeeping: the host never sees the slot
++ * values, so a vmalloc-backed array is correct here and needs no
++ * set_memory_decrypted(). What must hold is that the array still behaves
++ * as a free list under the exported ID API, that a large size actually
++ * takes the vmalloc path rather than an order-7 compound page, and that
++ * alloc/free are paired.
++ */
++static void vmbus_requestor_alloc_free_test(struct kunit *test)
++{
++	struct vmbus_requestor rqstor = {};
++
++	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(&rqstor, 4), 0);
++	KUNIT_EXPECT_EQ(test, rqstor.size, 4U);
++	KUNIT_EXPECT_EQ(test, rqstor.next_request_id, 0U);
++	KUNIT_EXPECT_NOT_NULL(test, rqstor.req_arr);
++	KUNIT_EXPECT_NOT_NULL(test, rqstor.req_bitmap);
++
++	/* The free list links 0->1->2->3 and terminates in U64_MAX. */
++	KUNIT_EXPECT_EQ(test, rqstor.req_arr[0], 1U);
++	KUNIT_EXPECT_EQ(test, rqstor.req_arr[1], 2U);
++	KUNIT_EXPECT_EQ(test, rqstor.req_arr[2], 3U);
++	KUNIT_EXPECT_EQ(test, rqstor.req_arr[3], U64_MAX);
++
++	vmbus_free_requestor(&rqstor);
++}
++
++static void vmbus_requestor_vmalloc_backing_test(struct kunit *test)
++{
++	/*
++	 * The production scale is the default ring size, where the array
++	 * exceeds 256 KiB and kcalloc() asks for an order-7 compound
++	 * page. That size alone does not prove vmalloc backing: kvcalloc()
++	 * tries kmalloc first and a free buddy hands back a compound page
++	 * instead. Size the array one entry past KMALLOC_MAX_SIZE so
++	 * kmalloc cannot satisfy it at all. kcalloc() returns NULL there;
++	 * kvcalloc() falls back to vmalloc. The assertion therefore fails
++	 * on the unconverted allocator and passes on this one, without
++	 * needing memory pressure.
++	 */
++	u32 size = (KMALLOC_MAX_SIZE / sizeof(u64)) + 1;
++	u64 *req_arr;
++
++	req_arr = request_arr_init(size);
++	KUNIT_ASSERT_NOT_NULL(test, req_arr);
++	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
++	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
++	KUNIT_EXPECT_EQ(test, req_arr[size - 1], U64_MAX);
++	kvfree(req_arr);
++}
++
++static void vmbus_requestor_id_lifecycle_test(struct kunit *test)
++{
++	struct vmbus_channel channel = { .rqstor_size = 4 };
++	struct vmbus_requestor *rqstor = &channel.requestor;
++	u64 id0, id1, id2, id3, addr;
++
++	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(rqstor, 4), 0);
++
++	/* IDs are 1-based; 0 is reserved for unsolicited host messages. */
++	id0 = vmbus_next_request_id(&channel, 0x1000);
++	KUNIT_EXPECT_EQ(test, id0, 1U);
++	id1 = vmbus_next_request_id(&channel, 0x2000);
++	KUNIT_EXPECT_EQ(test, id1, 2U);
++
++	/* Consumption returns the registered address and frees the slot. */
++	addr = vmbus_request_addr_match(&channel, id0, VMBUS_RQST_ADDR_ANY);
++	KUNIT_EXPECT_EQ(test, addr, 0x1000U);
++	addr = vmbus_request_addr_match(&channel, id1, 0x2000);
++	KUNIT_EXPECT_EQ(test, addr, 0x2000U);
++
++	/*
++	 * Consumed slots are reusable. The free list is LIFO -- each
++	 * consume pushes its slot onto the head -- so the slot freed last
++	 * is the one handed out first. Freeing id0 then id1 leaves slot 1
++	 * at the head, and the next ID is therefore id1 again, not id0.
++	 */
++	id2 = vmbus_next_request_id(&channel, 0x3000);
++	KUNIT_EXPECT_EQ(test, id2, id1);
++	id3 = vmbus_next_request_id(&channel, 0x4000);
++	KUNIT_EXPECT_EQ(test, id3, id0);
++
++	vmbus_free_requestor(rqstor);
++}
++
++static void vmbus_requestor_invalid_ids_test(struct kunit *test)
++{
++	struct vmbus_channel channel = { .rqstor_size = 4 };
++	struct vmbus_requestor *rqstor = &channel.requestor;
++	u64 id, addr;
++
++	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(rqstor, 4), 0);
++
++	/* ID 0 is the unsolicited-message sentinel and is never in the set. */
++	KUNIT_EXPECT_EQ(test, vmbus_request_addr_match(&channel, 0, 0),
++			VMBUS_RQST_ERROR);
++
++	/* Out-of-range IDs are refused, not wrapped. */
++	KUNIT_EXPECT_EQ(test, vmbus_request_addr_match(&channel, 5, 0),
++			VMBUS_RQST_ERROR);
++	KUNIT_EXPECT_EQ(test, vmbus_request_addr_match(&channel, U64_MAX, 0),
++			VMBUS_RQST_ERROR);
++
++	id = vmbus_next_request_id(&channel, 0xABCD);
++	KUNIT_ASSERT_EQ(test, id, 1U);
++
++	/* A wrong expected address does not consume the slot. */
++	addr = vmbus_request_addr_match(&channel, id, 0x9999);
++	KUNIT_EXPECT_EQ(test, addr, 0xABCDU);
++
++	/* The slot is still live and a matching lookup consumes it once. */
++	addr = vmbus_request_addr_match(&channel, id, 0xABCD);
++	KUNIT_EXPECT_EQ(test, addr, 0xABCDU);
++
++	/* Replay: the slot is gone. */
++	addr = vmbus_request_addr_match(&channel, id, VMBUS_RQST_ADDR_ANY);
++	KUNIT_EXPECT_EQ(test, addr, VMBUS_RQST_ERROR);
++
++	vmbus_free_requestor(rqstor);
++}
++
++static void vmbus_requestor_exhaustion_test(struct kunit *test)
++{
++	struct vmbus_channel channel = { .rqstor_size = 2 };
++	struct vmbus_requestor *rqstor = &channel.requestor;
++
++	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(rqstor, 2), 0);
++
++	KUNIT_EXPECT_EQ(test, vmbus_next_request_id(&channel, 0x1), 1U);
++	KUNIT_EXPECT_EQ(test, vmbus_next_request_id(&channel, 0x2), 2U);
++
++	/* Both slots taken: the free list is empty and the API says so. */
++	KUNIT_EXPECT_EQ(test, vmbus_next_request_id(&channel, 0x3),
++			VMBUS_RQST_ERROR);
++
++	/* An uninitialized requestor is not a full one. */
++	channel.rqstor_size = 0;
++	KUNIT_EXPECT_EQ(test, vmbus_next_request_id(&channel, 0x4),
++			VMBUS_NO_RQSTOR);
++
++	vmbus_free_requestor(rqstor);
++}
++
+ static struct kunit_case vmbus_buffer_test_cases[] = {
+ 	KUNIT_CASE(vmbus_buffer_size_rounding_test),
+ 	KUNIT_CASE(vmbus_buffer_size_overflow_test),
+@@ -463,6 +609,11 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+ 	KUNIT_CASE(vmbus_gpadl_post_success_test),
+ 	KUNIT_CASE(vmbus_gpadl_response_state_test),
+ 	KUNIT_CASE(vmbus_gpadl_teardown_post_failure_test),
++	KUNIT_CASE(vmbus_requestor_alloc_free_test),
++	KUNIT_CASE(vmbus_requestor_vmalloc_backing_test),
++	KUNIT_CASE(vmbus_requestor_id_lifecycle_test),
++	KUNIT_CASE(vmbus_requestor_invalid_ids_test),
++	KUNIT_CASE(vmbus_requestor_exhaustion_test),
+ 	{}
+ };
  
 -- 
 2.43.0

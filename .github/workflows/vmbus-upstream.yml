@@ -232,12 +232,54 @@ jobs:
             stage=$((stage + 1))
             git -C linux apply --check "$GITHUB_WORKSPACE/$patch"
             git -C linux apply "$GITHUB_WORKSPACE/$patch"
+            # Intent-to-add so the files a patch creates enter the
+            # working-tree diff. Without this the style gate cannot see
+            # them: git apply leaves new files untracked and git diff
+            # skips untracked paths, so a stage that adds a test file
+            # used to report "0 warnings" about a file the gate never
+            # read. Scope is the directories this series touches.
+            git -C linux ls-files --others --exclude-standard -- \
+              drivers/hv drivers/uio drivers/net/hyperv include/linux \
+              | xargs -r -d '\n' git -C linux add -N --
             git -C linux diff --check
             (cd linux && scripts/checkpatch.pl --strict --no-tree) \
               < <(git -C linux diff --no-ext-diff --no-color) 2>&1 \
               | tee "vmbus-artifacts/checkpatch-${stage}.log"
-            grep -q 'total: 0 errors, 0 warnings, 0 checks' \
-              "vmbus-artifacts/checkpatch-${stage}.log"
+            errors=$(grep -c '^ERROR:' "vmbus-artifacts/checkpatch-${stage}.log" || true)
+            warns=$(grep -c '^WARNING:' "vmbus-artifacts/checkpatch-${stage}.log" || true)
+            test "$errors" -eq 0
+            if [ "$warns" -gt 0 ]; then
+              # The only permitted warning is FILE_PATH_CHANGES, and only
+              # while the cumulative diff actually contains a new-file
+              # entry. Any other warning, or this one without a new file,
+              # fails the stage. Match the printed line at column 0 --
+              # ': WARNING:' would match nothing.
+              test "$warns" -eq 1
+              grep -q '^WARNING: added, moved or deleted file(s)' \
+                "vmbus-artifacts/checkpatch-${stage}.log"
+              grep -q '^new file mode ' \
+                <(git -C linux diff --no-ext-diff --no-color)
+            fi
+            # Per-mail shape: each format-patch is what gets sent, so each
+            # is also checked on its own complete input. Exactly 0002 and
+            # 0010 add a file and must carry exactly that one warning; the
+            # other eleven must be silent.
+            (cd linux && scripts/checkpatch.pl --strict --no-tree) \
+              < "$GITHUB_WORKSPACE/$patch" 2>&1 \
+              | tee "vmbus-artifacts/checkpatch-mail-${stage}.log"
+            merrors=$(grep -c '^ERROR:' "vmbus-artifacts/checkpatch-mail-${stage}.log" || true)
+            mwarns=$(grep -c '^WARNING:' "vmbus-artifacts/checkpatch-mail-${stage}.log" || true)
+            test "$merrors" -eq 0
+            case "$stage" in
+            2 | 10)
+              test "$mwarns" -eq 1
+              grep -q '^WARNING: added, moved or deleted file(s)' \
+                "vmbus-artifacts/checkpatch-mail-${stage}.log"
+              ;;
+            *)
+              test "$mwarns" -eq 0
+              ;;
+            esac
           make -C linux ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
             O="$GITHUB_WORKSPACE/kernel-out" -j2 W=1 C=2 CF=-D__CHECK_ENDIAN__ \
             drivers/hv/ drivers/net/hyperv/ drivers/uio/ \
@@ -366,7 +408,7 @@ jobs:
             vmbus_buffer_failed_teardown_leaks_test \
             vmbus_buffer_owner_reclaim_gate_test \
             vmbus_buffer_reclaim_schedule_gate_test \
-            vmbus_buffer_host_revoke_state_test \
+            vmbus_buffer_rescind_retains_gpadl_test \
             vmbus_buffer_mapping_reference_test \
             vmbus_buffer_partial_allocation_cleanup_test \
             vmbus_buffer_repeated_owner_release_test \
@@ -375,6 +417,11 @@ jobs:
             vmbus_gpadl_response_state_test \
             vmbus_gpadl_teardown_post_failure_test \
             vmbus_buffer_order_zero_allocation_test \
+            vmbus_requestor_alloc_free_test \
+            vmbus_requestor_vmalloc_backing_test \
+            vmbus_requestor_id_lifecycle_test \
+            vmbus_requestor_invalid_ids_test \
+            vmbus_requestor_exhaustion_test \
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \
@@ -401,18 +448,29 @@ jobs:
           CONFIG_UIO_HV_GENERIC=y
           CONFIG_HYPERV_VMBUS_KUNIT_TEST=y
           CONFIG_UIO_HV_GENERIC_KUNIT_TEST=y
+          CONFIG_NET=y
+          CONFIG_INET=y
+          CONFIG_NETDEVICES=y
+          CONFIG_HYPERV_NET=y
+          CONFIG_HYPERV_NET_KUNIT_TEST=y
           EOF
           (cd linux && python3 tools/testing/kunit/kunit.py run \
             --build_dir="$GITHUB_WORKSPACE/kunit-out" \
             --arch=x86_64 --kunitconfig=drivers/hv/.kunitconfig) \
             2>&1 | tee -a vmbus-artifacts/kunit.log
-          grep -Eq 'hyperv-vmbus-buffer \(16 subtests\)' \
+          grep -Eq 'hyperv-vmbus-buffer \(21 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
             vmbus-artifacts/kunit.log
           grep -Eq 'hyperv-uio-mmap \(12 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
+            vmbus-artifacts/kunit.log
+          grep -Eq 'Testing complete\. Ran 50 tests: passed: 50$' \
+            vmbus-artifacts/kunit.log
+          grep -Eq '\[PASSED\] hyperv-rndis-request' \
+            vmbus-artifacts/kunit.log
+          grep -Eq '\[PASSED\] hyperv-netvsc-completion' \
             vmbus-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_size_rounding_test \
@@ -422,7 +480,7 @@ jobs:
             vmbus_buffer_failed_teardown_leaks_test \
             vmbus_buffer_owner_reclaim_gate_test \
             vmbus_buffer_reclaim_schedule_gate_test \
-            vmbus_buffer_host_revoke_state_test \
+            vmbus_buffer_rescind_retains_gpadl_test \
             vmbus_buffer_mapping_reference_test \
             vmbus_buffer_partial_allocation_cleanup_test \
             vmbus_buffer_repeated_owner_release_test \
@@ -431,6 +489,11 @@ jobs:
             vmbus_gpadl_response_state_test \
             vmbus_gpadl_teardown_post_failure_test \
             vmbus_buffer_order_zero_allocation_test \
+            vmbus_requestor_alloc_free_test \
+            vmbus_requestor_vmalloc_backing_test \
+            vmbus_requestor_id_lifecycle_test \
+            vmbus_requestor_invalid_ids_test \
+            vmbus_requestor_exhaustion_test \
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
             hv_uio_mmap_region_select_test \

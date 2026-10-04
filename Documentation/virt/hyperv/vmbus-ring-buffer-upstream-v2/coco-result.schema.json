@@ -1,0 +1,443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ramshared.local/schemas/coco-result.schema.json",
+  "title": "ramshared-coco-result/v1",
+  "description": "One CoCo platform row attempt against the pinned VMBus ring-buffer upstream v2 candidate. A result is an evidence record, not a verdict about the series. Statuses are never rewritten: PARTIAL, NO_RESULT and ENVIRONMENT_UNAVAILABLE are terminal facts and are never upgraded to PASS by a later document edit. Infrastructure status and qualification status are separate fields on purpose; a lost guest is not a hardware gate result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run",
+    "candidate",
+    "row",
+    "capability",
+    "infrastructure_status",
+    "qualification_status",
+    "status_justification",
+    "counters",
+    "artifacts",
+    "log_safety"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ramshared-coco-result/v1",
+      "description": "Schema identity. Bump only on a breaking change to the evidence contract."
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "attempt", "started_utc", "finished_utc", "executor", "bundle_sha256"],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Stable identifier of the qualification session, distinct from any CI job id. Re-running the same row creates a new run_id."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based attempt number for this row within this run_id. Every attempt is preserved; a failed attempt is never overwritten by a later successful one."
+        },
+        "job": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "CI job or lab-session identifier if the run was orchestrated remotely. Omitted for a hand-run bundle."
+        },
+        "started_utc": { "type": "string", "format": "date-time" },
+        "finished_utc": { "type": "string", "format": "date-time" },
+        "executor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Who ran it: a lab name, a volunteer handle, or 'operator'. Never a personal email address in a shared artifact."
+        },
+        "bundle_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the shipped tester bundle tarball, so a result is attributable to the exact instructions it followed."
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "series_base",
+        "series_tip",
+        "cover_sha256",
+        "patch_sha256s",
+        "series_sha256sums_ok",
+        "architecture"
+      ],
+      "description": "Byte identity of what was booted. A result whose candidate fields do not match the current CANDIDATE-MANIFEST is evidence about different bytes and cannot be cited about the current series.",
+      "properties": {
+        "series_base": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{12,40}$",
+          "description": "Mainline base commit the series applies on."
+        },
+        "series_tip": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{12,40}$",
+          "description": "Scratch-tree tip that produced the patch bytes."
+        },
+        "cover_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "patch_sha256s": {
+          "type": "array",
+          "minItems": 13,
+          "maxItems": 13,
+          "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "description": "SHA-256 of 0001 through 0013 in order. Exactly thirteen, never the cover."
+        },
+        "series_sha256sums_ok": {
+          "type": "boolean",
+          "description": "True only if sha256sum -c was run inside series/ in the guest and every line reported OK. A locally computed hash is not this field."
+        },
+        "architecture": { "enum": ["x86_64", "arm64"] },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 of the kernel .config used to build the booted image."
+        },
+        "kernel_release": { "type": "string", "maxLength": 128 },
+        "diagnostic_delta": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["description", "sha256", "experimental"],
+          "description": "Any patch or config change that is NOT part of the thirteen production bytes, used only to gather diagnostics. Must be marked experimental and must never be folded into a production claim. null when the candidate was unmodified.",
+          "properties": {
+            "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "experimental": { "const": true }
+          }
+        }
+      }
+    },
+    "row": {
+      "enum": ["COCO-1", "COCO-2", "COCO-3", "COCO-4", "COCO-5"],
+      "description": "Which matrix row this attempt addresses. COCO-4 and COCO-5 are exercised on the same platform as the base row and are reported as their own attempts, not folded into a COCO-1 PASS."
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimed_platform",
+        "isolation_mode",
+        "isolation_proof",
+        "paravisor",
+        "paravisor_evidence",
+        "vmbus_present",
+        "preflight_report_path"
+      ],
+      "description": "What the guest actually reported about its isolation. A CPU flag alone is never a capability proof: a paravisor can filter it. An unknown mode is unqualified and maps the attempt to ENVIRONMENT_UNAVAILABLE, never to a platform PASS.",
+      "properties": {
+        "claimed_platform": {
+          "enum": ["sev_snp", "tdx_no_paravisor", "tdx_paravisor", "arm_cca", "ordinary_hyperv", "unknown"],
+          "description": "What the tester believed they provisioned. Evidence, not authority: isolation_mode is the authority."
+        },
+        "isolation_mode": {
+          "enum": ["sev_snp", "tdx_no_paravisor", "tdx_paravisor", "arm_cca", "ordinary_hyperv", "unknown"],
+          "description": "What the guest proved. 'unknown' is a valid terminal value. 'tdx_paravisor' is a different row from COCO-2 and cannot close it."
+        },
+        "isolation_proof": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "description": "Verbatim guest log lines that establish the isolation mode, e.g. the dmesg activation line. Never a SKU name, never a runner label, never a flag list alone."
+        },
+        "paravisor": {
+          "enum": ["absent", "present", "unknown"],
+          "description": "Paravisor presence as reported by the guest. 'absent' is required for COCO-2. 'unknown' is not 'absent'."
+        },
+        "paravisor_evidence": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "description": "Verbatim lines supporting the paravisor field, including the negative. Empty only when paravisor is 'unknown'."
+        },
+        "vmbus_present": { "type": "boolean" },
+        "vmbus_device_count": { "type": "integer", "minimum": 0 },
+        "confidential_vmbus_offers": {
+          "type": "array",
+          "items": { "enum": ["co_ring_buffer", "co_external_memory", "other", "none", "unknown"] },
+          "description": "Which confidential VMBus offers the guest observed. 'unknown' is not 'none'. A private ring is never decrypted merely to force shared-path coverage."
+        },
+        "preflight_report_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "Path to the coco-capability-preflight.sh key=value report, relative to the bundle root. Must exist as an attached artifact."
+        }
+      }
+    },
+    "infrastructure_status": {
+      "enum": [
+        "completed",
+        "guest_lost",
+        "provisioner_failed",
+        "timeout",
+        "cancelled",
+        "never_started"
+      ],
+      "description": "Did the run finish on its own? This is not a qualification verdict. 'completed' is required before any PASS is even schema-valid."
+    },
+    "infrastructure_note": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "What happened operationally. A timeout or a lost guest is recorded here as a fact; it is never reported as a cause of a test failure unless a log line names that cause."
+    },
+    "qualification_status": {
+      "enum": [
+        "PASS",
+        "PARTIAL",
+        "FAIL",
+        "NO_RESULT",
+        "ENVIRONMENT_UNAVAILABLE"
+      ],
+      "description": "The row's evidence state. Never rewritten to PASS by a later document edit. NO_RESULT means the run did not produce a readable outcome; ENVIRONMENT_UNAVAILABLE means the platform was never available; PARTIAL means some named subcheck ran and others did not; FAIL means a named subcheck produced negative evidence."
+    },
+    "status_justification": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "description": "Why this status and not another. Required for every status, including PASS. Must name the counters and phases that support it. A causal claim requires a log line that names the cause; an inference is labelled as a hypothesis, never as the cause."
+    },
+    "counters": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/counter" },
+      "description": "Named observations with a phase. Never a synthesized score. Every number cited in any downstream document must appear here first; a number that is not in this array has not been measured."
+    },
+    "subchecks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/subcheck" },
+      "description": "The named before→action→after checks for this row. A subcheck may be 'not_run'; it is never inferred from a sibling."
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact" },
+      "description": "Files attached to this result, each with a SHA-256. Paths are relative to the bundle root; no absolute host workspace path may appear."
+    },
+    "log_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kernel_virtual_addresses_stripped", "secrets_stripped", "attested_by"],
+      "description": "NFR-3 attestation. A result that carries a kernel virtual address is not acceptable evidence.",
+      "properties": {
+        "kernel_virtual_addresses_stripped": { "const": true },
+        "secrets_stripped": { "const": true },
+        "attested_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Who ran the strip check. May be the executor."
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4000,
+      "description": "Free-form observations that are not counters. Do not put a verdict here that is not in qualification_status."
+    }
+  },
+  "$defs": {
+    "counter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "phase", "value", "unit", "source"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "The exact counter name as the tool prints it. Never a paraphrase, never a category like 'leaks'."
+        },
+        "phase": {
+          "enum": ["before", "action", "after", "during", "injected"],
+          "description": "When it was observed. A before/after pair is two counters with the same name and different phases, not one delta."
+        },
+        "value": {
+          "type": ["integer", "number", "string"],
+          "description": "The observed value. A string is allowed only for a non-numeric observation and must state what was seen."
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "count, bytes, ms, percent, boolean, line, or a named unit. 'count' for integers with no physical dimension."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "How it was observed: the command and the field, e.g. 'vmbus-lifecycle-drill.sh log: PHASE1-AFTER maps_count', or 'dmesg: count of BUG:'. Relative paths only."
+        },
+        "required_for_pass": {
+          "type": "boolean",
+          "description": "True when this counter must be present and satisfy a threshold for the row to be PASS. The threshold lives in the row's subcheck, not here."
+        }
+      }
+    },
+    "subcheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "result", "evidence"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Stable subcheck identifier, e.g. 'COCO-1/chunked-path-taken'."
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "result": {
+          "enum": ["pass", "fail", "not_run", "inconclusive", "environment_unavailable"],
+          "description": "'inconclusive' is not 'pass'. 'not_run' is not 'fail'. A subcheck is never inherited from a different row or a different attempt."
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "description": "Verbatim log lines or named artifact references supporting this result. Required even for 'not_run' (name what was attempted and why it was not run)."
+        },
+        "before": {
+          "type": ["string", "null"],
+          "maxLength": 500,
+          "description": "The 'before' observation of the before→action→after triple, or null when the subcheck has no before/after shape."
+        },
+        "after": {
+          "type": ["string", "null"],
+          "maxLength": 500,
+          "description": "The 'after' observation, or null. Before and after must describe the same counter name."
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "kind"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._\\-\\/]+$",
+          "description": "Bundle-relative path. Leading slash and '..' are rejected: a result must not name a host workspace path."
+        },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "kind": {
+          "enum": [
+            "preflight_report",
+            "dmesg",
+            "drill_log",
+            "console_log",
+            "config",
+            "patch",
+            "manifest",
+            "result",
+            "kunit_log",
+            "other"
+          ]
+        },
+        "note": { "type": "string", "maxLength": 1000 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "PASS is only schema-valid when the platform was proven, the run completed on its own, and the guest never saw a BUG, Oops or panic. This is the structural form of the rule that a lost guest or an unproven platform can never be reported as a hardware gate PASS.",
+      "if": {
+        "properties": { "qualification_status": { "const": "PASS" } },
+        "required": ["qualification_status"]
+      },
+      "then": {
+        "properties": {
+          "infrastructure_status": { "const": "completed" },
+          "capability": {
+            "properties": {
+              "isolation_mode": {
+                "enum": ["sev_snp", "tdx_no_paravisor", "arm_cca"]
+              },
+              "paravisor": { "enum": ["absent", "unknown"] }
+            }
+          },
+          "counters": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "name": { "const": "bug_oops_panic_total" },
+                "phase": { "const": "after" },
+                "value": { "const": 0 }
+              },
+              "required": ["name", "phase", "value"]
+            }
+          },
+          "candidate": {
+            "properties": { "series_sha256sums_ok": { "const": true } },
+            "required": ["series_sha256sums_ok"]
+          }
+        },
+        "required": ["infrastructure_status", "capability", "counters", "candidate"]
+      }
+    },
+    {
+      "$comment": "COCO-2 additionally requires a proven absence of a paravisor. A paravisor run is a different row and is never a COCO-2 PASS.",
+      "if": {
+        "properties": {
+          "row": { "const": "COCO-2" },
+          "qualification_status": { "const": "PASS" }
+        },
+        "required": ["row", "qualification_status"]
+      },
+      "then": {
+        "properties": {
+          "capability": {
+            "properties": {
+              "isolation_mode": { "const": "tdx_no_paravisor" },
+              "paravisor": { "const": "absent" }
+            },
+            "required": ["isolation_mode", "paravisor"]
+          }
+        },
+        "required": ["capability"]
+      }
+    },
+    {
+      "$comment": "ENVIRONMENT_UNAVAILABLE means the platform was never available. It carries no counters that would imply a run happened.",
+      "if": {
+        "properties": { "qualification_status": { "const": "ENVIRONMENT_UNAVAILABLE" } },
+        "required": ["qualification_status"]
+      },
+      "then": {
+        "properties": {
+          "infrastructure_status": { "const": "never_started" },
+          "capability": {
+            "properties": { "isolation_mode": { "const": "unknown" } },
+            "required": ["isolation_mode"]
+          }
+        },
+        "required": ["infrastructure_status", "capability"]
+      }
+    },
+    {
+      "$comment": "A lost guest or a provisioner failure is an infrastructure fact. It can produce NO_RESULT or PARTIAL, never PASS, and never a bare FAIL that asserts a code defect.",
+      "if": {
+        "properties": {
+          "infrastructure_status": {
+            "enum": ["guest_lost", "provisioner_failed", "timeout", "cancelled"]
+          }
+        },
+        "required": ["infrastructure_status"]
+      },
+      "then": {
+        "properties": {
+          "qualification_status": {
+            "enum": ["NO_RESULT", "PARTIAL", "ENVIRONMENT_UNAVAILABLE"]
+          }
+        },
+        "required": ["qualification_status"]
+      }
+    }
+  ]
+}

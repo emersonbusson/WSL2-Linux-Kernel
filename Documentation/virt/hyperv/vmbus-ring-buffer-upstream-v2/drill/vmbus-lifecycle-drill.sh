@@ -971,9 +971,15 @@ REBIND_OK=no
 
 restore_nic() {
 	say "RESTORE begin"
+	say "RESTORE channel_state_before=$(cat "/sys/bus/vmbus/devices/$NIC/state" 2>/dev/null || echo unavailable)"
 	echo "$NIC" >"$DRIVER_DIR/uio_hv_generic/unbind" 2>>"$LOG" || true
 	echo "$CLS" >"$DRIVER_DIR/uio_hv_generic/remove_id" 2>>"$LOG" || true
-	echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG" || true
+	if echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG"; then
+		RESTORE_BIND_STATUS=0
+	else
+		RESTORE_BIND_STATUS=$?
+	fi
+	say "RESTORE bind_write_status=$RESTORE_BIND_STATUS channel_state_after=$(cat "/sys/bus/vmbus/devices/$NIC/state" 2>/dev/null || echo unavailable)"
 	# readlink -f on the driver symlink resolves to .../drivers/hv_netvsc on
 	# a successful bind. On failure the symlink is absent and readlink still
 	# prints the unresolved .../device/driver path, which is the
@@ -1304,6 +1310,11 @@ say "TOUCH SYSFS ready=${RING_TOUCH_READY:-none} after=${RING_TOUCH_AFTER:-none}
 
 # --- phase 3: reconciliation -------------------------------------------------
 say "=== PHASE 3: reconciliation ==="
+# A rebind attempted while userspace still held the UIO fd is not the final
+# restoration observation. Both matched variants retry once after helpers
+# have exited, unmapped and closed; preserve the earlier failure as evidence.
+say "RESTORE phase=post_fd_mapping_close"
+restore_nic
 # Sampled the instant the hold helpers have been reaped. This is the racy
 # window: the pins are already down, but the reclaim worker may not have
 # run yet. Kept as evidence of that race, not as the verdict input.

@@ -5,8 +5,8 @@ name: Hyper-V runtime drill
 # bytes.
 #
 # This is the runtime evidence the KUnit gates cannot produce. KUnit proves the
-# logic; only a real Hyper-V guest proves the ring lifecycle under a real
-# host rescind and a real fragmented buddy. EVD-0131 and EVD-0132 measured that
+# logic; a real Hyper-V guest measures driver rebind and the fragmented
+# buddy. This harness does not cause a host rescind. EVD-0131 and EVD-0132 measured that
 # a hosted runner can boot both a WSL2 guest and an arbitrary Gen2 Hyper-V VM,
 # so this is no longer a hardware gap: it is ordinary build work.
 #
@@ -59,6 +59,11 @@ concurrency:
 
 jobs:
   drill-kernel:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        variant: [baseline, candidate]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -91,6 +96,7 @@ jobs:
             | tee drill-artifacts/kernel-version.txt
 
       - name: Pin and apply the exact series bytes
+        if: matrix.variant == 'candidate'
         run: |
           set -euo pipefail
           PATCH_DIR=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/series
@@ -122,6 +128,10 @@ jobs:
         run: |
           set -euo pipefail
           DRILL=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill
+          python3 "$DRILL/owner-trace-accounting.py" --self-test \
+            | tee drill-artifacts/owner-accounting-fixtures.log
+          bash "$DRILL/vmbus-lifecycle-drill.sh" --self-test \
+            | tee drill-artifacts/lifecycle-fixtures.log
           bash "$DRILL/build-drill-kernel.sh" \
             "$GITHUB_WORKSPACE/linux" \
             "$GITHUB_WORKSPACE/drill-out" \
@@ -135,6 +145,10 @@ jobs:
           cp drill-out/image-audit.txt drill-artifacts/
           cp drill-out/config-drill-resolved drill-artifacts/
           cp drill-out/helper-file.txt drill-artifacts/
+          printf '%s\n' '${{ matrix.variant }}' > drill-artifacts/variant.txt
+          sha256sum "$DRILL"/build-drill-kernel.sh "$DRILL"/init \
+            "$DRILL"/vmbus-lifecycle-drill.sh "$DRILL"/vmbus-fragmentation-drill.sh \
+            "$DRILL"/vmbus_drill_helper.c > drill-artifacts/harness-sha256.txt
           # The guest has no CPython. If a script that ships inside the
           # initramfs still calls python3 the whole job would fail only at
           # boot time, minutes later. Scope the check to the guest drills:
@@ -152,7 +166,7 @@ jobs:
       - name: Upload drill kernel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: hyperv-drill-kernel
+          name: hyperv-drill-kernel-${{ matrix.variant }}
           path: drill-artifacts/
           retention-days: 90
 
@@ -162,6 +176,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: [windows-2025, windows-latest]
+        variant: [baseline, candidate]
     runs-on: ${{ matrix.runner }}
     # 40, not 30: the guest backstop below is 1200s and the harness adds
     # ~110s of setup/teardown on top. 30 minutes would kill the job while
@@ -173,7 +188,7 @@ jobs:
       - name: Download drill kernel
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: hyperv-drill-kernel
+          name: hyperv-drill-kernel-${{ matrix.variant }}
           path: drill-kernel
 
       - name: Boot the candidate and run the runtime drills
@@ -181,6 +196,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $DRILL = 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill'
+          & (Join-Path $DRILL 'test-reader-heartbeat.ps1')
           $image = Join-Path 'drill-kernel' 'BOOTX64.EFI'
           if (-not (Test-Path $image)) {
             Write-Host "ERROR: drill kernel artifact missing at $image"
@@ -192,7 +208,7 @@ jobs:
           & (Join-Path $DRILL 'new-drill-vm.ps1') `
             -BzImage $image `
             -WorkDir (Join-Path $PWD 'drill-vm-work') `
-            -VmName "vmbus-drill-$env:RUNNER_OS" `
+            -VmName "vmbus-drill-${{ matrix.variant }}-$env:RUNNER_OS" `
             -TimeoutSec 1200 `
             -MemoryMB 2048 `
             -CpuCount 2
@@ -205,6 +221,13 @@ jobs:
           if (Test-Path $log) {
             Write-Host '======== GUEST CONSOLE (artifact copy) ========'
             Get-Content $log | Write-Host
+            if ('${{ matrix.variant }}' -eq 'candidate') {
+              python "$DRILL/owner-trace-accounting.py" $log |
+                Tee-Object -FilePath 'drill-vm-work/owner-accounting.json'
+              $ownerCode = $LASTEXITCODE
+              Write-Host "DRILL-RUNTIME owner_accounting_exit=$ownerCode (3 means PARTIAL)"
+              if ($ownerCode -eq 1) { $code = 1 }
+            }
           }
           exit $code
 
@@ -212,6 +235,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: hyperv-drill-${{ matrix.runner }}
+          name: hyperv-drill-${{ matrix.variant }}-${{ matrix.runner }}
           path: drill-vm-work/
           retention-days: 90

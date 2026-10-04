@@ -154,6 +154,13 @@ splat_count() {
 		grep -cE 'BUG:|Oops:|panic:|WARNING:|hung task|Unable to handle|general protection'
 }
 
+# A guest phase marker uses only shell builtins. In particular, it must
+# remain available while fragmentation leaves no memory for another fork.
+phase_marker() {
+	read -r phase_uptime phase_idle </proc/uptime
+	printf 'HYPERV_DRILL_PHASE name=%s event=%s uptime_s=%s\n' "$1" "$2" "$phase_uptime"
+}
+
 # --- drills ------------------------------------------------------------------
 # Fragmentation runs FIRST. The BUG-3 hold-in-mmap in the lifecycle drill
 # leaves the synthetic NIC's channel in CHANNEL_OPENED_STATE: uio_hv_generic
@@ -173,7 +180,7 @@ FRAG_STATUS=skipped
 
 if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	export NIC
-	echo "HYPERV_DRILL_PHASE name=fragmentation"
+	phase_marker fragmentation begin
 	# MemTotal, not a share of what looks free: the helper treats this as a
 	# ceiling the allocation loop must never reach, and stops on the
 	# measured condition instead. A 75% share stopped the loop with the
@@ -185,6 +192,7 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	echo "HYPERV_DRILL_FRAGMENT hog_mib=${FRAG_HOG:-0}"
 	sh /scripts/vmbus-fragmentation-drill.sh "${FRAG_HOG:-512}" /var/tmp/fragment.log
 	FRAG_STATUS=$?
+	phase_marker fragmentation end
 	echo "HYPERV_DRILL_FRAGMENT status=$FRAG_STATUS"
 	# A signal death (137 is SIGKILL) means the drill shell was OOM-killed
 	# while the hold was pinned and the helper is still tearing its
@@ -203,13 +211,14 @@ fi
 
 if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	export NIC
-	echo "HYPERV_DRILL_PHASE name=lifecycle"
+	phase_marker lifecycle begin
 	# 100 cycles is the SPEC count (vmbus_channel_lifecycle_buffer_balance)
 	# and the PRD acceptance criterion: "100 normal channel open/close
 	# cycles leave no unexplained mapping growth". 30 measured that for a
 	# third of the required sample and cannot close the gate.
 	sh /scripts/vmbus-lifecycle-drill.sh 100 /var/tmp/lifecycle.log
 	LIFECYCLE_STATUS=$?
+	phase_marker lifecycle end
 	echo "HYPERV_DRILL_LIFECYCLE status=$LIFECYCLE_STATUS"
 	# Same rule as after_fragment: a signal death must not provoke a fork
 	# while the helper's teardown may still be reclaiming.
@@ -233,6 +242,31 @@ echo "HYPERV_DRILL_SPLATS count=${SPLATS:-0}"
 FAULTS=$(dmesg 2>/dev/null |
 	grep -cE 'BUG:|Oops:|panic:|accept4 failed|hung task|Unable to handle|general protection')
 echo "HYPERV_DRILL_FAULTS count=${FAULTS:-0}"
+
+# Print only opaque owner-event payloads. Capture starts from the boot
+# command line; enabling the event here would miss boot allocations. A
+# missing event or any per-CPU ring overrun leaves owner accounting partial.
+TRACE_DIR=/sys/kernel/tracing
+if [ "$(cat "$TRACE_DIR/events/hyperv/vmbus_buffer_owner/enable" 2>/dev/null)" = 1 ] &&
+	grep -q 'trace_event=hyperv:vmbus_buffer_owner' /proc/cmdline; then
+	echo 0 >"$TRACE_DIR/tracing_on"
+	if OWNER_STATS=$(awk '
+		$1 == "overrun:" { n += $2; cpus++ }
+		$1 == "commit" && $2 == "overrun:" { n += $3 }
+		$1 == "dropped" && $2 == "events:" { d += $3; dc++ }
+		END {
+			if (!cpus || cpus != dc) exit 1
+			printf "overruns=%d dropped=%d stats_cpus=%d", n, d, cpus
+		}' "$TRACE_DIR"/per_cpu/cpu*/stats); then
+		echo "OWNER_TRACE $OWNER_STATS capture=boot_to_quiescence"
+	else
+		echo "OWNER_TRACE status=UNAVAILABLE reason=missing_stats"
+	fi
+	awk '/vmbus_buffer_owner: owner_id=/ { sub(/^.*vmbus_buffer_owner: /, "vmbus_buffer_owner: "); print }' "$TRACE_DIR/trace"
+	echo "OWNER_TRACE end=1"
+else
+	echo "OWNER_TRACE status=UNAVAILABLE"
+fi
 
 # --- verdict -----------------------------------------------------------------
 # Drill exit codes:

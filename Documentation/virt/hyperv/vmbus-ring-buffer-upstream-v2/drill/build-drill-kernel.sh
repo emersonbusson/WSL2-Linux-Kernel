@@ -239,7 +239,8 @@ disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 disable DEBUG_INFO_DWARF4
 disable DYNAMIC_DEBUG
 disable KPROBES
-disable FTRACE
+enable FTRACE
+enable ENABLE_DEFAULT_TRACERS
 disable FUNCTION_TRACER
 disable KGDB
 
@@ -250,7 +251,7 @@ setstr INITRAMFS_SOURCE "$CPIO"
 setval INITRAMFS_ROOT_UID 0
 setval INITRAMFS_ROOT_GID 0
 
-CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 panic=1 oops=panic nmi_watchdog=0"
+CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 panic=1 oops=panic nmi_watchdog=0 trace_event=hyperv:vmbus_buffer_owner trace_buf_size=512K"
 setstr CMDLINE "$CMDLINE"
 enable CMDLINE_BOOL
 enable CMDLINE_OVERRIDE

@@ -1,6 +1,6 @@
-From c5e2be6fd89f6b1b598ee415f27b6cb18819408e Mon Sep 17 00:00:00 2001
+From 33f6d2610ebb94fa60d9503726f07c525c41713c Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Fri, 2 Oct 2026 01:18:44 -0300
+Date: Sun, 4 Oct 2026 17:20:25 -0300
 Subject: [PATCH v2 13/13] hv: netvsc: handle a NULL request address on empty
  completions
 
@@ -37,23 +37,87 @@ ID" flood appears under this patch, or if a SWITCH_DATA_PATH
 completion is shown to be dropped instead of taken through its
 nvsp_message path.
 
+Adds nine named netvsc completion KUnit cases covering the decision
+layer of the empty-payload branch: a NULL request address owning the
+queue_sends decrement, both invalid sentinels rejected without
+accounting, SWITCH_DATA_PATH completing channel_init_wait without
+accounting, an unexpected message type taking neither path, a
+replayed transaction id accounting exactly once, N completions
+decrementing the queue exactly N times, the destroy drain wait waking
+only at zero, and netvsc_send_tx_complete() applying the same
+sentinel rejection while still accounting a NULL skb. The non-NULL
+skb path of netvsc_send_tx_complete() needs a live netvsc device
+(send slot, DMA mapping, NAPI) and is not exercised here.
+
+netvsc_send_acct() is extracted so a test can observe the decrement
+and the drain wake directly; it is not a behaviour change. The
+helpers lose static and are declared in hyperv_net.h so the cases
+reach them without a new EXPORT_SYMBOL_GPL, matching how the VMBus
+buffer tests are built into hv_vmbus.
+
+Fixes: 8b31f8c982b7 ("hv_netvsc: Wait for completion on request SWITCH_DATA_PATH")
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/net/hyperv/netvsc.c | 61 +++++++++++++++++++++++++------------
- 1 file changed, 42 insertions(+), 19 deletions(-)
+ drivers/net/hyperv/Makefile                 |   1 +
+ drivers/net/hyperv/hyperv_net.h             |  15 +
+ drivers/net/hyperv/netvsc.c                 |  81 +++--
+ drivers/net/hyperv/netvsc_completion_test.c | 365 ++++++++++++++++++++
+ 4 files changed, 433 insertions(+), 29 deletions(-)
+ create mode 100644 drivers/net/hyperv/netvsc_completion_test.c
 
+diff --git a/drivers/net/hyperv/Makefile b/drivers/net/hyperv/Makefile
+index 6f1abc756fde..b2d22855fd8a 100644
+--- a/drivers/net/hyperv/Makefile
++++ b/drivers/net/hyperv/Makefile
+@@ -2,4 +2,5 @@
+ obj-$(CONFIG_HYPERV_NET) += hv_netvsc.o
+ 
+ hv_netvsc-y := netvsc_drv.o netvsc.o rndis_filter.o netvsc_trace.o netvsc_bpf.o
++hv_netvsc-$(CONFIG_HYPERV_NET_KUNIT_TEST) += netvsc_completion_test.o
+ hv_netvsc-$(CONFIG_HYPERV_NET_KUNIT_TEST) += rndis_request_test.o
+diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
+index c9dddfca834e..f43e96dcafae 100644
+--- a/drivers/net/hyperv/hyperv_net.h
++++ b/drivers/net/hyperv/hyperv_net.h
+@@ -226,6 +226,21 @@ struct rndis_request *get_rndis_request(struct rndis_device *dev,
+ 					u32 msg_type, u32 msg_len);
+ void put_rndis_request(struct rndis_device *dev, struct rndis_request *req);
+ 
++void netvsc_send_acct(struct net_device *ndev,
++		      struct netvsc_device *net_device,
++		      struct vmbus_channel *channel,
++		      u16 q_idx);
++void netvsc_send_tx_complete(struct net_device *ndev,
++			     struct netvsc_device *net_device,
++			     struct vmbus_channel *channel,
++			     const struct vmpacket_descriptor *desc,
++			     int budget);
++void netvsc_send_completion(struct net_device *ndev,
++			    struct netvsc_device *net_device,
++			    struct vmbus_channel *incoming_channel,
++			    const struct vmpacket_descriptor *desc,
++			    int budget);
++
+ extern u32 netvsc_ring_bytes;
+ 
+ int netvsc_workqueue_init(void);
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index fd8aa7a3dcb3..8dca08cc96de 100644
+index fd8aa7a3dcb3..0d017f836b9e 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
-@@ -764,6 +764,32 @@ static inline void netvsc_free_send_slot(struct netvsc_device *net_device,
+@@ -764,20 +764,45 @@ static inline void netvsc_free_send_slot(struct netvsc_device *net_device,
  	sync_change_bit(index, net_device->send_section_map);
  }
  
-+static void netvsc_send_acct(struct net_device *ndev,
-+			     struct netvsc_device *net_device,
-+			     struct vmbus_channel *channel,
-+			     u16 q_idx)
+-static void netvsc_send_tx_complete(struct net_device *ndev,
+-				    struct netvsc_device *net_device,
+-				    struct vmbus_channel *channel,
+-				    const struct vmpacket_descriptor *desc,
+-				    int budget)
++void netvsc_send_acct(struct net_device *ndev,
++		      struct netvsc_device *net_device,
++		      struct vmbus_channel *channel,
++		      u16 q_idx)
 +{
 +	struct net_device_context *ndev_ctx = netdev_priv(ndev);
 +	int queue_sends;
@@ -76,10 +140,12 @@ index fd8aa7a3dcb3..8dca08cc96de 100644
 +	}
 +}
 +
- static void netvsc_send_tx_complete(struct net_device *ndev,
- 				    struct netvsc_device *net_device,
- 				    struct vmbus_channel *channel,
-@@ -773,11 +799,10 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
++void netvsc_send_tx_complete(struct net_device *ndev,
++			     struct netvsc_device *net_device,
++			     struct vmbus_channel *channel,
++			     const struct vmpacket_descriptor *desc,
++			     int budget)
+ {
  	struct net_device_context *ndev_ctx = netdev_priv(ndev);
  	struct sk_buff *skb;
  	u16 q_idx = 0;
@@ -92,7 +158,7 @@ index fd8aa7a3dcb3..8dca08cc96de 100644
  		netdev_err(ndev, "Invalid transaction ID %llx\n", desc->trans_id);
  		return;
  	}
-@@ -806,22 +831,7 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
+@@ -806,29 +831,14 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
  		napi_consume_skb(skb, budget);
  	}
  
@@ -115,7 +181,19 @@ index fd8aa7a3dcb3..8dca08cc96de 100644
 +	netvsc_send_acct(ndev, net_device, channel, q_idx);
  }
  
- static void netvsc_send_completion(struct net_device *ndev,
+-static void netvsc_send_completion(struct net_device *ndev,
+-				   struct netvsc_device *net_device,
+-				   struct vmbus_channel *incoming_channel,
+-				   const struct vmpacket_descriptor *desc,
+-				   int budget)
++void netvsc_send_completion(struct net_device *ndev,
++			    struct netvsc_device *net_device,
++			    struct vmbus_channel *incoming_channel,
++			    const struct vmpacket_descriptor *desc,
++			    int budget)
+ {
+ 	const struct nvsp_message *nvsp_packet;
+ 	u32 msglen = hv_pkt_datalen(desc);
 @@ -840,11 +850,24 @@ static void netvsc_send_completion(struct net_device *ndev,
  	if (!msglen) {
  		cmd_rqst = incoming_channel->request_addr_callback(incoming_channel,
@@ -142,6 +220,377 @@ index fd8aa7a3dcb3..8dca08cc96de 100644
  		pkt_rqst = (struct nvsp_message *)(uintptr_t)cmd_rqst;
  		switch (pkt_rqst->hdr.msg_type) {
  		case NVSP_MSG4_TYPE_SWITCH_DATA_PATH:
+diff --git a/drivers/net/hyperv/netvsc_completion_test.c b/drivers/net/hyperv/netvsc_completion_test.c
+new file mode 100644
+index 000000000000..e7ac22b002ea
+--- /dev/null
++++ b/drivers/net/hyperv/netvsc_completion_test.c
+@@ -0,0 +1,365 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * KUnit tests for netvsc completion handling on empty VMBus packets.
++ *
++ * Built into the hv_netvsc object rather than a separate module so the
++ * cases can reach the internal helpers declared in hyperv_net.h
++ * without exporting them.
++ */
++#include <kunit/test.h>
++#include <linux/etherdevice.h>
++#include <linux/hyperv.h>
++#include <linux/netdevice.h>
++#include <linux/slab.h>
++#include <linux/wait.h>
++
++#include "hyperv_net.h"
++
++/*
++ * Scripted requestor. request_addr_callback() only receives the channel
++ * and the transaction id, so the fixture is hung off a file-scope
++ * pointer. KUnit runs suite cases serially; one active fixture is
++ * enough and keeps the callback signature untouched.
++ */
++struct netvsc_completion_fixture {
++	struct net_device *ndev;
++	struct netvsc_device *nvdev;
++	struct vmbus_channel *channel;
++	/* Address returned on first use, then VMBUS_NO_RQSTOR: the id is
++	 * consumed exactly once, as vmbus_request_addr_match() does.
++	 */
++	u64 once_addr;
++	unsigned int calls;
++	u64 seen_ids[8];
++};
++
++static struct netvsc_completion_fixture *active_fx;
++
++static u64 test_request_addr(struct vmbus_channel *channel, u64 rqst_id)
++{
++	struct netvsc_completion_fixture *fx = active_fx;
++
++	if (fx->calls < ARRAY_SIZE(fx->seen_ids))
++		fx->seen_ids[fx->calls] = rqst_id;
++	fx->calls++;
++
++	if (fx->calls == 1)
++		return fx->once_addr;
++	return VMBUS_NO_RQSTOR;
++}
++
++/*
++ * A completion carrying no payload: hv_pkt_datalen() == 0. The
++ * empty-completion path looks the request up by trans_id and reads its
++ * message type, so the request itself is a separate object the fixture
++ * hands back through request_addr_callback().
++ */
++struct netvsc_empty_desc {
++	struct vmpacket_descriptor desc;
++} __packed;
++
++static void make_empty_desc(struct netvsc_empty_desc *pkt, u64 trans_id)
++{
++	memset(pkt, 0, sizeof(*pkt));
++	pkt->desc.offset8 = sizeof(pkt->desc) / 8;
++	pkt->desc.len8 = pkt->desc.offset8;
++	pkt->desc.trans_id = trans_id;
++}
++
++/*
++ * The production path never dereferences a net_device queue while
++ * tx_disable is set: netif_tx_queue_stopped() && !tx_disable
++ * short-circuits before hv_get_avail_to_write_percent() reads the
++ * ring. Set it here so a test needs no live outbound ring.
++ */
++static int netvsc_completion_fixture_init(struct netvsc_completion_fixture *fx)
++{
++	fx->ndev = alloc_netdev_mqs(sizeof(struct net_device_context),
++				    "hvcompl%d", NET_NAME_UNKNOWN,
++				    ether_setup, 1, 1);
++	if (!fx->ndev)
++		return -ENOMEM;
++
++	fx->nvdev = kzalloc_obj(*fx->nvdev, GFP_KERNEL);
++	if (!fx->nvdev) {
++		free_netdev(fx->ndev);
++		return -ENOMEM;
++	}
++
++	fx->channel = kzalloc_obj(*fx->channel, GFP_KERNEL);
++	if (!fx->channel) {
++		kfree(fx->nvdev);
++		free_netdev(fx->ndev);
++		return -ENOMEM;
++	}
++
++	init_waitqueue_head(&fx->nvdev->wait_drain);
++	init_completion(&fx->nvdev->channel_init_wait);
++	fx->nvdev->tx_disable = true;
++	fx->channel->request_addr_callback = test_request_addr;
++	fx->once_addr = 0;
++	fx->calls = 0;
++	memset(fx->seen_ids, 0, sizeof(fx->seen_ids));
++	active_fx = fx;
++	return 0;
++}
++
++static void netvsc_completion_fixture_exit(struct netvsc_completion_fixture *fx)
++{
++	active_fx = NULL;
++	kfree(fx->channel);
++	kfree(fx->nvdev);
++	free_netdev(fx->ndev);
++}
++
++static int netvsc_send_sends(struct netvsc_completion_fixture *fx, u16 q_idx)
++{
++	return atomic_read(&fx->nvdev->chan_table[q_idx].queue_sends);
++}
++
++/* Empty completion, request address NULL: owns the send accounting. */
++static void netvsc_completion_null_address_acct_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x11);
++	/* once_addr = 0 is the control-path NULL skb case. */
++	fx.once_addr = 0;
++
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 2);
++	KUNIT_EXPECT_FALSE(test, completion_done(&fx.nvdev->channel_init_wait));
++	KUNIT_EXPECT_EQ(test, fx.calls, 1U);
++	KUNIT_EXPECT_EQ(test, fx.seen_ids[0], 0x11U);
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/* VMBUS_RQST_ERROR is rejected: no accounting, no completion. */
++static void netvsc_completion_rqst_error_sentinel_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x22);
++	fx.once_addr = VMBUS_RQST_ERROR;
++
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 3);
++	KUNIT_EXPECT_FALSE(test, completion_done(&fx.nvdev->channel_init_wait));
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/* VMBUS_NO_RQSTOR is rejected the same way. */
++static void netvsc_completion_no_rqstor_sentinel_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x33);
++	fx.once_addr = VMBUS_NO_RQSTOR;
++
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 3);
++	KUNIT_EXPECT_FALSE(test, completion_done(&fx.nvdev->channel_init_wait));
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/*
++ * A real request address whose message type is SWITCH_DATA_PATH
++ * completes the channel-init wait. It is not send accounting: the
++ * control request was not a send.
++ */
++static void netvsc_completion_switch_data_path_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++	struct nvsp_message req = {};
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x44);
++	req.hdr.msg_type = NVSP_MSG4_TYPE_SWITCH_DATA_PATH;
++	fx.once_addr = (u64)(unsigned long)&req;
++
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++
++	KUNIT_EXPECT_TRUE(test, completion_done(&fx.nvdev->channel_init_wait));
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 3);
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/* An unexpected message type takes neither the complete nor the acct path. */
++static void netvsc_completion_unknown_msg_type_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++	struct nvsp_message req = {};
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x55);
++	req.hdr.msg_type = 0xdead;
++	fx.once_addr = (u64)(unsigned long)&req;
++
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++
++	KUNIT_EXPECT_FALSE(test, completion_done(&fx.nvdev->channel_init_wait));
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 3);
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/*
++ * A repeated completion for an already-consumed transaction id must not
++ * account twice. The requestor returns VMBUS_NO_RQSTOR on the second
++ * use and the empty-completion path rejects it.
++ */
++static void netvsc_completion_duplicate_completion_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x66);
++	fx.once_addr = 0;
++
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 2);
++	KUNIT_EXPECT_EQ(test, fx.calls, 1U);
++
++	/* Second completion for the same id: already consumed. */
++	netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 2);
++	KUNIT_EXPECT_EQ(test, fx.calls, 2U);
++	KUNIT_EXPECT_EQ(test, fx.seen_ids[0], 0x66U);
++	KUNIT_EXPECT_EQ(test, fx.seen_ids[1], 0x66U);
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/* N completions decrement the queue exactly N times. */
++static void netvsc_completion_single_decrement_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++	int i;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 5);
++
++	for (i = 0; i < 5; i++) {
++		make_empty_desc(&pkt, 0x100 + i);
++		fx.once_addr = 0;
++		fx.calls = 0;
++		netvsc_send_completion(fx.ndev, fx.nvdev, fx.channel,
++				       &pkt.desc, 0);
++		KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 4 - i);
++		KUNIT_EXPECT_EQ(test, fx.calls, 1U);
++	}
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 0);
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++static int netvsc_test_wake(struct wait_queue_entry *wq_entry,
++			    unsigned int mode, int flags, void *key)
++{
++	unsigned int *woken = wq_entry->private;
++
++	(*woken)++;
++	return 0;
++}
++
++/* destroy + a decrement that reaches zero wakes the drain wait. */
++static void netvsc_send_acct_drain_wake_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct wait_queue_entry entry;
++	unsigned int woken = 0;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	fx.nvdev->destroy = true;
++
++	memset(&entry, 0, sizeof(entry));
++	entry.func = netvsc_test_wake;
++	entry.private = &woken;
++	add_wait_queue(&fx.nvdev->wait_drain, &entry);
++
++	/* Non-zero remainder: the drain wait is not woken. */
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 2);
++	netvsc_send_acct(fx.ndev, fx.nvdev, fx.channel, 0);
++	KUNIT_EXPECT_EQ(test, woken, 0U);
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 1);
++
++	/* Exactly zero: the drain wait is woken once. */
++	netvsc_send_acct(fx.ndev, fx.nvdev, fx.channel, 0);
++	KUNIT_EXPECT_EQ(test, woken, 1U);
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 0);
++
++	remove_wait_queue(&fx.nvdev->wait_drain, &entry);
++	netvsc_completion_fixture_exit(&fx);
++}
++
++/*
++ * netvsc_send_tx_complete() applies the same sentinel rejection and
++ * still accounts a NULL skb. The non-NULL skb path needs a live
++ * netvsc device (send slot, DMA mapping, NAPI) and is not exercised
++ * here.
++ */
++static void netvsc_tx_complete_null_skb_acct_test(struct kunit *test)
++{
++	struct netvsc_completion_fixture fx = {};
++	struct netvsc_empty_desc pkt;
++
++	KUNIT_ASSERT_EQ(test, netvsc_completion_fixture_init(&fx), 0);
++	atomic_set(&fx.nvdev->chan_table[0].queue_sends, 3);
++	make_empty_desc(&pkt, 0x77);
++	fx.once_addr = 0;
++
++	netvsc_send_tx_complete(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 2);
++
++	/* The sentinel is rejected before any accounting. */
++	make_empty_desc(&pkt, 0x78);
++	fx.once_addr = VMBUS_RQST_ERROR;
++	fx.calls = 0;
++	netvsc_send_tx_complete(fx.ndev, fx.nvdev, fx.channel, &pkt.desc, 0);
++	KUNIT_EXPECT_EQ(test, netvsc_send_sends(&fx, 0), 2);
++
++	netvsc_completion_fixture_exit(&fx);
++}
++
++static struct kunit_case netvsc_completion_test_cases[] = {
++	KUNIT_CASE(netvsc_completion_null_address_acct_test),
++	KUNIT_CASE(netvsc_completion_rqst_error_sentinel_test),
++	KUNIT_CASE(netvsc_completion_no_rqstor_sentinel_test),
++	KUNIT_CASE(netvsc_completion_switch_data_path_test),
++	KUNIT_CASE(netvsc_completion_unknown_msg_type_test),
++	KUNIT_CASE(netvsc_completion_duplicate_completion_test),
++	KUNIT_CASE(netvsc_completion_single_decrement_test),
++	KUNIT_CASE(netvsc_send_acct_drain_wake_test),
++	KUNIT_CASE(netvsc_tx_complete_null_skb_acct_test),
++	{}
++};
++
++static struct kunit_suite netvsc_completion_test_suite = {
++	.name = "hyperv-netvsc-completion",
++	.test_cases = netvsc_completion_test_cases,
++};
++
++kunit_test_suite(netvsc_completion_test_suite);
 -- 
 2.43.0
 

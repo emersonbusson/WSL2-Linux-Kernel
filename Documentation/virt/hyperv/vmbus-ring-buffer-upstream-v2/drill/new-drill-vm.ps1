@@ -328,9 +328,42 @@ catch {
 }
 
 # --- wait for the guest ------------------------------------------------------
+function Wait-DrillReader {
+  param($Job, [int]$BudgetSec, [string]$Vm, [string]$ConsolePath)
+
+  # This observer runs outside the serial reader. A blocked ReadAsync must
+  # not suppress host progress evidence. No heartbeat implies no verdict;
+  # it does not by itself identify starvation, guest OOM, or a kernel hang.
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  while ($watch.Elapsed.TotalSeconds -lt $BudgetSec) {
+    $remaining = [Math]::Max(1, [Math]::Ceiling($BudgetSec - $watch.Elapsed.TotalSeconds))
+    $finished = Wait-Job -Job $Job -Timeout ([Math]::Min(10, $remaining))
+    if ($finished) { return $finished }
+
+    $bytes = 0
+    $phase = 'unknown'
+    if (Test-Path $ConsolePath) {
+      $bytes = (Get-Item $ConsolePath).Length
+      $markers = Get-Content $ConsolePath -Tail 40 -ErrorAction SilentlyContinue |
+        Select-String 'HYPERV_DRILL_PHASE name=([a-z_]+)'
+      if ($markers) { $phase = $markers[-1].Matches[0].Groups[1].Value }
+    }
+    try {
+      $guest = Get-VM -Name $Vm -ErrorAction Stop
+      $state = $guest.State
+      $cpu = $guest.CPUUsage
+      $memory = $guest.MemoryAssigned
+    }
+    catch { $state = 'unavailable'; $cpu = 'unknown'; $memory = 'unknown' }
+    $elapsed = [Math]::Floor($watch.Elapsed.TotalSeconds)
+    Note observer_heartbeat "elapsed_s=$elapsed reader=$($Job.State) console_bytes=$bytes phase=$phase vm_state=$state cpu_pct=$cpu memory_bytes=$memory" | Out-Null
+  }
+  return $null
+}
+
 if ($readerJob) {
   try {
-    $finished = Wait-Job -Job $readerJob -Timeout ($TimeoutSec + 30)
+    $finished = Wait-DrillReader -Job $readerJob -BudgetSec ($TimeoutSec + 30) -Vm $VmName -ConsolePath $consoleLog
     if ($finished) {
       $readerStatus = Receive-Job -Job $readerJob
     }
