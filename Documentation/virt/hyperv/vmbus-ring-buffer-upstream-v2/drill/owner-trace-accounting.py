@@ -86,19 +86,45 @@ def reconcile(lines):
 
 
 def decode_capture(lines):
-    digest, fragments, ended = None, [], False
+    headers, fragments, indexed, ended = Counter(), [], {}, False
     for line in lines:
+        match = re.fullmatch(r"OWNER_TRACE_BLOB format=gzip-base64-indexed rows=([1-9]\d*) sha256=([0-9a-f]{64})\s*", line)
+        if match:
+            headers[(int(match[1]), match[2])] += 1
+            continue
         match = re.fullmatch(r"OWNER_TRACE_BLOB format=gzip-base64 sha256=([0-9a-f]{64})\s*", line)
         if match:
-            if digest is not None:
-                return [], "repeated-transport-header"
-            digest = match[1]
+            headers[(0, match[1])] += 1
+            continue
+        match = re.fullmatch(r"OWNER_TRACE_DATA index=(\d+) data=([A-Za-z0-9+/=]+)\s*", line)
+        if match:
+            index, data = int(match[1]), match[2]
+            if index < 60000 and len(data) <= 76 and len(data) % 4 == 0:
+                indexed.setdefault(index, Counter())[data] += 1
         elif line.startswith("OWNER_TRACE_DATA "):
             fragments.append(line[len("OWNER_TRACE_DATA "):].strip())
         elif line.strip() == "OWNER_TRACE_BLOB end=1":
             ended = True
-    if digest is None or not ended:
+    if not headers or not ended:
         return [], "incomplete-transport"
+    ranked = headers.most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return [], "conflicting-transport-headers"
+    (rows, digest), copies = ranked[0]
+    if not rows and copies != 1:
+        return [], "repeated-transport-header"
+    if rows > 60000:
+        return [], "transport-size-limit"
+    if rows:
+        fragments = []
+        for index in range(rows):
+            choices = indexed.get(index, Counter()).most_common()
+            if not choices or (len(choices) > 1 and choices[0][1] == choices[1][1]):
+                return [], "missing-or-conflicting-row"
+            data = choices[0][0]
+            if index < rows - 1 and len(data) != 76:
+                return [], "incomplete-row"
+            fragments.append(data)
     encoded = "".join(fragments)
     if len(encoded) > 4 * 1024 * 1024:
         return [], "transport-size-limit"
@@ -161,6 +187,37 @@ def self_test():
         print(f"PASS {name}")
 
 
+def self_test_replication():
+    payload = b"OWNER_TRACE status=UNAVAILABLE\n"
+    packed = gzip.compress(payload, mtime=0)
+    encoded = base64.b64encode(packed).decode()
+    rows = [encoded[i:i + 76] for i in range(0, len(encoded), 76)]
+    header = f"OWNER_TRACE_BLOB format=gzip-base64-indexed rows={len(rows)} sha256={hashlib.sha256(packed).hexdigest()}"
+    one = [header, *[f"OWNER_TRACE_DATA index={i} data={row}" for i, row in enumerate(rows)], "OWNER_TRACE_BLOB end=1"]
+    complete = one * 3
+    assert decode_capture(complete) == (payload.decode().splitlines(), None)
+    print("PASS replicated_capture_verified")
+    damaged = complete.copy()
+    damaged[1] = damaged[1][:-1]
+    assert decode_capture(damaged) == (payload.decode().splitlines(), None)
+    print("PASS single_character_loss_recovered_with_checksum")
+    damaged = complete.copy()
+    for offset in (0, len(one)):
+        damaged[offset + 1] = damaged[offset + 1][:-1]
+    assert decode_capture(damaged) == (payload.decode().splitlines(), None)
+    print("PASS two_lost_replicas_recovered_with_checksum")
+    assert decode_capture([header, *one[-1:]])[1] is not None
+    print("PASS all_replicas_lost_is_partial")
+    prefix, data = one[1].split("data=", 1)
+    changed = prefix + "data=" + ("A" if data[0] != "A" else "B") + data[1:]
+    conflict = [header, one[1], changed, *one[2:]]
+    assert decode_capture(conflict)[1] == "missing-or-conflicting-row"
+    print("PASS conflicting_replicas_refused")
+    wrong = [header, changed, *one[2:]]
+    assert decode_capture(wrong)[1] is not None
+    print("PASS coherent_wrong_copy_fails_checksum")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trace", nargs="?", type=Path)
@@ -168,6 +225,7 @@ def main():
     args = parser.parse_args()
     if args.self_test:
         self_test()
+        self_test_replication()
         return 0
     if args.trace is None:
         parser.error("trace path is required")

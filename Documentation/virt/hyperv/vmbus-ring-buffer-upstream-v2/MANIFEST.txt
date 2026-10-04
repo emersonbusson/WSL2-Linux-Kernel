@@ -37,7 +37,7 @@ da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-in
 5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
 eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
 19321190c77a222d3199131f709000149d606b974a15b298681ec98232f03b49  drill/build-drill-kernel.sh
-79007cc3e4446d5b36502035f7e0730f72affbcbce4b8ee2d4f6a7d7913634f1  drill/init
+af140c9b726142909b4ef7d9d4c1ea949e61272024924ff4b2d9c681d39fc483  drill/init
 a852ec4a5cab991de9feb797462b63c3977c9c28256e2a07ab2d2dca8b5036fe  drill/vmbus-lifecycle-drill.sh
 e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
 16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
@@ -45,7 +45,7 @@ e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fr
 06b12e160cde766c556979d0bcae81d2066604485f22a62337a6f4f96b56b825  drill/new-drill-vm.ps1
 ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
 afdcb6ee7ee3dc817b141c233e0bfc8c3e08ea077bb17338b675d9d422af0861  drill/test-serial-reader.ps1
-2c2f0254a855830606b195cf9263213e9d87af00d96f83d844b46f3ba3d872e5  drill/owner-trace-accounting.py
+cb22f517babcae13d5e5679f426e6adfe538018b002f79e643bc653d85660adf  drill/owner-trace-accounting.py
 
 Recipe: tinyconfig plus explicit symbols; embedded initramfs, static helper,
 EFI stub, serial console, boot-enabled opaque owner event tracing (512K/CPU).
@@ -63,7 +63,7 @@ CURRENT LOCAL EVIDENCE
 - Strict per-mail checkpatch: zero errors/checks; exactly one accepted
   FILE_PATH_CHANGES warning on 0002, 0010, 0012, 0013, no others.
 - CoCo static predicates 6/6; validator fixtures 18/18.
-- Lifecycle decision fixtures 15/15; owner accounting fixtures 16/16;
+- Lifecycle decision fixtures 15/15; owner accounting fixtures 22/22;
   independent reader observer fixtures 3/3.
 - series/SHA256SUMS: verify all thirteen before applying/building.
 
@@ -96,3 +96,13 @@ candidate capture accounted for 682 owners with zero errors; the other
 was PARTIAL due to transport corruption. A fresh pair must qualify the
 notifier-reference and paced/asynchronously drained serial follow-up.
 The native named-pipe burst fixture passes on the actual reader.
+
+CAPTURE TRANSPORT FOLLOW-UP
+A paced single copy still lost one base64 character in runtime 37242875661.
+The capture stays PARTIAL. Numbered rows now travel in three replicas;
+reconstruction must verify the full original packed SHA-256. Conflicting,
+missing or corrupt copies cannot produce PASS. All 22 analyzer fixtures
+pass. Production mails and mainline source 934ef265c4b8 are unchanged;
+build 37242875605 passed all three jobs. Run the runtime workflow explicitly
+to qualify the new capture; no production rebuild is required for tool-only
+changes. No email or host activation occurred.

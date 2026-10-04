@@ -277,13 +277,20 @@ if gzip -c "$OWNER_CAPTURE" >"$OWNER_CAPTURE.gz"; then
 	read -r OWNER_DIGEST OWNER_UNUSED <<EOF
 $(sha256sum "$OWNER_CAPTURE.gz")
 EOF
-	echo "OWNER_TRACE_BLOB format=gzip-base64 sha256=$OWNER_DIGEST"
-	base64 "$OWNER_CAPTURE.gz" | while IFS= read -r OWNER_ROW; do
-		printf 'OWNER_TRACE_DATA %s\n' "$OWNER_ROW"
-		# Pace the serial burst below line rate while the host drains it.
-		sleep 0.02
+	base64 "$OWNER_CAPTURE.gz" >"$OWNER_CAPTURE.b64"
+	OWNER_ROWS=$(wc -l <"$OWNER_CAPTURE.b64")
+	# Numbered replicas recover serial loss only after the entire packed
+	# payload verifies against its digest; no kernel event is inferred.
+	for OWNER_COPY in 1 2 3; do
+		echo "OWNER_TRACE_BLOB format=gzip-base64-indexed rows=$OWNER_ROWS sha256=$OWNER_DIGEST"
+		OWNER_INDEX=0
+		while IFS= read -r OWNER_ROW; do
+			printf 'OWNER_TRACE_DATA index=%s data=%s\n' "$OWNER_INDEX" "$OWNER_ROW"
+			OWNER_INDEX=$((OWNER_INDEX + 1))
+			sleep 0.02
+		done <"$OWNER_CAPTURE.b64"
+		echo "OWNER_TRACE_BLOB end=1"
 	done
-	echo "OWNER_TRACE_BLOB end=1"
 else
 	echo "OWNER_TRACE status=UNAVAILABLE reason=serialization_failed"
 fi
