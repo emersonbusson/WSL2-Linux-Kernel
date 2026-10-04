@@ -1,4 +1,4 @@
-From 9de6952a81f96ea2a39c241b727e9efaccc2a0de Mon Sep 17 00:00:00 2001
+From f029bfdb337af00f7bfe371fe651447ee8426166 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 21:40:00 -0300
 Subject: [PATCH v2 12/13] hv: netvsc: allocate RNDIS request descriptors with

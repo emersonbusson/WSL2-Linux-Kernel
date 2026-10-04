@@ -106,16 +106,23 @@ What changed
 Fixes tags
 ----------
 
-0011 fixes a regression from e8b7db38449ac ("Drivers: hv: vmbus:
-Add vmbus_requestor data structure for VMBus hardening", Andres
-Beltran, 2020-11-09), whose request_arr_init() allocated the
-requestor array with kcalloc(size, sizeof(u64), GFP_KERNEL) on the
-subchannel-open path. 0012 and 0013 harden against buddy
-fragmentation and an empty-completion case whose originating
-commits are not pinned down here, so they deliberately carry no
-Fixes: tag rather than an invented one. Routing 0011-0013 to the
-netvsc maintainers as a follow-up is fine if they prefer that
-split; the bytes are independent of 0001-0010.
+0011 carries a Fixes: tag naming e8b7db38449ac ("Drivers: hv:
+vmbus: Add vmbus_requestor data structure for VMBus hardening",
+Andres Beltran, 2020-11-09). That commit introduced
+request_arr_init(), which allocates the requestor array with
+kcalloc(size, sizeof(u64), GFP_KERNEL) on the subchannel-open
+path. It is the origin of the allocation and not a regression
+from a smaller one: the array has taken an order-7 compound page
+for large rings since that commit landed. 0011 makes that
+allocation vmalloc-backed so fragmentation cannot kill a
+subchannel open.
+
+0012 and 0013 harden against buddy fragmentation and an
+empty-completion case whose originating commits are not pinned
+down here, so they carry no Fixes: tag rather than an invented
+one. Routing 0011-0013 to the netvsc maintainers as a follow-up
+is fine if they prefer that split; the bytes are independent of
+0001-0010.
 
 Patch granularity is deliberate. 10/13 is the largest at 1283
 changed lines across seven files (1275 insertions, 8 deletions) and
@@ -192,7 +199,12 @@ rejected on both arches. WSL backport: "Ran 15 tests: passed: 15"
 As a mail patch, 2/13 and 10/13 print that same FILE_PATH_CHANGES
 nudge once; those are the two patches that add a file. The test
 files are covered by the existing Hyper-V and UIO directory
-entries. Nothing was reshaped to silence it.
+entries. Nothing was reshaped to silence it. Those mail numbers
+are measured from a tree that contains the commit 0011's Fixes:
+tag names; from a tree that does not, checkpatch adds "Unknown
+commit id" on 0011. That is tree presence, not a patch defect,
+and the CI shape never sees it because the gate is a git diff and
+a commit message is not in one.
 
 WSL backport builds with W=1 and Sparse. Baseline diagnostics that
 pre-exist this series are not introduced by it.

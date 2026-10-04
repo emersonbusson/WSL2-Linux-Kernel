@@ -1,4 +1,4 @@
-From 5997265dc2c6dad8051a82f126818338e7562385 Mon Sep 17 00:00:00 2001
+From 4e01222ee21d2d209c7c5319e736b8c08adbf212 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 11/13] hv: vmbus: allocate the requestor array with
@@ -46,6 +46,7 @@ Revert this patch if a channel open under buddy fragmentation starts
 reporting -ENOMEM from vmbus_alloc_requestor() again, or if any path
 begins to treat req_arr as host-visible or direct-mapped memory.
 
+Fixes: e8b7db38449ac ("Drivers: hv: vmbus: Add vmbus_requestor data structure for VMBus hardening")
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/channel.c | 14 +++++++++++---
