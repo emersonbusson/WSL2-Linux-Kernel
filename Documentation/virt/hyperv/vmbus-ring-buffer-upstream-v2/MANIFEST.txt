@@ -1,15 +1,15 @@
 MANIFEST — VMBus upstream v2 reproduction dossier
 ==================================================
 Updated: 2026-10-05
-Status: source/ordinary-host validation complete; unsent; local install/CoCo PARTIAL.
+Status: source/ordinary-host validation and local install PASS; CoCo PARTIAL; unsent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
 Applied source tip: 6af42b4cdbc34ae5c68b3a05f301ee0860cf7e20
 Production mail identities are authoritative; the WSL fork is a separate backport.
 Mail shape: cover 0/13 and thirteen code mails. Nothing has been sent.
 
 COVER
-0607a3e0a88e4db0fea9c232d6878fafa7f9e6a9504d6da05036d6850d651e92  series/0000-cover-letter.patch
-lines=200
+15ed88c732b84ed534befc2322fe08f997c5db00e50fa856bd1167ff1126154f  series/0000-cover-letter.patch
+lines=204
 
 PRODUCTION MAILS
 c962e2019a2404c9c57555a2bb8eef1cc87855b2111bd1208d77f9989967fd18  0001-ring-allocation.patch
@@ -110,14 +110,29 @@ No Hyper-V UIO execution under ordinary QEMU is claimed.
 
 The collector checks the manifest pair, executing GNU build ID, fresh boot,
 both configuration keys, installed UIO hash/vermagic and fatal-free readable
-kernel logs. Six parser/refusal fixtures pass. Raw host paths/addresses and
+kernel logs. Seven parser/refusal fixtures pass, including strict ABI/whitespace checks. Raw host paths/addresses and
 logs are excluded from the public report; counters and log digest remain.
 Actions 37266143176 archives the byte-matched actual pre-install FAIL report:
 7824922a6101ceaf2d2ab149aff63db6204f3c396c6ad5d16b557dc4439e21db
-The predecessor is still executing. No local installation or restart occurred.
-Report validation PASS is separate from runtime PASS. The versioned Windows
-path still refuses execution custody/provenance admission; independent
-container-content proof alone does not remove that refusal.
+That historical report predates installation and remains FAIL.
+An attended atomic pair transaction now boots a measured bundled baseline
+and the exact corrected backport. Both shutdowns return zero with empty-Job
+proof, and fresh GNU identities/boot IDs establish actual VM renewal.
+Full local logs are preserved. All ten maintained runtime checks pass.
+A subsequent actual boot retains the same pair/GNU/module identities and
+passes again, with zero kernel fatals, FORTIFY, init timeout or unclean journal.
+The supported initTimeout=60000 is identical for both comparison legs;
+stock startup measured 13.704 seconds against the default 10000 ms.
+Baseline binfmt failure and 23 DXG metadata query errors match the candidate.
+Prior failed attempts are preserved. This is not product READY; the existing
+production installer remains refused. Neither ordinary runtime observation
+nor report validation qualifies a confidential platform.
+
+Actions 37340362101 and 37340880355 both complete SUCCESS on tooling 8808e225.
+Only the operator-report job runs; prior exact-source build qualification is
+unchanged. The public reports below preserve their actual runtime PASS.
+Report artifacts are byte-matched to the originals after download.
+
 
 CONFIDENTIAL PLATFORM LIMITS
 No SEV-SNP, TDX without paravisor or Arm CCA page-state transition is qualified.
@@ -130,4 +145,9 @@ Actions can validate/archive a supplied CoCo report; that validates its stated
 scope, not runner hardware or report authenticity. No hardware report exists.
 Real traffic/confidential DMA and every GPADL response ordering remain open.
 The code retains uncertain ownership pending protocol clarification.
-No email, local device binding, swap change or RamShared enable occurred.
+No email, local device binding or cascade pressure is performed by installation.
+Original boot-unit enablement is restored without starting the cascade.
+
+SANITIZED LOCAL OBSERVATIONS
+c9b45e04f3ae0cc0bdc1c1f777c3bb73aeebaa974b464dd884ce67aab9861ccf  local-wsl-installed-report.json
+86b17c3fa0227f601cc8fad91e50c7245aec97a223d73ba0cd248f6e46da9acf  local-wsl-restart-report.json

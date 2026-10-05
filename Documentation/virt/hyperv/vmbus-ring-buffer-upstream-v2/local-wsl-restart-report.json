@@ -1,0 +1,28 @@
+{
+  "boot_id": "1f269253-9f49-4054-92e2-ae4641ee02f6",
+  "captured_utc": "2026-10-05T16:25:15.527525+00:00",
+  "checks": {
+    "configuration_pair": true,
+    "fresh_boot": true,
+    "image_hash": true,
+    "kernel_release": true,
+    "module_file": true,
+    "module_vermagic": true,
+    "modules_hash": true,
+    "readable_kernel_log": true,
+    "running_build_id": true,
+    "zero_kernel_fatals": true
+  },
+  "expected_build_id": "1c2e7ffdaebdbbac35efdedf04fec0180babf7fb",
+  "kernel_fatals": 0,
+  "kernel_log_sha256": "270cb32477fdcd0eeb0ff0f2c12d31e70d55bf50e679715449b8a8aceb552d1e",
+  "kernel_release": "6.18.40.1-microsoft-standard-WSL2+",
+  "module_loaded": false,
+  "pair_id": "v1-106bb9d96897064a-3f28249d5c5b6520",
+  "previous_boot_id": "04c0e638-9ea6-4f5f-9b4f-41214e53c7a5",
+  "running_build_id": "1c2e7ffdaebdbbac35efdedf04fec0180babf7fb",
+  "schema": "ramshared.local-kernel-pair.v1",
+  "scope": "ordinary WSL2 operator observation; no CoCo qualification",
+  "source_commit": "f67a72ca25a54b58b9ae9b8dbeaed9b3c017a0bc",
+  "verdict": "PASS"
+}

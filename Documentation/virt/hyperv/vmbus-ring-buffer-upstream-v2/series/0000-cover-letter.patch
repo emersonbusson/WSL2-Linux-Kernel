@@ -124,7 +124,7 @@ withdrawal and restored netvsc. Then the host removes the exact disposable
 VM adapter; both guests observe target absence and one matching real
 offer-rescind event. Both have zero splat/fault and complete verified owner
 capture: 684/683 created, 673/672 reclaimed, 9 active and 2 conservatively
-retained per guest. 
+retained per guest.
 windows-2025 also allocates rings with order-7+ supply exhausted
 (499->25->0), without OOM. windows-latest leaves one block (493->26->1):
 fragmentation is INCONCLUSIVE/PARTIAL despite a successful lifecycle and
@@ -167,8 +167,12 @@ with live fd and mappings.
 
 Real-skb production-entry KUnit is qualified; hardware traffic and
 confidential DMA/page-state failure injection remain unqualified.
-The local WSL pair is built and sealed, but is not installed. Its managed
-Windows admission remains blocked; ordinary local WSL would not prove CoCo.
+The corrected WSL backport is installed locally. Two actual candidate
+boots match its selected GNU identity and UIO module/file pair; ten
+identity/configuration/log checks pass, with zero critical boot signals.
+Baseline binfmt failure and DXG query counts remain disclosed. Actions
+37340362101/37340880355 archive the two observations. These are ordinary
+WSL backport checks; production admission and CoCo proof remain separate.
 The ordinary lifecycle aggregate requires all five subgates, including
 restore. PARTIAL and NO_RESULT remain distinct from PASS.
 
