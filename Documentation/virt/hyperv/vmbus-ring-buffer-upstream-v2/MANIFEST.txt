@@ -162,3 +162,10 @@ Current local correction: linked x86_64 QEMU KUnit 54/54 PASS, including
 actual UIO unregister/wakeup. Strict cumulative/per-mail thirteen-stage
 checks pass; full-schema fixtures 11/11 and static invariants 6/6 pass.
 Hosted build and controlled host rescind remain pending.
+
+
+WSL COUNT CORRECTION
+Run 37264606869 reaches the new backport suite but its per-suite assertion
+still expects four UIO tests. It must require five alongside total 17 and the
+named real UIO withdrawal case. This correction changes CI only; the runtime
+already in progress is retained on unchanged production bytes.

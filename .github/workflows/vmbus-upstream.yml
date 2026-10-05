@@ -119,7 +119,7 @@ jobs:
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-gpadl-lifetime' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'hyperv-uio-hv-generic-mmap \(4 subtests\)' \
+          grep -Eq 'hyperv-uio-hv-generic-mmap \(5 subtests\)' \
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
             vmbus-wsl-artifacts/kunit.log
