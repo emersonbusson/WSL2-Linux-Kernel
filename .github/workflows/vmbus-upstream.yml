@@ -99,12 +99,17 @@ jobs:
             grep -q "KUNIT_CASE($case_name)" drivers/hv/vmbus_buffer_test.c
           done
           for case_name in \
+            hv_uio_unregister_wakes_reader_test \
             hv_uio_remove_disconnects_open_channel_test \
             hv_uio_mmap_validate_test \
             hv_uio_ring_mmap_page_range_test \
             hv_uio_mmap_page_protection_test; do
             grep -q "KUNIT_CASE($case_name)" drivers/uio/uio_hv_generic_mmap_test.c
           done
+          if grep -q 'vmbus_set_chn_rescind_callback' drivers/uio/uio_hv_generic.c; then
+            echo 'UIO must use ordinary device unregister on rescind'
+            exit 1
+          fi
           python3 tools/testing/kunit/kunit.py run \
             --build_dir="$GITHUB_WORKSPACE/wsl-kunit-out" \
             --arch=x86_64 --kunitconfig="$RUNNER_TEMP/wsl-kunitconfig" \
@@ -118,7 +123,7 @@ jobs:
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 16 tests: passed: 16$' \
+          grep -Eq 'Testing complete\. Ran 17 tests: passed: 17$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
             vmbus_gpadl_rescind_retains_state_test \
@@ -130,6 +135,7 @@ jobs:
               vmbus-wsl-artifacts/kunit.log
           done
           for case_name in \
+            hv_uio_unregister_wakes_reader_test \
             hv_uio_remove_disconnects_open_channel_test \
             hv_uio_mmap_validate_test \
             hv_uio_ring_mmap_page_range_test \
@@ -452,6 +458,7 @@ jobs:
             vmbus_requestor_id_lifecycle_test \
             vmbus_requestor_invalid_ids_test \
             vmbus_requestor_exhaustion_test \
+            hv_uio_unregister_wakes_reader_test \
             hv_uio_remove_disconnects_open_channel_test \
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \
@@ -470,6 +477,10 @@ jobs:
               exit 1
             }
           done
+          if grep -q 'vmbus_set_chn_rescind_callback' linux/drivers/uio/uio_hv_generic.c; then
+            echo 'UIO must use ordinary device unregister on rescind'
+            exit 1
+          fi
           cat > linux/drivers/hv/.kunitconfig <<'EOF'
           CONFIG_KUNIT=y
           CONFIG_HYPERVISOR_GUEST=y
@@ -493,11 +504,11 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'hyperv-uio-mmap \(13 subtests\)' \
+          grep -Eq 'hyperv-uio-mmap \(14 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 53 tests: passed: 53$' \
+          grep -Eq 'Testing complete\. Ran 54 tests: passed: 54$' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-rndis-request' \
             vmbus-artifacts/kunit.log
@@ -527,6 +538,7 @@ jobs:
             vmbus_requestor_id_lifecycle_test \
             vmbus_requestor_invalid_ids_test \
             vmbus_requestor_exhaustion_test \
+            hv_uio_unregister_wakes_reader_test \
             hv_uio_remove_disconnects_open_channel_test \
             hv_uio_ring_mmap_range_test \
             hv_uio_ring_mmap_prepare_test \

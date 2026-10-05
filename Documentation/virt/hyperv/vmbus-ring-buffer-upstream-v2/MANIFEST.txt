@@ -1,10 +1,10 @@
 MANIFEST — VMBus upstream v2 reproduction dossier
 ==================================================
 Updated: 2026-10-04
-Status: final skb regression follow-up pending hosted build; unsent; CoCo unqualified.
+Status: HOLD; host-rescind panic correction awaits exact-source qualification.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
-Applied source tip: 89fd95348ba1152ad726739c2dd2fca1845904cf
-(previous 934ef265c4b8 plus two skb-backed completion KUnit cases)
+Applied source tip: 6af42b4cdbc34ae5c68b3a05f301ee0860cf7e20
+(previous 89fd95348ba1 plus UIO rescind callback withdrawal)
 Mail shape: cover 0/13, thirteen code mails. Apply hashes, not the WSL fork.
 Cover is intentionally outside series/SHA256SUMS.
 
@@ -22,7 +22,7 @@ b5a2cae1d081f0f21e3d4f621daeef0db8c70c09233d4b976e890b96be7a4e01  0002-allocatio
 66bbbd876db3e11ab5a0d3012b105241f4ecf0eb74f3e2ea18e82e89df7df209  0007-rescind-vs-unload.patch
 8fbd4907b146beed0f0dbd6a65f91cf2849431b30c1571bbbb4e43cb9bdc0643  0008-buffer-ownership.patch
 2d9dd093fd0282ef6f47e212900af7282e568fa8788ce46ce3f6c0ff941c9579  0009-alloc-buffer-prototype.patch
-695e1b7cb2a146b2f3186cc45a877c0d240be4a36e07e79de57c631e1cd3bc07  0010-uio-mmap-pin.patch
+eb256aa6037190e6ee13c4abd2024c65a6cc7ee67a927582e84157cc3990078f  0010-uio-mmap-pin.patch
 efca76ff8197c6b12baaa9afa7a9e753082a728b759a11bd47b5bda30660c31b  0011-requestor-kvcalloc.patch
 d11683ba206131556e38168e78d3091e3adebf8f6cbed244664312d876c9441b  0012-rndis-request-kvmalloc.patch
 73052cc8c2b30aed38bdf58d7a375cf4c348df4d3e9029d9f07c1cd374cac690  0013-netvsc-empty-completion-null.patch
@@ -37,12 +37,12 @@ da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-in
 5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
 eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
 48d5f977a2a1893031ea7bfa4bd60d9013274f4ec0338899683eada38c04bd52  drill/build-drill-kernel.sh
-7b3cb8819e59339ca131526fdb69e89cd43ac89e28f56e9ba3ce8995278d8cb7  drill/init
-a852ec4a5cab991de9feb797462b63c3977c9c28256e2a07ab2d2dca8b5036fe  drill/vmbus-lifecycle-drill.sh
+8aaeb1bb0b125c2c2f9882e894a01deba82a70dd0bf7eae10afd2c797f95ef6d  drill/init
+2d9ce71900eadb7f2501c42fd8fa93d6b8a257af691b400f82dd9cf1108bae8c  drill/vmbus-lifecycle-drill.sh
 e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
 16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
 311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
-20a57add4267da8ced9d5b9f372c5d669b6aa2927ec5eaf388297da39e514dac  drill/new-drill-vm.ps1
+41cd537e7b345651ab758b516fa6d714d39a504a1f83381f020fc55b8292b291  drill/new-drill-vm.ps1
 ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
 afdcb6ee7ee3dc817b141c233e0bfc8c3e08ea077bb17338b675d9d422af0861  drill/test-serial-reader.ps1
 cb22f517babcae13d5e5679f426e6adfe538018b002f79e643bc653d85660adf  drill/owner-trace-accounting.py
@@ -139,3 +139,26 @@ new skb-backed cases, but its old exact-count assertion still expects 51.
 WSL backport and arm64 jobs succeed. The named-case/count gate now requires
 53 and both new cases. A fresh workflow qualifies the corrected gate; no
 production regression is inferred from the obsolete count assertion.
+
+HOST RESCIND FAILURE AND CORRECTION
+Build 37261428477 passes all three jobs and 53 mainline cases. Ordinary
+runtime 37259972311 passes both candidate legs with complete owner capture
+(684/678 creates; 673/667 reclaimed; 11 active each); both baselines fail.
+Controlled-rescind run 37261427641 exposes a real windows-2025 panic in
+uio_event_notify from hv_uio_rescind after the adapter has returned to
+netvsc. The UIO callback survives the driver replacement and accesses the
+wrong private data. The other candidate publishes sysfs maps=0 before UIO
+channel readiness and never requests host removal. Preserve both failures.
+
+The correction removes the redundant UIO rescind callback and uses ordinary
+VMBus device unregistration, which already withdraws UIO info, wakes readers
+and reports EIO/POLL_HUP. A real registered-UIO withdrawal KUnit case pins
+the notifier device, verifies info withdrawal and observes reader wakeup.
+The lifecycle harness starts the sysfs helper only after the UIO helper has
+published readiness; maps=0 remains a failure. New gates require mainline
+54 and WSL backport 17 cases. No email or local promotion is qualified yet.
+
+Current local correction: linked x86_64 QEMU KUnit 54/54 PASS, including
+actual UIO unregister/wakeup. Strict cumulative/per-mail thirteen-stage
+checks pass; full-schema fixtures 11/11 and static invariants 6/6 pass.
+Hosted build and controlled host rescind remain pending.

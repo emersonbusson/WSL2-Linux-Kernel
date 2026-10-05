@@ -6,7 +6,8 @@ name: Hyper-V runtime drill
 #
 # This is the runtime evidence the KUnit gates cannot produce. KUnit proves the
 # logic; a real Hyper-V guest measures driver rebind and the fragmented
-# buddy. This harness does not cause a host rescind. EVD-0131 and EVD-0132 measured that
+# buddy. Manual host_rescind dispatch adds a controlled host removal.
+# EVD-0131 and EVD-0132 measured that
 # a hosted runner can boot both a WSL2 guest and an arbitrary Gen2 Hyper-V VM,
 # so this is no longer a hardware gap: it is ordinary build work.
 #

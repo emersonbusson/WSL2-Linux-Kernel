@@ -193,33 +193,6 @@ static void hv_uio_channel_cb(void *context)
 	uio_event_notify(&pdata->info);
 }
 
-/*
- * Callback from vmbus_event when channel is rescinded.
- * It is meant for rescind of primary channels only.
- */
-static void hv_uio_rescind(struct vmbus_channel *channel)
-{
-	struct hv_device *hv_dev = channel->device_obj;
-	struct hv_uio_private_data *pdata = hv_get_drvdata(hv_dev);
-
-	/*
-	 * Turn off the interrupt file handle
-	 * Next read for event will return -EIO
-	 */
-	pdata->info.irq = 0;
-
-	/* Wake up reader */
-	uio_event_notify(&pdata->info);
-
-	/*
-	 * With rescind callback registered, rescind path will not unregister the device
-	 * from vmbus when the primary channel is rescinded.
-	 * Without it, rescind handling is incomplete and next onoffer msg does not come.
-	 * Unregister the device from vmbus here.
-	 */
-	vmbus_device_unregister(channel->device_obj);
-}
-
 /* Function used for mmap of ring buffer sysfs interface.
  * The ring buffer is allocated as contiguous memory by vmbus_open
  */
@@ -368,7 +341,6 @@ hv_uio_open(struct uio_info *info, struct inode *inode)
 	if (atomic_inc_return(&pdata->refcnt) != 1)
 		return 0;
 
-	vmbus_set_chn_rescind_callback(dev->channel, hv_uio_rescind);
 	vmbus_set_sc_create_callback(dev->channel, hv_uio_new_channel);
 
 	ret = vmbus_connect_ring(dev->channel,

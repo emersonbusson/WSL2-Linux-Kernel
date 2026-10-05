@@ -1172,6 +1172,21 @@ else
 	say "PHASE2 note UIO hold-in-mmap did NOT run"
 fi
 
+# Opening UIO connects the primary ring. Wait for that helper's positive
+# readiness before asking sysfs to map it; scheduling two helpers together
+# otherwise races a closed channel. A published maps=0 is still a failure.
+PRE_RING_WAIT=0
+if [ -n "$HOLD_PID_UIO" ]; then
+	while [ "$PRE_RING_WAIT" -lt 10 ]; do
+		PRE_RING_MAPS="$(hold_ready_maps "$UIO_DEV" || true)"
+		if [ -n "$PRE_RING_MAPS" ]; then
+			break
+		fi
+		PRE_RING_WAIT=$((PRE_RING_WAIT + 1))
+		sleep 1
+	done
+fi
+
 RING="$(find /sys/devices -path "*$NIC*" -name 'ring' 2>/dev/null | head -1 || true)"
 if [ -n "$RING" ]; then
 	say "PHASE2 sysfs ring present: ${RING#/sys}"

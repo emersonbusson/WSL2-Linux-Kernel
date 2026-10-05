@@ -101,7 +101,52 @@ static void hv_uio_remove_disconnects_open_channel_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, hv_uio_disconnect_calls, 2U);
 }
 
+static int hv_uio_test_reader_wake(struct wait_queue_entry *wait,
+				   unsigned int mode, int flags, void *key)
+{
+	unsigned int *wakes = wait->private;
+
+	(*wakes)++;
+	return 1;
+}
+
+static void hv_uio_unregister_wakes_reader_test(struct kunit *test)
+{
+	struct uio_info info = {
+		.name = "hv-uio-withdrawal-test",
+		.version = "1",
+		.irq = UIO_IRQ_CUSTOM,
+	};
+	struct uio_device *idev;
+	struct device *parent;
+	wait_queue_entry_t wait;
+	unsigned int wakes = 0;
+	int ret;
+
+	parent = root_device_register("hv-uio-withdrawal-test");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(parent));
+	ret = uio_register_device(parent, &info);
+	if (ret) {
+		root_device_unregister(parent);
+		KUNIT_FAIL(test, "UIO registration failed: %d", ret);
+		return;
+	}
+	idev = info.uio_dev;
+	get_device(&idev->dev);
+	init_waitqueue_func_entry(&wait, hv_uio_test_reader_wake);
+	wait.private = &wakes;
+	add_wait_queue(&idev->wait, &wait);
+
+	uio_unregister_device(&info);
+	KUNIT_EXPECT_PTR_EQ(test, idev->info, NULL);
+	KUNIT_EXPECT_EQ(test, wakes, 1U);
+	remove_wait_queue(&idev->wait, &wait);
+	put_device(&idev->dev);
+	root_device_unregister(parent);
+}
+
 static struct kunit_case hv_uio_mmap_test_cases[] = {
+	KUNIT_CASE(hv_uio_unregister_wakes_reader_test),
 	KUNIT_CASE(hv_uio_remove_disconnects_open_channel_test),
 	KUNIT_CASE(hv_uio_mmap_validate_test),
 	KUNIT_CASE(hv_uio_ring_mmap_page_range_test),
