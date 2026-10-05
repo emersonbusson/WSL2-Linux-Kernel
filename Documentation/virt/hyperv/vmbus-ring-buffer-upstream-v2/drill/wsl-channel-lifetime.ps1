@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory)][string]$KernelDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)]
-    [ValidateSet('retention-baseline', 'ack-candidate')][string]$Variant
+    [ValidateSet('retention-baseline', 'ack-candidate')][string]$Variant,
+    [string]$CandidateSourceCommit = $env:GITHUB_SHA
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -cne 'true' -or
@@ -29,6 +30,7 @@ $report = [ordered]@{
     schema = 1; scope = 'ordinary-wsl-protocol'; variant = $Variant
     verdict = 'INCOMPLETE'; commands_completed = 0; cleanup_errors = @()
     complete_kernel_modules_pair = $false; confidential_transitions = $false
+    harness_commit = $env:GITHUB_SHA
 }
 
 function Invoke-OwnedProcess([string]$Executable, [string[]]$Arguments, [int]$TimeoutSec = 30) {
@@ -200,13 +202,14 @@ try {
     $expectedRelease = (Get-Content (Join-Path $KernelDirectory 'kernel-release.txt') -Raw).Trim()
     $expectedSource = if ($Variant -ceq 'retention-baseline') {
         'f67a72ca25a54b58b9ae9b8dbeaed9b3c017a0bc'
-    } else { $env:GITHUB_SHA }
+    } else { $CandidateSourceCommit }
     if ($report.source_commit -cnotmatch '^[0-9a-f]{40}$' -or
         $report.source_commit -cne $expectedSource -or $expectedNotes -cnotmatch '^[0-9a-f]{64}$') {
         throw 'source or notes identity mismatch'
     }
     $report.config_sha256 = (Get-FileHash (Join-Path $KernelDirectory 'config') -Algorithm SHA256).Hash.ToLowerInvariant()
-    $selectedConfig = @('[wsl2]', "kernel=$kernel", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
+    $configKernelPath = $kernel.Replace('\', '/')
+    $selectedConfig = @('[wsl2]', "kernel=$configKernelPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
     [IO.File]::WriteAllText($config, $selectedConfig)
     $configOwned = $true
     [void](Invoke-Wsl @('--shutdown'))

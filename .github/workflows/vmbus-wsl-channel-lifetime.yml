@@ -7,14 +7,21 @@ on:
   push:
     branches: [vmbus-rescind-ack-investigation-20261005]
     paths:
-      - .github/workflows/vmbus-wsl-channel-lifetime.yml
-      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime.ps1
-      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime-tests.ps1
       - drivers/hv/**
   workflow_dispatch:
+    inputs:
+      kernel_run_id:
+        description: 'Existing kernel artifact run (empty builds both kernels)'
+        type: string
+        required: false
+      candidate_source_commit:
+        description: 'Exact candidate source commit when reusing kernel artifacts'
+        type: string
+        required: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: vmbus-upstream-global
@@ -22,6 +29,7 @@ concurrency:
 
 jobs:
   kernel:
+    if: ${{ inputs.kernel_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -74,6 +82,7 @@ jobs:
 
   ordinary-turnover:
     needs: kernel
+    if: ${{ always() && (needs.kernel.result == 'success' || (needs.kernel.result == 'skipped' && inputs.kernel_run_id != '' && inputs.candidate_source_commit != '')) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -88,14 +97,25 @@ jobs:
         with:
           name: wsl-channel-kernel-${{ matrix.variant }}
           path: protocol-kernel
+          run-id: ${{ inputs.kernel_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Verify observation and refusal gates
         shell: pwsh
         run: |
-          & 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime-tests.ps1'
+          New-Item -ItemType Directory -Force protocol-runtime | Out-Null
+          $gate = 'FAIL'
+          try {
+            & 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime-tests.ps1'
+            $gate = 'PASS'
+          } finally {
+            @{ phase = 'harness-regressions'; verdict = $gate; source = $env:GITHUB_SHA } | ConvertTo-Json | Set-Content (Join-Path $PWD 'protocol-runtime/gate-status.json')
+          }
       - name: Observe native WSL acknowledgments and physical backing
         shell: pwsh
+        env:
+          CANDIDATE_SOURCE_COMMIT: ${{ inputs.candidate_source_commit || github.sha }}
         run: |
-          & 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime.ps1' -KernelDirectory (Join-Path $PWD 'protocol-kernel') -OutputDirectory (Join-Path $PWD 'protocol-runtime') -Variant '${{ matrix.variant }}'
+          & 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime.ps1' -KernelDirectory (Join-Path $PWD 'protocol-kernel') -OutputDirectory (Join-Path $PWD 'protocol-runtime') -Variant '${{ matrix.variant }}' -CandidateSourceCommit $env:CANDIDATE_SOURCE_COMMIT
       - name: Preserve all runtime observations
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -60,8 +60,12 @@ Accept {
     if ($actual.requests -ne 1 -or $actual.acks -ne 1 -or $actual.unacknowledged -ne 0 -or $actual.rescinds -ne 1) { throw 'incorrect protocol counts' }
 }
 Accept {
-    $actual = Get-ProtocolEvidence ($trace.Replace('gpadl 0x123' + "`n", 'gpadl 0x124' + "`n"))
-    if ($actual.unacknowledged -ne 1) { throw 'wrong handle was accepted' }
+    foreach ($ending in "`n", "`r`n") {
+        $fixture = $trace.Replace("`r`n", "`n").Replace("`n", $ending)
+        $fixture = $fixture.Replace('vmbus_ongpadl_torndown: gpadl 0x123', 'vmbus_ongpadl_torndown: gpadl 0x124')
+        $actual = Get-ProtocolEvidence $fixture
+        if ($actual.unacknowledged -ne 1) { throw 'wrong handle was accepted' }
+    }
 }
 Reject { Get-ProtocolEvidence ($trace.Replace('3/3', '2/3')) }
 Reject { Get-ProtocolEvidence '' }
