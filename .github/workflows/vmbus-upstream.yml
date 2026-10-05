@@ -497,12 +497,14 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 51 tests: passed: 51$' \
+          grep -Eq 'Testing complete\. Ran 53 tests: passed: 53$' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-rndis-request' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-netvsc-completion' \
             vmbus-artifacts/kunit.log
+          grep -Eq '\[PASSED\] netvsc_tx_complete_skb_success_test$' vmbus-artifacts/kunit.log
+          grep -Eq '\[PASSED\] netvsc_tx_complete_skb_error_test$' vmbus-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_size_rounding_test \
             vmbus_buffer_size_overflow_test \

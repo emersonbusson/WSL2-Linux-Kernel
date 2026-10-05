@@ -55,7 +55,7 @@ assumed `.config` attached to an unbuilt candidate. BUILD.md has the exact
 command line and reproduction commands.
 
 CURRENT LOCAL EVIDENCE
-- Linked x86_64 QEMU/KUnit: 51/51, including the production rescind-retention
+- Linked x86_64 QEMU/KUnit: 53/53, including the production rescind-retention
   test, UIO channel-removal closure and distinct-allocation identity assertions.
 - W=1/C=2 with Sparse v0.6.5-rc1: baseline 4 / candidate 5; INTRODUCED 1,
   REMOVED 0, UNCHANGED 4. Added count is an unchanged flexible protocol
@@ -132,3 +132,10 @@ diagnostics and complete owner reconciliation. No ordering guarantee is
 inferred. The default ordinary lifecycle run is unchanged.
 d4137f151057a06a5d0d96018bbca6aa2d5fba367ee7bb86f5e43f63b8c761dd  drill/host-rescind.ps1
 8449ebc6d95979b18f80fa404fa832368f98a1f8e47dc30482ad264e6a17a915  drill/test-host-rescind.ps1
+
+CI COUNT FOLLOW-UP
+Build 37259972312 executes all 53 mainline tests successfully, including both
+new skb-backed cases, but its old exact-count assertion still expects 51.
+WSL backport and arm64 jobs succeed. The named-case/count gate now requires
+53 and both new cases. A fresh workflow qualifies the corrected gate; no
+production regression is inferred from the obsolete count assertion.
