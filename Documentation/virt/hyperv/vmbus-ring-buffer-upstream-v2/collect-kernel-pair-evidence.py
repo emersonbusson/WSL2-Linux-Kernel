@@ -169,7 +169,7 @@ def collect(args):
         "modules_hash": observe(lambda: sha256(root / "modules.vhdx"), "") == manifest["modules_sha256"],
         "configuration_pair": observe(lambda: configuration_pair(args.wslconfig, args.windows_kernel, args.windows_modules), False),
         "module_file": bool(module) and observe(lambda: sha256(module), "") == args.module_sha256,
-        "module_vermagic": observe(lambda: command(["modinfo", "-F", "vermagic", "uio_hv_generic"]).decode().strip(), "") == manifest["module_vermagic"],
+        "module_vermagic": observe(lambda: vermagic_matches(command(["modinfo", "-F", "vermagic", "uio_hv_generic"]), manifest["module_vermagic"]), False),
         "readable_kernel_log": log is not None,
         "zero_kernel_fatals": fatals == 0,
     }
@@ -184,6 +184,10 @@ def collect(args):
         "kernel_fatals": fatals, "module_loaded": Path("/sys/module/uio_hv_generic").exists(),
         "checks": checks,
     })
+
+
+def vermagic_matches(raw, expected):
+    return raw.decode().strip() == expected.strip()
 
 
 def unique_object(pairs):

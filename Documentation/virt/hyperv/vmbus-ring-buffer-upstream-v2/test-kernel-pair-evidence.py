@@ -63,6 +63,15 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 collector.validate(report)
 
+    def test_vermagic_whitespace_and_abi_identity(self):
+        expected = "6.18.test SMP preempt mod_unload modversions "
+        self.assertTrue(collector.vermagic_matches((expected + "\n").encode(), expected))
+        self.assertTrue(collector.vermagic_matches(expected.rstrip().encode(), expected))
+        for changed in [expected.replace("6.18", "6.19"),
+                        expected.replace(" preempt", ""),
+                        expected.replace(" modversions", "")]:
+            self.assertFalse(collector.vermagic_matches(changed.encode(), expected))
+
     def test_duplicate_json_refused(self):
         with self.assertRaises(ValueError):
             collector.unique_object([("verdict", "PASS"), ("verdict", "FAIL")])
