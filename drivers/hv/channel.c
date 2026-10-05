@@ -1457,14 +1457,18 @@ static struct vmbus_channel_msginfo *vmbus_alloc_teardown_info(void)
 /*
  * vmbus_teardown_gpadl - Teardown the specified GPADL handle
  *
- * A teardown acknowledgment clears the handle. A host rescind also revokes
- * the device's GPADLs under the upstream VMBus lifecycle contract; a local
- * suspend/unload mark does not. VMBus-owned memory is reclaimed only after
- * the driver's remove/close path has quiesced.
+ * Only a matching teardown acknowledgment clears the handle. A host rescind
+ * does not replace that acknowledgment, but still permits a teardown request
+ * while the channel ID is held. A local suspend/unload mark cannot authorize
+ * a request against an old connection. VMBus-owned memory is reclaimed only
+ * after the driver's remove/close path has quiesced.
  */
-int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
-			   struct vmbus_buffer *buffer,
-			   vmbus_gpadl_info_alloc_fn alloc_info)
+int vmbus_gpadl_teardown_request(struct vmbus_channel *channel,
+				 struct vmbus_buffer *buffer,
+				 vmbus_gpadl_info_alloc_fn alloc_info,
+				 struct vmbus_connection *connection,
+				 vmbus_gpadl_teardown_post_fn post,
+				 unsigned long timeout)
 {
 	struct vmbus_channel_gpadl_teardown *msg;
 	struct vmbus_channel_msginfo *info;
@@ -1481,11 +1485,10 @@ int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
 	    buffer->gpadl_state == VMBUS_GPADL_TEARING_DOWN)
 		return -EINPROGRESS;
 
+	if (channel->offermsg.child_relid == INVALID_RELID)
+		return -ENODEV;
+
 	rescind_source = vmbus_channel_rescind_source(channel);
-	if (rescind_source == VMBUS_RESCIND_HOST)
-		return vmbus_gpadl_teardown_result(channel, buffer,
-					   VMBUS_GPADL_TEARDOWN_HOST_RESCIND,
-					   -ENODEV);
 	if (rescind_source == VMBUS_RESCIND_LOCAL)
 		return vmbus_gpadl_teardown_result(channel, buffer,
 					   VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND,
@@ -1506,7 +1509,8 @@ int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
 	}
 
 	init_completion(&info->waitevent);
-	info->waiting_channel = channel;
+	/* Rescind wakeups are not teardown replies; require the actual ACK. */
+	info->waiting_channel = NULL;
 
 	msg = (struct vmbus_channel_gpadl_teardown *)info->msg;
 
@@ -1514,35 +1518,36 @@ int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
 	msg->child_relid = channel->offermsg.child_relid;
 	msg->gpadl = buffer->gpadl_handle;
 
-	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
-	list_add_tail(&info->msglistentry,
-		      &vmbus_connection.chn_msg_list);
-	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
+	spin_lock_irqsave(&connection->channelmsg_lock, flags);
+	list_add_tail(&info->msglistentry, &connection->chn_msg_list);
+	spin_unlock_irqrestore(&connection->channelmsg_lock, flags);
 
 	rescind_source = vmbus_channel_rescind_source(channel);
-	if (rescind_source != VMBUS_RESCIND_NONE) {
+	if (rescind_source == VMBUS_RESCIND_LOCAL ||
+	    channel->offermsg.child_relid != msg->child_relid) {
 		vmbus_gpadl_teardown_cancel(buffer);
-		if (rescind_source == VMBUS_RESCIND_HOST)
-			event = VMBUS_GPADL_TEARDOWN_HOST_RESCIND;
-		else
-			event = VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND;
+		event = VMBUS_GPADL_TEARDOWN_LOCAL_RESCIND;
 		ret = vmbus_gpadl_teardown_result(channel, buffer, event,
 						  -ENODEV);
 		goto cleanup_info;
 	}
 
-	ret = vmbus_post_msg(msg, sizeof(struct vmbus_channel_gpadl_teardown),
-			     true);
+	ret = post(connection, info);
 
 	trace_vmbus_teardown_gpadl(msg, ret);
 
 	if (ret)
 		goto resolve_result;
 
-	wait_for_completion(&info->waitevent);
+	/* Bound transport failure; expiry retains the GPADL and its backing. */
+	if (!wait_for_completion_timeout(&info->waitevent, timeout)) {
+		ret = -ETIMEDOUT;
+		goto resolve_result;
+	}
 
 	if (info->response.gpadl_torndown.header.msgtype ==
-	    CHANNELMSG_GPADL_TORNDOWN) {
+	    CHANNELMSG_GPADL_TORNDOWN &&
+	    info->response.gpadl_torndown.gpadl == buffer->gpadl_handle) {
 		event = VMBUS_GPADL_TEARDOWN_ACK;
 		ret = 0;
 	} else {
@@ -1570,13 +1575,29 @@ resolve_result:
 	ret = vmbus_gpadl_teardown_result(channel, buffer, event, ret);
 
 cleanup_info:
-	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
+	spin_lock_irqsave(&connection->channelmsg_lock, flags);
 	list_del(&info->msglistentry);
-	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
+	spin_unlock_irqrestore(&connection->channelmsg_lock, flags);
 
 	kfree(info);
 
 	return ret;
+}
+
+static int vmbus_gpadl_teardown_post_real(struct vmbus_connection *connection,
+					  struct vmbus_channel_msginfo *info)
+{
+	return vmbus_post_msg(info->msg,
+			      sizeof(struct vmbus_channel_gpadl_teardown), true);
+}
+
+int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
+			   struct vmbus_buffer *buffer,
+			   vmbus_gpadl_info_alloc_fn alloc_info)
+{
+	return vmbus_gpadl_teardown_request(channel, buffer, alloc_info,
+					  &vmbus_connection,
+					  vmbus_gpadl_teardown_post_real, 5 * HZ);
 }
 
 int vmbus_teardown_gpadl(struct vmbus_channel *channel,

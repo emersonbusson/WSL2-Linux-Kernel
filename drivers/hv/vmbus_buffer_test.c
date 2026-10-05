@@ -149,6 +149,10 @@ static void vmbus_gpadl_rescind_retains_state_test(struct kunit *test)
 			expected = states[i] == VMBUS_GPADL_PENDING ||
 				   states[i] == VMBUS_GPADL_TEARING_DOWN ?
 				   -EINPROGRESS : -ENODEV;
+			if (origin && states[i] == VMBUS_GPADL_LIVE)
+				expected = -ENOMEM;
+			if (origin && states[i] == VMBUS_GPADL_UNCERTAIN)
+				expected = -EINVAL;
 			KUNIT_EXPECT_EQ(test, ret, expected);
 			KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 42U);
 			KUNIT_EXPECT_EQ(test, buffer.gpadl_state, states[i]);
@@ -211,7 +215,7 @@ static void vmbus_gpadl_partial_post_rescind_test(struct kunit *test)
 
 	ret = __vmbus_teardown_gpadl(&channel, &buffer,
 				     vmbus_test_alloc_teardown_fail);
-	KUNIT_EXPECT_EQ(test, ret, -ENODEV);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 	KUNIT_EXPECT_EQ(test, buffer.gpadl_handle, 44U);
 	KUNIT_EXPECT_EQ(test, buffer.gpadl_state, VMBUS_GPADL_UNCERTAIN);
 	before = vmbus_test_retained_count();
@@ -221,6 +225,175 @@ static void vmbus_gpadl_partial_post_rescind_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, owner->gpadl_state, VMBUS_GPADL_UNCERTAIN);
 	KUNIT_EXPECT_EQ(test, owner->size, PAGE_SIZE);
 	vmbus_test_drop_retained(owner);
+}
+
+enum vmbus_test_teardown_reply {
+	VMBUS_TEST_REPLY_ACK,
+	VMBUS_TEST_REPLY_NONE,
+	VMBUS_TEST_REPLY_WRONG_HANDLE,
+	VMBUS_TEST_REPLY_WRONG_TYPE,
+	VMBUS_TEST_REPLY_POST_FAILURE,
+};
+
+struct vmbus_teardown_test_context {
+	struct vmbus_connection connection;
+	struct vmbus_channel channel;
+	struct vmbus_buffer buffer;
+	struct kunit *test;
+	enum vmbus_test_teardown_reply reply;
+	unsigned int post_calls;
+};
+
+static struct vmbus_channel_msginfo *vmbus_test_alloc_teardown(void)
+{
+	return kzalloc(sizeof(struct vmbus_channel_msginfo) +
+		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
+}
+
+static int vmbus_test_post_teardown(struct vmbus_connection *connection,
+				    struct vmbus_channel_msginfo *info)
+{
+	struct vmbus_teardown_test_context *ctx =
+		container_of(connection, struct vmbus_teardown_test_context,
+			     connection);
+	struct vmbus_channel_gpadl_teardown *msg = (void *)info->msg;
+	struct vmbus_channel_gpadl_torndown response = {
+		.header.msgtype = CHANNELMSG_GPADL_TORNDOWN,
+		.gpadl = msg->gpadl,
+	};
+
+	ctx->post_calls++;
+	KUNIT_EXPECT_EQ(ctx->test, msg->header.msgtype, CHANNELMSG_GPADL_TEARDOWN);
+	KUNIT_EXPECT_EQ(ctx->test, msg->child_relid, 71U);
+	KUNIT_EXPECT_EQ(ctx->test, msg->gpadl, 51U);
+	KUNIT_EXPECT_PTR_EQ(ctx->test, info->waiting_channel, NULL);
+	if (ctx->reply == VMBUS_TEST_REPLY_POST_FAILURE)
+		return -EIO;
+	if (ctx->reply == VMBUS_TEST_REPLY_NONE)
+		return 0;
+	if (ctx->reply == VMBUS_TEST_REPLY_WRONG_HANDLE)
+		response.gpadl++;
+	if (ctx->reply == VMBUS_TEST_REPLY_WRONG_TYPE)
+		response.header.msgtype = CHANNELMSG_GPADL_CREATED;
+	vmbus_complete_gpadl_teardown(connection, &response);
+	return 0;
+}
+
+static struct vmbus_teardown_test_context *
+vmbus_test_teardown_context(struct kunit *test)
+{
+	struct vmbus_teardown_test_context *ctx;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return NULL;
+	ctx->test = test;
+	ctx->buffer.gpadl_handle = 51;
+	ctx->buffer.gpadl_state = VMBUS_GPADL_LIVE;
+	ctx->channel.rescind = true;
+	ctx->channel.rescind_from_host = true;
+	ctx->channel.offermsg.child_relid = 71;
+	INIT_LIST_HEAD(&ctx->connection.chn_msg_list);
+	spin_lock_init(&ctx->connection.channelmsg_lock);
+	return ctx;
+}
+
+static int vmbus_test_teardown_request(struct vmbus_teardown_test_context *ctx)
+{
+	return vmbus_gpadl_teardown_request(&ctx->channel, &ctx->buffer,
+					  vmbus_test_alloc_teardown,
+					  &ctx->connection,
+					  vmbus_test_post_teardown, 1);
+}
+
+static void vmbus_host_rescind_teardown_ack_test(struct kunit *test)
+{
+	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), 0);
+	KUNIT_EXPECT_EQ(test, ctx->post_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_handle, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_state, VMBUS_GPADL_NONE);
+	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&ctx->buffer));
+	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->connection.chn_msg_list));
+}
+
+static void vmbus_test_teardown_failure(struct kunit *test,
+					enum vmbus_test_teardown_reply reply,
+					int expected)
+{
+	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	ctx->reply = reply;
+	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), expected);
+	KUNIT_EXPECT_EQ(test, ctx->post_calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_handle, 51U);
+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&ctx->buffer));
+	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->connection.chn_msg_list));
+}
+
+static void vmbus_host_rescind_teardown_timeout_test(struct kunit *test)
+{
+	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_NONE, -ETIMEDOUT);
+}
+
+static void vmbus_host_rescind_teardown_wrong_handle_test(struct kunit *test)
+{
+	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_WRONG_HANDLE,
+				    -ETIMEDOUT);
+}
+
+static void vmbus_host_rescind_teardown_wrong_type_test(struct kunit *test)
+{
+	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_WRONG_TYPE, -ENODEV);
+}
+
+static void vmbus_host_rescind_teardown_post_failure_test(struct kunit *test)
+{
+	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_POST_FAILURE, -EIO);
+}
+
+static void vmbus_local_rescind_skips_teardown_test(struct kunit *test)
+{
+	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	ctx->channel.rescind_from_host = false;
+	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), -ENODEV);
+	KUNIT_EXPECT_EQ(test, ctx->post_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_state, VMBUS_GPADL_LIVE);
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_handle, 51U);
+}
+
+static void vmbus_invalid_relid_skips_teardown_test(struct kunit *test)
+{
+	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	ctx->channel.offermsg.child_relid = INVALID_RELID;
+	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), -ENODEV);
+	KUNIT_EXPECT_EQ(test, ctx->post_calls, 0U);
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_handle, 51U);
+}
+
+static void vmbus_host_rescind_teardown_late_ack_test(struct kunit *test)
+{
+	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
+	struct vmbus_channel_gpadl_torndown response = {
+		.header.msgtype = CHANNELMSG_GPADL_TORNDOWN,
+		.gpadl = 51,
+	};
+
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	ctx->reply = VMBUS_TEST_REPLY_NONE;
+	KUNIT_ASSERT_EQ(test, vmbus_test_teardown_request(ctx), -ETIMEDOUT);
+	/* Run the production response matcher after its waiter has been freed. */
+	vmbus_complete_gpadl_teardown(&ctx->connection, &response);
+	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->connection.chn_msg_list));
+	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl_handle, 51U);
+	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&ctx->buffer));
 }
 
 static void vmbus_gpadl_teardown_ack_failure_test(struct kunit *test)
@@ -449,6 +622,14 @@ static struct kunit_case vmbus_gpadl_lifetime_test_cases[] = {
 	KUNIT_CASE(vmbus_buffer_size_rounding_test),
 	KUNIT_CASE(vmbus_shared_buffer_path_selection_test),
 	KUNIT_CASE(vmbus_gpadl_rescind_retains_state_test),
+	KUNIT_CASE(vmbus_host_rescind_teardown_ack_test),
+	KUNIT_CASE(vmbus_host_rescind_teardown_timeout_test),
+	KUNIT_CASE(vmbus_host_rescind_teardown_wrong_handle_test),
+	KUNIT_CASE(vmbus_host_rescind_teardown_wrong_type_test),
+	KUNIT_CASE(vmbus_host_rescind_teardown_post_failure_test),
+	KUNIT_CASE(vmbus_local_rescind_skips_teardown_test),
+	KUNIT_CASE(vmbus_invalid_relid_skips_teardown_test),
+	KUNIT_CASE(vmbus_host_rescind_teardown_late_ack_test),
 	KUNIT_CASE(vmbus_gpadl_create_response_rescind_test),
 	KUNIT_CASE(vmbus_gpadl_partial_post_rescind_test),
 	KUNIT_CASE(vmbus_gpadl_teardown_alloc_failure_test),

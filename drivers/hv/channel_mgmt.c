@@ -1459,26 +1459,23 @@ static void vmbus_onmodifychannel_response(struct vmbus_channel_message_header *
  * Find the matching request, copy the response and signal the requesting
  * thread.
  */
-static void vmbus_ongpadl_torndown(
-			struct vmbus_channel_message_header *hdr)
+void vmbus_complete_gpadl_teardown(struct vmbus_connection *connection,
+				   struct vmbus_channel_gpadl_torndown *gpadl_torndown)
 {
-	struct vmbus_channel_gpadl_torndown *gpadl_torndown;
 	struct vmbus_channel_msginfo *msginfo;
 	struct vmbus_channel_message_header *requestheader;
 	struct vmbus_channel_gpadl_teardown *gpadl_teardown;
 	unsigned long flags;
-
-	gpadl_torndown = (struct vmbus_channel_gpadl_torndown *)hdr;
 
 	trace_vmbus_ongpadl_torndown(gpadl_torndown);
 
 	/*
 	 * Find the open msg, copy the result and signal/unblock the wait event
 	 */
-	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
+	spin_lock_irqsave(&connection->channelmsg_lock, flags);
 
-	list_for_each_entry(msginfo, &vmbus_connection.chn_msg_list,
-				msglistentry) {
+	list_for_each_entry(msginfo, &connection->chn_msg_list,
+			    msglistentry) {
 		requestheader =
 			(struct vmbus_channel_message_header *)msginfo->msg;
 
@@ -1496,7 +1493,13 @@ static void vmbus_ongpadl_torndown(
 			}
 		}
 	}
-	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
+	spin_unlock_irqrestore(&connection->channelmsg_lock, flags);
+}
+
+static void vmbus_ongpadl_torndown(struct vmbus_channel_message_header *hdr)
+{
+	vmbus_complete_gpadl_teardown(&vmbus_connection,
+				      (struct vmbus_channel_gpadl_torndown *)hdr);
 }
 
 /*

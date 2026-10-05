@@ -524,6 +524,8 @@ enum vmbus_gpadl_teardown_event {
 
 typedef int (*vmbus_reencrypt_fn)(unsigned long, int);
 typedef struct vmbus_channel_msginfo *(*vmbus_gpadl_info_alloc_fn)(void);
+typedef int (*vmbus_gpadl_teardown_post_fn)(struct vmbus_connection *connection,
+					 struct vmbus_channel_msginfo *info);
 
 /*
  * The helpers below are shared with vmbus_buffer_test.c through the
@@ -564,6 +566,14 @@ void __vmbus_free_buffer(struct vmbus_buffer *buffer,
 int __vmbus_teardown_gpadl(struct vmbus_channel *channel,
 			   struct vmbus_buffer *buffer,
 			   vmbus_gpadl_info_alloc_fn alloc_info);
+int vmbus_gpadl_teardown_request(struct vmbus_channel *channel,
+				 struct vmbus_buffer *buffer,
+				 vmbus_gpadl_info_alloc_fn alloc_info,
+				 struct vmbus_connection *connection,
+				 vmbus_gpadl_teardown_post_fn post,
+				 unsigned long timeout);
+void vmbus_complete_gpadl_teardown(struct vmbus_connection *connection,
+				   struct vmbus_channel_gpadl_torndown *response);
 
 extern struct list_head vmbus_retained_buffers;
 extern struct mutex vmbus_retained_buffers_lock;
