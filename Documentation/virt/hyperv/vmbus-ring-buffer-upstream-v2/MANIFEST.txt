@@ -1,15 +1,14 @@
 MANIFEST — VMBus upstream v2 reproduction dossier
 ==================================================
-Updated: 2026-10-04
-Status: HOLD; host-rescind panic correction awaits exact-source qualification.
+Updated: 2026-10-05
+Status: source/ordinary-host validation complete; unsent; local install/CoCo PARTIAL.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
 Applied source tip: 6af42b4cdbc34ae5c68b3a05f301ee0860cf7e20
-(previous 89fd95348ba1 plus UIO rescind callback withdrawal)
-Mail shape: cover 0/13, thirteen code mails. Apply hashes, not the WSL fork.
-Cover is intentionally outside series/SHA256SUMS.
+Production mail identities are authoritative; the WSL fork is a separate backport.
+Mail shape: cover 0/13 and thirteen code mails. Nothing has been sent.
 
 COVER
-cdcb1ab8193d9736618a1e9e043d17086c7f97c3f15fcbbb14cfafe20e0cf658  series/0000-cover-letter.patch
+0607a3e0a88e4db0fea9c232d6878fafa7f9e6a9504d6da05036d6850d651e92  series/0000-cover-letter.patch
 lines=200
 
 PRODUCTION MAILS
@@ -27,165 +26,108 @@ efca76ff8197c6b12baaa9afa7a9e753082a728b759a11bd47b5bda30660c31b  0011-requestor
 d11683ba206131556e38168e78d3091e3adebf8f6cbed244664312d876c9441b  0012-rndis-request-kvmalloc.patch
 73052cc8c2b30aed38bdf58d7a375cf4c348df4d3e9029d9f07c1cd374cac690  0013-netvsc-empty-completion-null.patch
 
-BUILD AND HARNESS FILES
-61370f986aae0a1393a5d788562b21bd617079ed10a543a9db1ede5e6df53989  BUILD.md
-0eb4773dc46d7bfa4f3591e4887e210f87fc2e921013fe4909dd045f5b2f1d55  SEQUENCE.md
+REPRODUCTION TOOLS
 5753a1b2f07924a03f5f6dd1ef525d89c6f9e6964d57054ff1a96b9e606f202b  coco-capability-preflight.sh
 640fd94b56bab94532a44d1e2fb6328efa07eb452d0b6961504ec9160763fd0e  coco-collect.sh
 ee5f581ac79a080ec1a64cb23b9779b277b1d9ba9799a80b695e0a3a5cb234c5  coco-result.schema.json
 da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-invariants.py
 5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
+88b91fd671e5fde5bea36f089a7b4c966b1fc077a3ae94a4d76fe678deb6797d  collect-kernel-pair-evidence.py
 eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
+ed18fb40d3b06e0a51801da09e38359f0ac935b42d64300b84211194e66eacba  test-kernel-pair-evidence.py
 48d5f977a2a1893031ea7bfa4bd60d9013274f4ec0338899683eada38c04bd52  drill/build-drill-kernel.sh
+d4137f151057a06a5d0d96018bbca6aa2d5fba367ee7bb86f5e43f63b8c761dd  drill/host-rescind.ps1
 8aaeb1bb0b125c2c2f9882e894a01deba82a70dd0bf7eae10afd2c797f95ef6d  drill/init
-2d9ce71900eadb7f2501c42fd8fa93d6b8a257af691b400f82dd9cf1108bae8c  drill/vmbus-lifecycle-drill.sh
-e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
-16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
-311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
 41cd537e7b345651ab758b516fa6d714d39a504a1f83381f020fc55b8292b291  drill/new-drill-vm.ps1
+cb22f517babcae13d5e5679f426e6adfe538018b002f79e643bc653d85660adf  drill/owner-trace-accounting.py
+8449ebc6d95979b18f80fa404fa832368f98a1f8e47dc30482ad264e6a17a915  drill/test-host-rescind.ps1
 ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
 afdcb6ee7ee3dc817b141c233e0bfc8c3e08ea077bb17338b675d9d422af0861  drill/test-serial-reader.ps1
-cb22f517babcae13d5e5679f426e6adfe538018b002f79e643bc653d85660adf  drill/owner-trace-accounting.py
+16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
+e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
+2d9ce71900eadb7f2501c42fd8fa93d6b8a257af691b400f82dd9cf1108bae8c  drill/vmbus-lifecycle-drill.sh
+311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
 
-Recipe: tinyconfig plus explicit symbols; embedded initramfs, static helper,
-EFI stub, serial console, boot-enabled opaque owner event tracing (512K/CPU).
-Function tracing, KUnit, modules, KASLR and debug-info are disabled in the
-runtime image. The resolved config is a required build artifact, not an
-assumed `.config` attached to an unbuilt candidate. BUILD.md has the exact
-command line and reproduction commands.
+CURRENT SOURCE AND HOST EVIDENCE
+Build 37265334683 on e12825e84515 passes all three jobs: thirteen sequential
+x86_64/arm64 stages, cumulative/per-mail strict style, CoCo static conditions,
+mainline linked QEMU KUnit 54/54 and distinct WSL backport KUnit 17/17.
+ARM's initial Fixes-object fetch fails on changed shallow metadata before
+application; the unchanged exact-source job retry passes. Both attempts stay.
+All thirteen mail bytes match the local 21-file committed mainline source.
 
-CURRENT LOCAL EVIDENCE
-- Linked x86_64 QEMU/KUnit: 53/53, including the production rescind-retention
-  test, UIO channel-removal closure and distinct-allocation identity assertions.
-- W=1/C=2 with Sparse v0.6.5-rc1: baseline 4 / candidate 5; INTRODUCED 1,
-  REMOVED 0, UNCHANGED 4. Added count is an unchanged flexible protocol
-  declaration re-emitted from a new test TU. No new diagnostic kind.
-- Strict per-mail checkpatch: zero errors/checks; exactly one accepted
-  FILE_PATH_CHANGES warning on 0002, 0010, 0012, 0013, no others.
-- CoCo static predicates 6/6; validator fixtures 18/18.
-- Lifecycle decision fixtures 15/15; owner accounting fixtures 22/22;
-  independent reader observer fixtures 3/3.
-- series/SHA256SUMS: verify all thirteen before applying/building.
+Local KUnit has 21 VMBus, 14 UIO, 11 completion, 4 RNDIS and 4 refcount cases.
+Two real-skb cases cover host success/error, send-slot release, queue 1
+accounting/statistics, synchronous disposal and duplicate refusal. An actual
+UIO unregister case pins its notifier, withdraws info and wakes a waiter.
+W=1/C=2 reports four inherited diagnostics, no new kind. Its configuration
+differs from the preceding matched 4/5 comparison; neither is Sparse-clean.
+Static invariants 6/6, checker fixtures 18/18, schema fixtures 11/11,
+owner fixtures 22/22, lifecycle fixtures 15/15 and native observer 3/3 pass.
+The actual native named-pipe burst and seven host-target refusal/effect cases
+pass. Missing/conflicting transport remains PARTIAL; unsafe ownership FAIL.
 
-HOSTED EXACT-BYTE QUALIFICATION
-Build 37242875605 on dossier 98a403eb6ba8 succeeds: all thirteen stages,
-x86_64/arm64 strict style/build, mainline KUnit 51/51 and WSL KUnit 16/16.
-Runtime 37245264874 on capture dossier 444c7968ad16 succeeds on both
-candidate legs: 100 cycles, five lifecycle subgates, exhausted-buddy ring
-allocation and zero OOM/splat/fault. Complete checksum-verified owner
-captures: windows-latest 680 created/669 reclaimed/11 active; windows-2025
-683 created/672 reclaimed/11 active. Zero missing creates or unsafe events.
-All thirteen production hashes are unchanged between those dossiers.
+Controlled runtime 37264609327 on f67a72ca25a5 passes both candidate jobs:
+100 cycles, all five lifecycle subgates, a matching real host offer-rescind,
+target disappearance, zero splat/fault and complete verified owner capture.
+windows-2025: 684 creates / 673 reclaimed / 9 active / 2 retained; order-7+
+supply 499->25->0, fragmentation PASS without OOM.
+windows-latest: 683 / 672 / 9 / 2; supply 493->26->1, fragmentation PARTIAL.
+The two retentions preserve uncertain host ownership, not a revocation proof.
+Both baseline lifecycles fail. Baseline-2025 fragmentation exits 137 (OOM);
+baseline-latest fragmentation is INCONCLUSIVE. Aggregate workflow is failure
+because of baselines; candidate job success is not full fragmentation PASS.
 
-Both baseline legs fail restoration. windows-2025 baseline additionally
-OOM-kills the fragmentation shell, exit 137. Its zero splat/fault fields do
-not imply zero OOM. The runtime workflow's aggregate conclusion is failure.
-Earlier runtime 37242875661 has one complete candidate lifecycle but corrupt
-owner transfer; another candidate and one baseline timeout in phase 1.
-Their cause remains UNPROVEN. Subsequent success does not rule out a
-timing-dependent hang. Builds 37238479046/37239830275 and runtime
-37238479048 are preserved failed attempts, not relabeled PASS.
+PRECEDING NEGATIVE EVIDENCE
+37261427641 exposes a real stale-UIO-callback panic after netvsc restoration
+in windows-2025; the other candidate starts sysfs mmap before UIO readiness
+and publishes maps=0. Current 0010 removes private rescind registration and
+uses ordinary VMBus unregister. The harness awaits UIO readiness without
+relaxing the independent mapping verdict. The corrected host sequence passes.
+37264606869 executes WSL 17/17 but still asserts four instead of five UIO
+cases. CI-only e12825e84515 corrects that assertion; the fresh build passes.
+37259972312 runs mainline 53/53 but asserts old 51; preceding CI corrects it.
+37242875661 has corrupted owner transport and phase-1 timeouts; their cause
+remains unproven. A later successful run does not exclude a timing-dependent
+hang. Earlier style/Fixes fetch failures remain preserved, never relabeled.
+37245264874 qualifies the preceding 934ef265c4b8 production bytes, including
+both exhausted-buddy legs and verified 680/683-owner capture. Those results
+are historical and do not substitute for current exact-source qualification.
 
-NOT QUALIFIED
-Real host-controlled rescind/GPADL response ordering, confidential page-state
-transitions and non-NULL skb completion. An ordinary guest does not exercise
-the chunked confidential allocator path. The overall hardware status stays
-PARTIAL. Review readiness follows the explicit disclosure policy.
+LOCAL WSL PAIR AND ACTIONS IMPORT
+Current kernel SHA-256:
+106bb9d96897064a73d7ffaafb8285ba62cf3e888d3e812f25158458dcd414b5
+Current UIO module SHA-256:
+2b7d6f309a647bf053f63a614a1403b34235ae37da76a1bbff3920cf2ed26c76
+Independent VHDX-to-raw/debugfs readback verifies all 738 modules.
+VHDX SHA-256:
+3f28249d5c5b652073b3887f4b68a42f55445845cb8f2efaf8bf4e3161f252a9
+Immutable pair manifest SHA-256:
+c32274c7347c85677cb9507f40f4fa91f2181c76c7c6128505e5e971399e84bc
+Isolated QEMU validates the image, three supplied modules and zero-module
+boot; a supplied invalid module is refused despite a successful boot.
+No Hyper-V UIO execution under ordinary QEMU is claimed.
 
-BUNDLE LIMITS
-No confidential transition-failure injection delta is supplied. No runtime
-chunk/order-descent counters are supplied. A source check or fixture does
-not close COCO-1..5. Unobserved rows/subchecks remain not_run/PARTIAL.
-coco-collect.sh assembles a draft; TODO placeholders must be completed and
-JSON Schema validation performed before a result is usable.
+The collector checks the manifest pair, executing GNU build ID, fresh boot,
+both configuration keys, installed UIO hash/vermagic and fatal-free readable
+kernel logs. Six parser/refusal fixtures pass. Raw host paths/addresses and
+logs are excluded from the public report; counters and log digest remain.
+Actions 37266143176 archives the byte-matched actual pre-install FAIL report:
+7824922a6101ceaf2d2ab149aff63db6204f3c396c6ad5d16b557dc4439e21db
+The predecessor is still executing. No local installation or restart occurred.
+Report validation PASS is separate from runtime PASS. The versioned Windows
+path still refuses execution custody/provenance admission; independent
+container-content proof alone does not remove that refusal.
 
-Owner capture must pass its compressed-transport SHA-256 checksum and
-include boot metadata, complete per-CPU statistics,
-zero overrun/dropped events and the end marker. The analyzer never logs
-raw lines or addresses. Active owners are not automatically leaks.
-No email has been sent. The operator sends the qualified frozen package.
-
-CAPTURE TRANSPORT
-Numbered compressed rows travel in three replicas. Only complete original
-packed SHA-256 verification permits reconciliation; missing/conflicting
-rows remain PARTIAL. All 22 analyzer fixtures and the actual native
-named-pipe reader burst pass. Runtime 37245264874 validates this transport
-against the unchanged production mails. The final cover includes the
-measured results and all outstanding hardware/protocol limitations.
-No email or host activation occurred.
-
-FINAL SKB REGRESSION FOLLOW-UP
-Only netvsc_completion_test.c changes from source 934ef265c4b8; production
-behavior and the runtime harness remain byte-identical. Local linked QEMU
-KUnit now passes 53/53 (11 netvsc completion cases). Real skb success/error
-cases exercise production routing, send-slot release, queue 1 accounting,
-statistics and synchronous single destruction, including duplicate refusal.
-Confidential DMA remains unqualified. Hosted build/runtime will bind the
-new 0013 mail hash before refreezing the package. No email was sent.
-
-OPTIONAL HOST RESCIND EXPERIMENT
-Manual runtime input host_rescind=true enables the bounded post-lifecycle
-NIC-removal phase. The exact created VM GUID and sole drill-nic adapter are
-verified before removal. Seven refusal/effect fixtures pass. Qualification
-requires guest disappearance plus the matching offer-rescind trace, clean
-diagnostics and complete owner reconciliation. No ordering guarantee is
-inferred. The default ordinary lifecycle run is unchanged.
-d4137f151057a06a5d0d96018bbca6aa2d5fba367ee7bb86f5e43f63b8c761dd  drill/host-rescind.ps1
-8449ebc6d95979b18f80fa404fa832368f98a1f8e47dc30482ad264e6a17a915  drill/test-host-rescind.ps1
-
-CI COUNT FOLLOW-UP
-Build 37259972312 executes all 53 mainline tests successfully, including both
-new skb-backed cases, but its old exact-count assertion still expects 51.
-WSL backport and arm64 jobs succeed. The named-case/count gate now requires
-53 and both new cases. A fresh workflow qualifies the corrected gate; no
-production regression is inferred from the obsolete count assertion.
-
-HOST RESCIND FAILURE AND CORRECTION
-Build 37261428477 passes all three jobs and 53 mainline cases. Ordinary
-runtime 37259972311 passes both candidate legs with complete owner capture
-(684/678 creates; 673/667 reclaimed; 11 active each); both baselines fail.
-Controlled-rescind run 37261427641 exposes a real windows-2025 panic in
-uio_event_notify from hv_uio_rescind after the adapter has returned to
-netvsc. The UIO callback survives the driver replacement and accesses the
-wrong private data. The other candidate publishes sysfs maps=0 before UIO
-channel readiness and never requests host removal. Preserve both failures.
-
-The correction removes the redundant UIO rescind callback and uses ordinary
-VMBus device unregistration, which already withdraws UIO info, wakes readers
-and reports EIO/POLL_HUP. A real registered-UIO withdrawal KUnit case pins
-the notifier device, verifies info withdrawal and observes reader wakeup.
-The lifecycle harness starts the sysfs helper only after the UIO helper has
-published readiness; maps=0 remains a failure. New gates require mainline
-54 and WSL backport 17 cases. No email or local promotion is qualified yet.
-
-Current local correction: linked x86_64 QEMU KUnit 54/54 PASS, including
-actual UIO unregister/wakeup. Strict cumulative/per-mail thirteen-stage
-checks pass; full-schema fixtures 11/11 and static invariants 6/6 pass.
-Hosted build and controlled host rescind remain pending.
-
-
-WSL COUNT CORRECTION
-Run 37264606869 reaches the new backport suite but its per-suite assertion
-still expects four UIO tests. It must require five alongside total 17 and the
-named real UIO withdrawal case. This correction changes CI only; the runtime
-already in progress is retained on unchanged production bytes.
-
-
-LOCAL OBSERVATION IMPORT
-collect-kernel-pair-evidence.py replaces stale fixed hashes with manifest,
-executing GNU build ID, fresh boot, configuration-pair, installed-module and
-kernel-log checks. Six parser/refusal fixtures pass. Actions evidence_only
-validates and archives a sanitized operator report without a build; report
-validation never proves a runner boot or confidential-platform execution.
-The initial local observation is FAIL: the predecessor is still executing.
-No local installation or restart occurred.
-
-CURRENT CONTROLLED HOST RESULT
-Runtime 37264609327 passes both candidate jobs, including 100-cycle/all-five
-lifecycle and matching real offer-rescind plus target absence. windows-2025
-also reaches zero order-7+ supply. windows-latest remains fragmentation
-PARTIAL with one order-7+ block; its job success is not a full fragmentation
-PASS. Both have zero panic/fault and complete verified owner accounting:
-684/683 creates, 673/672 reclaimed, 9 active and 2 conservatively retained
-per guest. Both baselines fail; windows-2025 baseline fragmentation exits 137.
-No confidential ordering or page-state transition is inferred.
+CONFIDENTIAL PLATFORM LIMITS
+No SEV-SNP, TDX without paravisor or Arm CCA page-state transition is qualified.
+Ordinary x86_64 uses vzalloc and does not exercise confidential chunk descent.
+No confidential transition-failure diagnostic delta or runtime chunk/order
+counters are supplied. Every unobserved COCO-1..5 row/subcheck stays open.
+coco-collect.sh assembles a draft; complete placeholders and run the full
+coco-validate.py schema/semantic validator before importing a real result.
+Actions can validate/archive a supplied CoCo report; that validates its stated
+scope, not runner hardware or report authenticity. No hardware report exists.
+Real traffic/confidential DMA and every GPADL response ordering remain open.
+The code retains uncertain ownership pending protocol clarification.
+No email, local device binding, swap change or RamShared enable occurred.

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Thu, 1 Oct 2026 22:15:00 -0300
+Date: Mon, 5 Oct 2026 02:15:00 -0300
 Subject: [PATCH v2 0/13] hv: vmbus: make rings and host-visible buffers
  survive buddy fragmentation
 
@@ -18,7 +18,6 @@ References:
     https://www.mail-archive.com/linux-kernel%40vger.kernel.org/msg2658605.html
   Allocator discussion:
     https://lore.kernel.org/all/?q=2026081160447.2529876-1
-
 Base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4).
 
 Allocation and lifetime
@@ -48,11 +47,10 @@ creates, unacknowledged teardown and failed page-state transitions
 remain retained. A production-entry KUnit case covers established
 handles and possibly delivered creates for both rescind origins.
 
-Opaque monotonic owner identifiers and lifecycle trace events record
-creation, release, retention, discard and reclamation. They expose no
-kernel addresses. Accounting can distinguish two same-sized buffers;
-a size-class match alone is not owner attribution. Missing capture or
-trace overruns cannot establish complete accounting.
+Opaque owner identifiers and lifecycle events record creation, release,
+retention, discard and reclamation without addresses. They distinguish
+same-sized owners; size-class matching is insufficient. Missing capture
+or trace overruns cannot establish complete accounting.
 
 The sysfs ring and /dev/uioN mappings have different contracts. The
 sysfs wrapper installs no vm_ops, as required by kernfs, and drops its
@@ -96,55 +94,57 @@ The ordered thirteen patches apply to the pinned base and verify against
 the SHA-256 manifest. The CoCo static checker passes six invariants and
 18 validator self-tests. These are source checks, not platform proof.
 
-The owner-accounting tool passes 22 fixtures, including distinct
-same-sized owners, missing creates, duplicate terminal events, unsafe
-reclaim, serial erasures and conflicting copies. Numbered compressed
-rows travel in three replicas; only a complete original SHA-256 permits
-reconciliation. No missing kernel event is inferred. A native named-pipe
-burst verifies the actual reader across chunk boundaries. The independent
-VM-reader observer passes three PowerShell fixtures, recording VM state
-and console progress even while the serial reader is blocked. Guest
-phase markers include uptime. Lifecycle decision fixtures pass 15/15.
+Owner accounting passes 22 fixtures, including duplicate/unsafe events,
+missing creates and damaged transport. Three replicas require complete
+original SHA-256 verification; no kernel event is inferred. The native
+pipe reader, three observer and 15 lifecycle-scoring fixtures pass.
 
-The current recut passed all 51 KUnit tests after a linked x86_64
-kernel build and execution in QEMU: 21 VMBus, 13 UIO, 9 netvsc
-completion, 4 RNDIS and 4 pre-existing refcount cases. The production
-rescind/retention case and distinct-owner assertions both passed.
-The UIO removal case checks closed, opened and failed disconnect paths.
-This KUnit configuration explicitly enables netvsc and its test suites.
+The current recut passed 54 linked x86_64 QEMU KUnit cases: 21 VMBus,
+14 UIO, 11 netvsc completion, 4 RNDIS and 4 refcount. Two real-skb cases
+exercise host success/error, send-slot release, queue 1 statistics and
+single synchronous disposal, including duplicate refusal. An actual UIO
+unregister case verifies info withdrawal and wakes a registered waiter
+while a device reference keeps the notifier alive.
 
-The current matched Sparse/W=1 comparison uses the same configured
-baseline and candidate targets, toolchain and C=2 invocation. It reports
-baseline 4 diagnostics and candidate 5: one additional emission of the
-unchanged flexible-protocol-structure warning from the new test TU,
-zero removed diagnostics and four unchanged. No new diagnostic kind
-is introduced; the series is not Sparse-clean.
+A preceding matched W=1/C=2 comparison reports baseline 4 / candidate 5,
+with one repeated inherited flexible-structure diagnostic, no new kind.
+The current local configuration emits four inherited diagnostics; it differs
+from that comparison. Neither result claims Sparse-clean qualification.
 
-Hosted build 37242875605 passed all thirteen sequential x86_64/arm64
-build stages, strict cumulative/per-mail style, static checks, mainline
-KUnit 51/51 and WSL-backport KUnit 16/16. The capture-only follow-up
-leaves those thirteen production mail hashes unchanged.
+Hosted build 37265334683 passes all three jobs and thirteen sequential
+x86_64/arm64 stages, strict cumulative/per-mail style and static checks.
+Mainline KUnit passes 54/54; the distinct WSL backport passes 17/17.
+Local thirteen-stage application/style and all 21 source files match.
+ARM's initial Git shallow-metadata fetch failure precedes application;
+the exact-source job retry passes. No source failure is hidden.
 
-Runtime 37245264874 on that source completed 100 cycles and all five
-lifecycle subgates on both candidate guests: windows-latest and
-windows-2025. Both sustained live UIO mappings through removal, observed
-kernfs node withdrawal, restored netvsc and returned to the baseline
-map tuple. Both allocated rings with order-7-and-higher buddy supply
-exhausted, with no OOM, splat or guest fault. Checksum-verified owner
-captures reconcile 680/683 creations, 669/672 reclamations and 11 active
-owners each, with zero missing creates or unsafe dispositions.
+Controlled host run 37264609327 completes both candidate lifecycles:
+100 cycles, all five subgates, held UIO mappings through removal, kernfs
+withdrawal and restored netvsc. Then the host removes the exact disposable
+VM adapter; both guests observe target absence and one matching real
+offer-rescind event. Both have zero splat/fault and complete verified owner
+capture: 684/683 created, 673/672 reclaimed, 9 active and 2 conservatively
+retained per guest. 
+windows-2025 also allocates rings with order-7+ supply exhausted
+(499->25->0), without OOM. windows-latest leaves one block (493->26->1):
+fragmentation is INCONCLUSIVE/PARTIAL despite a successful lifecycle and
+host rescind. Both baseline lifecycles fail; windows-2025 baseline also
+OOM-kills the fragmentation shell (exit 137). The workflow's failure
+conclusion includes those baseline outcomes. No negative is relabeled PASS.
 
-Both baseline legs failed restoration with the same harness. The
-windows-2025 baseline also OOM-killed the fragmentation shell (exit
-137); its zero splat/fault fields do not imply zero OOM events. The
-workflow's failure conclusion includes those baseline outcomes.
+The controlled experiment first exposed a real panic in hv_uio_rescind
+on the preceding candidate after netvsc restoration (37261427641).
+A UIO callback survived driver replacement and read the wrong private
+data. This recut removes redundant private rescind registration; ordinary
+VMBus device unregister already withdraws UIO and wakes readers. The sysfs
+helper now starts after UIO readiness, with independent failure scoring.
+The corrected real host sequence passes on both runner images.
 
-Earlier attempts remain negative evidence. Runtime 37242875661 completed
-one candidate lifecycle but its owner capture lost a character; the
-other candidate and one baseline timed out in phase 1. Their cause is
-unproven. A later successful run does not exclude a timing-dependent
-hang. Build failures 37238479046/37239830275 were corrected style-exit
-handling and missing Fixes objects; incomplete captures are never PASS.
+Earlier runtime 37242875661 lost one owner-transport character and
+another candidate plus one baseline timed out in phase 1. Their cause
+remains unproven. Later success does not exclude a timing-dependent hang.
+The stale KUnit count assertions in 37259972312/37264606869 and preceding
+style/Fixes-object failures are corrected, with failed attempts preserved.
 
 Limitations and review questions
 ---------------------------------
@@ -154,21 +154,21 @@ hardware-qualified. The chunked encryption path is not exercised by
 an ordinary Hyper-V guest. KUnit and static checks do not replace
 those platforms.
 
-Driver unbind/rebind is not a host-controlled offer rescind or GPADL
-response-ordering experiment. Please confirm whether an applicable
-host protocol guarantee permits GPADL reclamation after offer rescind,
+The controlled host run exercises one offer-rescind sequence, not every
+GPADL response ordering. Please confirm whether an applicable host
+protocol guarantee permits GPADL reclamation after offer rescind,
 and which in-flight create/teardown orderings it covers. Until then the
 code retains uncertain ownership.
 
-UIO removal now disconnects an opened channel after withdrawing UIO
-callbacks, because unregister prevents the later fd close from calling
-.release. The notifier stays referenced until channel callbacks stop. Mapping
-references survive independently. This addresses the opened
-channel observed on both baseline and candidate. The matched runtime
-above qualifies ordinary device restoration with live fd and mappings.
+UIO removal disconnects after unregister withdraws callbacks. The notifier
+stays referenced until channel callbacks stop, while mapping references
+survive independently. The matched runtime qualifies ordinary restoration
+with live fd and mappings.
 
-The non-NULL skb completion path and real confidential page-state
-failure injection remain unqualified.
+Real-skb production-entry KUnit is qualified; hardware traffic and
+confidential DMA/page-state failure injection remain unqualified.
+The local WSL pair is built and sealed, but is not installed. Its managed
+Windows admission remains blocked; ordinary local WSL would not prove CoCo.
 The ordinary lifecycle aggregate requires all five subgates, including
 restore. PARTIAL and NO_RESULT remain distinct from PASS.
 
@@ -186,15 +186,15 @@ restore. PARTIAL and NO_RESULT remain distinct from PASS.
  drivers/net/hyperv/Makefile                 |    2 +
  drivers/net/hyperv/hyperv_net.h             |   65 +-
  drivers/net/hyperv/netvsc.c                 |  139 ++--
- drivers/net/hyperv/netvsc_completion_test.c |  365 +++++++++
+ drivers/net/hyperv/netvsc_completion_test.c |  439 +++++++++++
  drivers/net/hyperv/rndis_filter.c           |   54 +-
  drivers/net/hyperv/rndis_request_test.c     |  157 ++++
  drivers/uio/Kconfig                         |   11 +
  drivers/uio/uio.c                           |   20 +
- drivers/uio/uio_hv_generic.c                |  384 ++++++++--
- drivers/uio/uio_hv_generic_mmap_test.c      |  830 ++++++++++++++++++++
+ drivers/uio/uio_hv_generic.c                |  388 ++++++++--
+ drivers/uio/uio_hv_generic_mmap_test.c      |  875 +++++++++++++++++++++
  include/linux/hyperv.h                      |   72 +-
- 21 files changed, 3707 insertions(+), 380 deletions(-)
+ 21 files changed, 3814 insertions(+), 396 deletions(-)
 
 -- 
 2.43.0
