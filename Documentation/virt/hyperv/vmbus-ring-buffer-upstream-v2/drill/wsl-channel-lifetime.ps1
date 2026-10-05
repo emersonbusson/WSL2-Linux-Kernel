@@ -350,17 +350,23 @@ echo 1 > "$t/tracing_on"
         try { [void](Invoke-Wsl @('--unregister', $distro)) } catch { $report.cleanup_errors += $_.Exception.Message }
         try { [void](Invoke-Wsl @('--shutdown')) } catch { $report.cleanup_errors += $_.Exception.Message }
     }
-    if ($kernelScratch) {
-        try { Remove-Item -LiteralPath $kernelScratch -Recurse -Force } catch { $report.cleanup_errors += $_.Exception.Message }
-    }
+    $configRestored = -not $configOwned
     if ($configOwned) {
         try {
         if (-not (Test-Path $config) -or [IO.File]::ReadAllText($config) -cne $selectedConfig) {
             $report.cleanup_errors += 'configuration changed concurrently; preserved current bytes'
-        } elseif ($null -ne $priorConfig) { [IO.File]::WriteAllBytes($config, $priorConfig) }
-        else { Remove-Item $config }
+        } elseif ($null -ne $priorConfig) {
+            [IO.File]::WriteAllBytes($config, $priorConfig)
+            $configRestored = $true
+        } else {
+            Remove-Item $config
+            $configRestored = $true
+        }
         } catch { $report.cleanup_errors += $_.Exception.Message }
     }
+    if ($kernelScratch -and $configRestored -and $report.cleanup_errors.Count -eq 0) {
+        try { Remove-Item -LiteralPath $kernelScratch -Recurse -Force } catch { $report.cleanup_errors += $_.Exception.Message }
+    } elseif ($kernelScratch) { $report.kernel_scratch_retained = $true }
     if ($report.cleanup_errors.Count -gt 0) { $report.verdict = 'FAIL' }
     $json = $report | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'report.json'), $json)
