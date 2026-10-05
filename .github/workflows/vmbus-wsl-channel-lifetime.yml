@@ -18,6 +18,16 @@ on:
         description: 'Exact candidate source commit when reusing kernel artifacts'
         type: string
         required: false
+      runner_scope:
+        description: 'Runner image scope'
+        type: choice
+        options: [both, windows-2025, windows-latest]
+        default: both
+      variant_scope:
+        description: 'Protocol variant scope'
+        type: choice
+        options: [both, ack-candidate, retention-baseline]
+        default: both
 
 permissions:
   contents: read
@@ -89,8 +99,8 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        runner: [windows-2025, windows-latest]
-        variant: [retention-baseline, ack-candidate]
+        runner: ${{ inputs.runner_scope == 'windows-2025' && fromJSON('["windows-2025"]') || inputs.runner_scope == 'windows-latest' && fromJSON('["windows-latest"]') || fromJSON('["windows-2025","windows-latest"]') }}
+        variant: ${{ inputs.variant_scope == 'ack-candidate' && fromJSON('["ack-candidate"]') || inputs.variant_scope == 'retention-baseline' && fromJSON('["retention-baseline"]') || fromJSON('["retention-baseline","ack-candidate"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

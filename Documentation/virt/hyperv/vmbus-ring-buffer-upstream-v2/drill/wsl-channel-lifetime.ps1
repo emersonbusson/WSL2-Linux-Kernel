@@ -25,6 +25,7 @@ $imported = $false
 $importAttempted = $false
 $configOwned = $false
 $traceStarted = $false
+$kernelScratch = $null
 $script:sequence = 0
 $report = [ordered]@{
     schema = 1; scope = 'ordinary-wsl-protocol'; variant = $Variant
@@ -225,8 +226,33 @@ try {
     $report.bundled_kernel = (Read-Guest 'uname -r').Trim()
     [void](Invoke-Wsl @('--terminate', $distro))
     [void](Invoke-Wsl @('--shutdown'))
+    # Use an owned system-drive path, and test the same override with stock bytes.
+    $kernelScratch = Join-Path $env:USERPROFILE ('channel-kernel-' + [guid]::NewGuid())
+    New-Item -ItemType Directory $kernelScratch | Out-Null
+    $stockKernel = Join-Path $env:ProgramFiles 'WSL/tools/kernel'
+    if (Test-Path $stockKernel) {
+        $report.phase = 'copied-bundled-boot'
+        $stockCopy = Join-Path $kernelScratch 'bundled-kernel'
+        Copy-Item $stockKernel $stockCopy
+        $report.copied_bundled_sha256 = (Get-FileHash $stockCopy -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($report.copied_bundled_sha256 -cne (Get-FileHash $stockKernel -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'bundled control copy differs'
+        }
+        $stockConfigPath = $stockCopy.Replace('\', '/')
+        $selectedConfig = @('[wsl2]', "kernel=$stockConfigPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
+        [IO.File]::WriteAllText($config, $selectedConfig)
+        $report.copied_bundled_kernel = (Read-Guest 'uname -r').Trim()
+        if ($report.copied_bundled_kernel -cne $report.bundled_kernel) { throw 'bundled control release differs' }
+        [void](Invoke-Wsl @('--terminate', $distro))
+        [void](Invoke-Wsl @('--shutdown'))
+    } else { $report.copied_bundled_control = 'UNAVAILABLE' }
+    $kernelCopy = Join-Path $kernelScratch 'candidate-kernel'
+    Copy-Item $kernel $kernelCopy
+    if ((Get-FileHash $kernelCopy -Algorithm SHA256).Hash.ToLowerInvariant() -cne $report.kernel_sha256) {
+        throw 'selected kernel copy differs from the immutable artifact'
+    }
     $report.phase = 'custom-boot'
-    $configKernelPath = $kernel.Replace('\', '/')
+    $configKernelPath = $kernelCopy.Replace('\', '/')
     $selectedConfig = @('[wsl2]', "kernel=$configKernelPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
     [IO.File]::WriteAllText($config, $selectedConfig)
     [void](Read-Guest 'uname -r; test -d /sys/bus/vmbus/devices; test -r /proc/vmallocinfo')
@@ -322,6 +348,10 @@ echo 1 > "$t/tracing_on"
         }
         try { [void](Invoke-Wsl @('--terminate', $distro)) } catch { $report.cleanup_errors += $_.Exception.Message }
         try { [void](Invoke-Wsl @('--unregister', $distro)) } catch { $report.cleanup_errors += $_.Exception.Message }
+        try { [void](Invoke-Wsl @('--shutdown')) } catch { $report.cleanup_errors += $_.Exception.Message }
+    }
+    if ($kernelScratch) {
+        try { Remove-Item -LiteralPath $kernelScratch -Recurse -Force } catch { $report.cleanup_errors += $_.Exception.Message }
     }
     if ($configOwned) {
         try {
