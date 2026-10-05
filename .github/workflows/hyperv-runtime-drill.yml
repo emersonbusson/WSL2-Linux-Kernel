@@ -36,10 +36,13 @@ name: Hyper-V runtime drill
 # COCO-1..5.
 
 on:
-  # workflow_dispatch only resolves when this file is on the repository
-  # default branch. That branch is microsoft's WSL line and must not carry
-  # our CI, so the push trigger below is what actually runs this job.
+  # Manual dispatch enables an optional controlled host-origin rescind.
   workflow_dispatch:
+    inputs:
+      host_rescind:
+        description: Remove the disposable guest NIC after lifecycle readiness
+        type: boolean
+        default: false
   push:
     branches:
       - vmbus-ring-buffer-upstream-v2
@@ -125,6 +128,8 @@ jobs:
           test "$stage" -eq 13
 
       - name: Build the self-booting drill kernel
+        env:
+          HYPERV_DRILL_HOST_RESCIND: ${{ inputs.host_rescind && '1' || '0' }}
         run: |
           set -euo pipefail
           DRILL=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill
@@ -198,6 +203,7 @@ jobs:
           $DRILL = 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill'
           & (Join-Path $DRILL 'test-serial-reader.ps1')
           & (Join-Path $DRILL 'test-reader-heartbeat.ps1')
+          & (Join-Path $DRILL 'test-host-rescind.ps1')
           $image = Join-Path 'drill-kernel' 'BOOTX64.EFI'
           if (-not (Test-Path $image)) {
             Write-Host "ERROR: drill kernel artifact missing at $image"
@@ -212,7 +218,8 @@ jobs:
             -VmName "vmbus-drill-${{ matrix.variant }}-$env:RUNNER_OS" `
             -TimeoutSec 1200 `
             -MemoryMB 2048 `
-            -CpuCount 2
+            -CpuCount 2 `
+            -HostRescind:${{ inputs.host_rescind && '$true' || '$false' }}
           $code = $LASTEXITCODE
           Write-Host "DRILL-RUNTIME harness_exit=$code"
 

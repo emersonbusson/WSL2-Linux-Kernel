@@ -231,6 +231,38 @@ else
 	echo "HYPERV_DRILL_LIFECYCLE status=skipped reason=${NIC:+no_helper}${NIC:-no_nic}"
 fi
 
+# Optional real host removal, after the independently scored lifecycle.
+HOST_RESCIND_STATUS=skipped
+if grep -qw 'hyperv_drill_host_rescind=1' /proc/cmdline; then
+	HOST_RESCIND_STATUS=PARTIAL
+	if [ "$LIFECYCLE_STATUS" = 0 ] && [ -n "$NIC" ] &&
+		[ -d "/sys/bus/vmbus/devices/$NIC" ]; then
+		read -r HOST_RELID <"/sys/bus/vmbus/devices/$NIC/id"
+		TRACE_DIR=/sys/kernel/tracing
+		echo 1 >"$TRACE_DIR/events/hyperv/vmbus_onoffer_rescind/enable"
+		phase_marker host_rescind begin
+		# The host acts only after this exact readiness marker.
+		for HOST_READY_COPY in 1 2 3; do
+			echo "HOST_RESCIND_READY relid=$HOST_RELID"
+		done
+		HOST_WAIT=0
+		while [ -d "/sys/bus/vmbus/devices/$NIC" ] && [ "$HOST_WAIT" -lt 60 ]; do
+			sleep 1
+			HOST_WAIT=$((HOST_WAIT + 1))
+		done
+		sleep 1
+		HOST_HEX=$(printf '%x' "$HOST_RELID")
+		HOST_EVENTS=$(grep -c "vmbus_onoffer_rescind: child_relid 0x$HOST_HEX$" "$TRACE_DIR/trace")
+		if [ ! -d "/sys/bus/vmbus/devices/$NIC" ] && [ "${HOST_EVENTS:-0}" -gt 0 ]; then
+			HOST_RESCIND_STATUS=PASS
+		fi
+		echo "HOST_RESCIND_VERDICT=$HOST_RESCIND_STATUS target_absent=$([ ! -d "/sys/bus/vmbus/devices/$NIC" ] && echo yes || echo no) matching_events=${HOST_EVENTS:-0} waited_s=$HOST_WAIT"
+		phase_marker host_rescind end
+	else
+		echo 'HOST_RESCIND_VERDICT=PARTIAL reason=lifecycle-or-device-unavailable'
+	fi
+fi
+
 # --- final scan --------------------------------------------------------------
 SPLATS=$(splat_count)
 echo "HYPERV_DRILL_SPLATS count=${SPLATS:-0}"
@@ -348,6 +380,10 @@ if [ "${LIFECYCLE_STATUS:-0}" -gt 3 ] 2>/dev/null ||
 	SCOPE=drill-killed
 fi
 
+if [ "$HOST_RESCIND_STATUS" = PARTIAL ] && [ "$RESULT" = PASS ]; then
+	RESULT=PARTIAL
+	SCOPE=host-rescind-unobserved
+fi
 emit_status "$RESULT"
 echo "HYPERV_DRILL_RESULT lifecycle=$LIFECYCLE_STATUS fragment=$FRAG_STATUS splats=${SPLATS:-0} faults=${FAULTS:-0}"
 echo "HYPERV_DRILL_RESULT scope=$SCOPE"

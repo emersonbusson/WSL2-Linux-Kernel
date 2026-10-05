@@ -48,11 +48,14 @@ param(
 
   [int]$MemoryMB = 2048,
 
-  [int]$CpuCount = 2
+  [int]$CpuCount = 2,
+
+  [switch]$HostRescind
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'host-rescind.ps1')
 
 function Note($k, $v) {
   '{0}={1}' -f $k, $v | Tee-Object -FilePath $script:report -Append
@@ -325,12 +328,14 @@ catch {
 
 # --- wait for the guest ------------------------------------------------------
 function Wait-DrillReader {
-  param($Job, [int]$BudgetSec, [string]$Vm, [string]$ConsolePath)
+  param($Job, [int]$BudgetSec, [string]$Vm, [string]$ConsolePath,
+        [switch]$Rescind, [guid]$ExpectedVmId)
 
   # This observer runs outside the serial reader. A blocked ReadAsync must
   # not suppress host progress evidence. No heartbeat implies no verdict;
   # it does not by itself identify starvation, guest OOM, or a kernel hang.
   $watch = [Diagnostics.Stopwatch]::StartNew()
+  $rescindAttempted = $false
   while ($watch.Elapsed.TotalSeconds -lt $BudgetSec) {
     $remaining = [Math]::Max(1, [Math]::Ceiling($BudgetSec - $watch.Elapsed.TotalSeconds))
     $finished = Wait-Job -Job $Job -Timeout ([Math]::Min(10, $remaining))
@@ -343,6 +348,14 @@ function Wait-DrillReader {
       $markers = Get-Content $ConsolePath -Tail 40 -ErrorAction SilentlyContinue |
         Select-String 'HYPERV_DRILL_PHASE name=([a-z_]+)'
       if ($markers) { $phase = $markers[-1].Matches[0].Groups[1].Value }
+    }
+    if ($Rescind -and -not $rescindAttempted -and (Test-Path $ConsolePath) -and
+        (Select-String -Path $ConsolePath -Pattern '^HOST_RESCIND_READY relid=[0-9]+$' -Quiet)) {
+      $rescindAttempted = $true
+      try {
+        Invoke-DrillHostRescind -VmName $Vm -ExpectedVmId $ExpectedVmId
+        Note host_rescind 'adapter_removed' | Out-Null
+      } catch { Note host_rescind ('failed: ' + $_.Exception.Message) | Out-Null }
     }
     try {
       $guest = Get-VM -Name $Vm -ErrorAction Stop
@@ -359,7 +372,7 @@ function Wait-DrillReader {
 
 if ($readerJob) {
   try {
-    $finished = Wait-DrillReader -Job $readerJob -BudgetSec ($TimeoutSec + 30) -Vm $VmName -ConsolePath $consoleLog
+    $finished = Wait-DrillReader -Job $readerJob -BudgetSec ($TimeoutSec + 30) -Vm $VmName -ConsolePath $consoleLog -Rescind:$HostRescind -ExpectedVmId $(if ($vm) { $vm.Id } else { [guid]::Empty })
     if ($finished) {
       $readerStatus = Receive-Job -Job $readerJob
     }

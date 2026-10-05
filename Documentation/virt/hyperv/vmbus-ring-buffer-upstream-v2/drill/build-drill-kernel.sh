@@ -253,6 +253,11 @@ setval INITRAMFS_ROOT_UID 0
 setval INITRAMFS_ROOT_GID 0
 
 CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 panic=1 oops=panic nmi_watchdog=0 trace_event=hyperv:vmbus_buffer_owner trace_buf_size=512K"
+case "${HYPERV_DRILL_HOST_RESCIND:-0}" in
+0) ;;
+1) CMDLINE="$CMDLINE hyperv_drill_host_rescind=1" ;;
+*) echo "invalid HYPERV_DRILL_HOST_RESCIND" >&2; exit 2 ;;
+esac
 setstr CMDLINE "$CMDLINE"
 enable CMDLINE_BOOL
 enable CMDLINE_OVERRIDE

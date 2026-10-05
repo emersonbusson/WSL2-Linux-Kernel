@@ -36,13 +36,13 @@ ee5f581ac79a080ec1a64cb23b9779b277b1d9ba9799a80b695e0a3a5cb234c5  coco-result.sc
 da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-invariants.py
 5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
 eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
-19321190c77a222d3199131f709000149d606b974a15b298681ec98232f03b49  drill/build-drill-kernel.sh
-af140c9b726142909b4ef7d9d4c1ea949e61272024924ff4b2d9c681d39fc483  drill/init
+48d5f977a2a1893031ea7bfa4bd60d9013274f4ec0338899683eada38c04bd52  drill/build-drill-kernel.sh
+7b3cb8819e59339ca131526fdb69e89cd43ac89e28f56e9ba3ce8995278d8cb7  drill/init
 a852ec4a5cab991de9feb797462b63c3977c9c28256e2a07ab2d2dca8b5036fe  drill/vmbus-lifecycle-drill.sh
 e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
 16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
 311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
-06b12e160cde766c556979d0bcae81d2066604485f22a62337a6f4f96b56b825  drill/new-drill-vm.ps1
+20a57add4267da8ced9d5b9f372c5d669b6aa2927ec5eaf388297da39e514dac  drill/new-drill-vm.ps1
 ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
 afdcb6ee7ee3dc817b141c233e0bfc8c3e08ea077bb17338b675d9d422af0861  drill/test-serial-reader.ps1
 cb22f517babcae13d5e5679f426e6adfe538018b002f79e643bc653d85660adf  drill/owner-trace-accounting.py
@@ -122,3 +122,13 @@ cases exercise production routing, send-slot release, queue 1 accounting,
 statistics and synchronous single destruction, including duplicate refusal.
 Confidential DMA remains unqualified. Hosted build/runtime will bind the
 new 0013 mail hash before refreezing the package. No email was sent.
+
+OPTIONAL HOST RESCIND EXPERIMENT
+Manual runtime input host_rescind=true enables the bounded post-lifecycle
+NIC-removal phase. The exact created VM GUID and sole drill-nic adapter are
+verified before removal. Seven refusal/effect fixtures pass. Qualification
+requires guest disappearance plus the matching offer-rescind trace, clean
+diagnostics and complete owner reconciliation. No ordering guarantee is
+inferred. The default ordinary lifecycle run is unchanged.
+d4137f151057a06a5d0d96018bbca6aa2d5fba367ee7bb86f5e43f63b8c761dd  drill/host-rescind.ps1
+8449ebc6d95979b18f80fa404fa832368f98a1f8e47dc30482ad264e6a17a915  drill/test-host-rescind.ps1
