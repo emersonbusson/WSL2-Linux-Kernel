@@ -1,10 +1,10 @@
 MANIFEST — VMBus upstream v2 reproduction dossier
 ==================================================
 Updated: 2026-10-04
-Status: review-ready, unsent; ordinary hosted gates pass; CoCo hardware unqualified.
+Status: final skb regression follow-up pending hosted build; unsent; CoCo unqualified.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
-Applied source tip: 934ef265c4b82130be2ca84b17e82424eed79793
-(previous 84be078d2389 plus notifier reference across callback shutdown)
+Applied source tip: 89fd95348ba1152ad726739c2dd2fca1845904cf
+(previous 934ef265c4b8 plus two skb-backed completion KUnit cases)
 Mail shape: cover 0/13, thirteen code mails. Apply hashes, not the WSL fork.
 Cover is intentionally outside series/SHA256SUMS.
 
@@ -25,7 +25,7 @@ b5a2cae1d081f0f21e3d4f621daeef0db8c70c09233d4b976e890b96be7a4e01  0002-allocatio
 695e1b7cb2a146b2f3186cc45a877c0d240be4a36e07e79de57c631e1cd3bc07  0010-uio-mmap-pin.patch
 efca76ff8197c6b12baaa9afa7a9e753082a728b759a11bd47b5bda30660c31b  0011-requestor-kvcalloc.patch
 d11683ba206131556e38168e78d3091e3adebf8f6cbed244664312d876c9441b  0012-rndis-request-kvmalloc.patch
-800ef02e49cf5400b7c653e4186175f9a56c215bbdcd0b61ac10f121f48b4b4c  0013-netvsc-empty-completion-null.patch
+73052cc8c2b30aed38bdf58d7a375cf4c348df4d3e9029d9f07c1cd374cac690  0013-netvsc-empty-completion-null.patch
 
 BUILD AND HARNESS FILES
 61370f986aae0a1393a5d788562b21bd617079ed10a543a9db1ede5e6df53989  BUILD.md
@@ -113,3 +113,12 @@ named-pipe reader burst pass. Runtime 37245264874 validates this transport
 against the unchanged production mails. The final cover includes the
 measured results and all outstanding hardware/protocol limitations.
 No email or host activation occurred.
+
+FINAL SKB REGRESSION FOLLOW-UP
+Only netvsc_completion_test.c changes from source 934ef265c4b8; production
+behavior and the runtime harness remain byte-identical. Local linked QEMU
+KUnit now passes 53/53 (11 netvsc completion cases). Real skb success/error
+cases exercise production routing, send-slot release, queue 1 accounting,
+statistics and synchronous single destruction, including duplicate refusal.
+Confidential DMA remains unqualified. Hosted build/runtime will bind the
+new 0013 mail hash before refreezing the package. No email was sent.
