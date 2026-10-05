@@ -1,0 +1,106 @@
+name: WSL channel lifetime experiment
+
+# Ordinary x86_64 WSL protocol evidence on disposable hosted Windows machines.
+# MODULES=n makes this a protocol configuration, not qualification of the
+# complete locally installed kernel/modules pair or confidential transitions.
+on:
+  push:
+    branches: [vmbus-rescind-ack-investigation-20261005]
+    paths:
+      - .github/workflows/vmbus-wsl-channel-lifetime.yml
+      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime.ps1
+      - Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime-tests.ps1
+      - drivers/hv/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vmbus-upstream-global
+  cancel-in-progress: false
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        variant: [retention-baseline, ack-candidate]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ matrix.variant == 'retention-baseline' && 'f67a72ca25a54b58b9ae9b8dbeaed9b3c017a0bc' || github.sha }}
+      - name: Build the exact WSL protocol kernel
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev
+          mkdir -p protocol-out protocol-evidence
+          git rev-parse HEAD > protocol-evidence/source-sha.txt
+          cp Microsoft/config-wsl protocol-out/.config
+          scripts/config --file protocol-out/.config \
+            -d MODULES -d DEBUG_INFO -d DEBUG_INFO_BTF -e DEBUG_INFO_NONE \
+            -d KUNIT -e KPROBES -e KPROBE_EVENTS -e FTRACE \
+            -e HYPERV_VMBUS -e HYPERV_STORAGE -e HYPERV_VSOCKETS \
+            --set-str LOCALVERSION "-channel-${VARIANT}"
+          make O="$PWD/protocol-out" olddefconfig
+          cp protocol-out/.config protocol-evidence/config
+          test -z "$(sed -n '/^CONFIG_MODULES=y$/p' protocol-out/.config)"
+          make O="$PWD/protocol-out" -j2 W=1 bzImage \
+            2>&1 | tee protocol-evidence/build.log
+          cp protocol-out/arch/x86/boot/bzImage protocol-evidence/kernel
+          objcopy --dump-section .notes=protocol-evidence/kernel-notes.bin \
+            protocol-out/vmlinux
+          sha256sum protocol-evidence/kernel-notes.bin | cut -d' ' -f1 \
+            > protocol-evidence/notes-sha256.txt
+          make -s O="$PWD/protocol-out" kernelrelease \
+            > protocol-evidence/kernel-release.txt
+          readelf -n protocol-out/vmlinux > protocol-evidence/gnu-notes.txt
+          (cd protocol-evidence && sha256sum kernel config kernel-notes.bin \
+            source-sha.txt kernel-release.txt notes-sha256.txt > SHA256SUMS)
+      - name: Preserve kernel and build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wsl-channel-kernel-${{ matrix.variant }}
+          path: protocol-evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  ordinary-turnover:
+    needs: kernel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        runner: [windows-2025, windows-latest]
+        variant: [retention-baseline, ack-candidate]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wsl-channel-kernel-${{ matrix.variant }}
+          path: protocol-kernel
+      - name: Verify observation and refusal gates
+        shell: pwsh
+        run: |
+          & 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime-tests.ps1'
+      - name: Observe native WSL acknowledgments and physical backing
+        shell: pwsh
+        run: |
+          & 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill/wsl-channel-lifetime.ps1' -KernelDirectory (Join-Path $PWD 'protocol-kernel') -OutputDirectory (Join-Path $PWD 'protocol-runtime') -Variant '${{ matrix.variant }}'
+      - name: Preserve all runtime observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wsl-channel-${{ matrix.variant }}-${{ matrix.runner }}
+          path: protocol-runtime/
+          if-no-files-found: error
+          retention-days: 90
