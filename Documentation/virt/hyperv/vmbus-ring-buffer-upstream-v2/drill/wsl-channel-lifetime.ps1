@@ -29,6 +29,7 @@ $script:sequence = 0
 $report = [ordered]@{
     schema = 1; scope = 'ordinary-wsl-protocol'; variant = $Variant
     verdict = 'INCOMPLETE'; commands_completed = 0; cleanup_errors = @()
+    phase = 'artifact-admission'
     complete_kernel_modules_pair = $false; confidential_transitions = $false
     harness_commit = $env:GITHUB_SHA
 }
@@ -60,7 +61,7 @@ function Invoke-OwnedProcess([string]$Executable, [string[]]$Arguments, [int]$Ti
         $errors = $stderr.Result.Replace([string][char]0, '')
         [IO.File]::WriteAllText((Join-Path $OutputDirectory "command-$script:sequence.stdout"), $text)
         [IO.File]::WriteAllText((Join-Path $OutputDirectory "command-$script:sequence.stderr"), $errors)
-        if ($p.ExitCode -ne 0) { throw "owned query exited $($p.ExitCode): $errors" }
+        if ($p.ExitCode -ne 0) { throw "owned query exited $($p.ExitCode): $errors$text" }
         return $text
     } finally {
         if ($started) {
@@ -175,6 +176,7 @@ function Assert-ArtifactManifest([string]$Directory) {
 
 try {
     Assert-ArtifactManifest $KernelDirectory
+    $report.phase = 'platform-admission'
     $running = (Invoke-Wsl @('--list', '--running', '--quiet')).Trim()
     if ($running) { throw 'REFUSE: a running distro shares this runner VM' }
     $registered = Invoke-Wsl @('--list', '--quiet')
@@ -208,8 +210,10 @@ try {
         throw 'source or notes identity mismatch'
     }
     $report.config_sha256 = (Get-FileHash (Join-Path $KernelDirectory 'config') -Algorithm SHA256).Hash.ToLowerInvariant()
-    $configKernelPath = $kernel.Replace('\', '/')
-    $selectedConfig = @('[wsl2]', "kernel=$configKernelPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
+    # Establish that this runner can boot the bundled WSL kernel first.
+    # Failure here is platform evidence, not execution of the custom kernel.
+    $report.phase = 'bundled-import'
+    $selectedConfig = @('[wsl2]', 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
     [IO.File]::WriteAllText($config, $selectedConfig)
     $configOwned = $true
     [void](Invoke-Wsl @('--shutdown'))
@@ -217,6 +221,14 @@ try {
     $importAttempted = $true
     [void](Invoke-Wsl @('--import', $distro, $location, $rootfs, '--version', '2') 60)
     $imported = $true
+    $report.phase = 'bundled-boot'
+    $report.bundled_kernel = (Read-Guest 'uname -r').Trim()
+    [void](Invoke-Wsl @('--terminate', $distro))
+    [void](Invoke-Wsl @('--shutdown'))
+    $report.phase = 'custom-boot'
+    $configKernelPath = $kernel.Replace('\', '/')
+    $selectedConfig = @('[wsl2]', "kernel=$configKernelPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
+    [IO.File]::WriteAllText($config, $selectedConfig)
     [void](Read-Guest 'uname -r; test -d /sys/bus/vmbus/devices; test -r /proc/vmallocinfo')
     [void](Read-Guest @'
 set -eu
@@ -237,6 +249,7 @@ echo 1 > "$t/tracing_on"
         throw 'running identity differs from the exact built artifact'
     }
     $report.before = $before
+    $report.phase = 'ordinary-turnover'
     if ($before.available_kib -lt 262144 -or
         ($Variant -ceq 'ack-candidate' -and $before.close_errors -ne 0)) {
         throw 'candidate warmup teardown or initial headroom gate failed'
@@ -275,7 +288,21 @@ echo 1 > "$t/tracing_on"
 } catch {
     $report.verdict = 'FAIL'
     $report.error = $_.Exception.Message
+    $report.failure_phase = $report.phase
 } finally {
+    try {
+        $native = [ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); events = @() }
+        $native.computer = Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 8 | Select-Object HypervisorPresent, TotalPhysicalMemory
+        $native.processor = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 8 | Select-Object VMMonitorModeExtensions, SecondLevelAddressTranslationExtensions, VirtualizationFirmwareEnabled)
+        foreach ($log in 'Microsoft-Windows-Hyper-V-Compute-Admin', 'Microsoft-Windows-Lxss/Operational') {
+            try {
+                $native.events += @(Get-WinEvent -FilterHashtable @{LogName = $log; StartTime = (Get-Date).AddMinutes(-10)} -MaxEvents 6 -ErrorAction Stop | ForEach-Object {
+                    @{ log = $log; id = $_.Id; level = $_.LevelDisplayName; message = $_.Message.Substring(0, [Math]::Min(1600, $_.Message.Length)) }
+                })
+            } catch { $native.events += @{log = $log; query_error = $_.Exception.Message} }
+        }
+        [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-platform.json'), ($native | ConvertTo-Json -Depth 6))
+    } catch { $report.native_diagnostic_error = $_.Exception.Message }
     if ($importAttempted -and -not $imported) {
         try {
             $registered = Invoke-Wsl @('--list', '--quiet')
