@@ -86,6 +86,15 @@ try {
     [IO.File]::WriteAllLines($inventory, $entries)
     [IO.File]::WriteAllText((Join-Path $fixture 'kernel'), 'tampered')
     Reject { Assert-ArtifactManifest $fixture }
+    [IO.File]::WriteAllText((Join-Path $fixture 'kernel'), 'kernel')
+    foreach ($name in 'modules.vhdx', 'modules.sha256') {
+        [IO.File]::WriteAllText((Join-Path $fixture $name), $name)
+        $entries += (Get-FileHash (Join-Path $fixture $name) -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $name
+    }
+    [IO.File]::WriteAllLines($inventory, $entries)
+    Accept { Assert-ArtifactManifest $fixture }
+    [IO.File]::WriteAllText((Join-Path $fixture 'modules.vhdx'), 'wrong-pair')
+    Reject { Assert-ArtifactManifest $fixture }
     $OutputDirectory = $fixture; $script:sequence = 0
     $report = @{ cleanup_errors = @() }
     $pwsh = Join-Path $PSHOME 'pwsh.exe'

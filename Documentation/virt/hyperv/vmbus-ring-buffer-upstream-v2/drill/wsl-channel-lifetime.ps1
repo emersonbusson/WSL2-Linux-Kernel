@@ -162,6 +162,9 @@ function Assert-LifetimeEvidence($Evidence, $Before, $First, $Last, [string]$Kin
 
 function Assert-ArtifactManifest([string]$Directory) {
     $expected = @('kernel', 'config', 'kernel-notes.bin', 'source-sha.txt', 'kernel-release.txt', 'notes-sha256.txt')
+    if (Test-Path (Join-Path $Directory 'modules.vhdx')) {
+        $expected += @('modules.vhdx', 'modules.sha256')
+    }
     $seen = @{}
     foreach ($line in Get-Content (Join-Path $Directory 'SHA256SUMS')) {
         if ($line -cnotmatch '^([0-9a-f]{64})  ([a-z0-9.-]+)$') { throw 'invalid artifact inventory' }
@@ -211,6 +214,10 @@ try {
         throw 'source or notes identity mismatch'
     }
     $report.config_sha256 = (Get-FileHash (Join-Path $KernelDirectory 'config') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hasModules = Test-Path (Join-Path $KernelDirectory 'modules.vhdx')
+    if ((Get-Content (Join-Path $KernelDirectory 'config') -Raw) -match '(?m)^CONFIG_MODULES=y$' -and -not $hasModules) {
+        throw 'module-enabled kernel lacks its exact paired module artifact'
+    }
     # Establish that this runner can boot the bundled WSL kernel first.
     # Failure here is platform evidence, not execution of the custom kernel.
     $report.phase = 'bundled-import'
@@ -254,6 +261,17 @@ try {
     $report.phase = 'custom-boot'
     $configKernelPath = $kernelCopy.Replace('\', '/')
     $selectedConfig = @('[wsl2]', "kernel=$configKernelPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
+    if ($hasModules) {
+        $moduleCopy = Join-Path $kernelScratch 'modules.vhdx'
+        Copy-Item (Join-Path $KernelDirectory 'modules.vhdx') $moduleCopy
+        $moduleDigest = (Get-FileHash (Join-Path $KernelDirectory 'modules.vhdx') -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ((Get-FileHash $moduleCopy -Algorithm SHA256).Hash.ToLowerInvariant() -cne $moduleDigest) {
+            throw 'paired module copy differs from the immutable artifact'
+        }
+        $moduleConfigPath = $moduleCopy.Replace('\', '/')
+        $selectedConfig = @('[wsl2]', "kernel=$configKernelPath", "kernelModules=$moduleConfigPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
+        $report.modules_vhdx_sha256 = $moduleDigest
+    }
     [IO.File]::WriteAllText($config, $selectedConfig)
     [void](Read-Guest 'uname -r; test -d /sys/bus/vmbus/devices; test -r /proc/vmallocinfo')
     [void](Read-Guest @'
@@ -273,6 +291,15 @@ echo 1 > "$t/tracing_on"
     $before = Read-Snapshot
     if ($before.notes -cne $expectedNotes -or $before.kernel -cne $expectedRelease) {
         throw 'running identity differs from the exact built artifact'
+    }
+    if ($hasModules) {
+        $moduleInventory = Read-Guest 'cd "/lib/modules/$(uname -r)"; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum'
+        $expectedInventory = (Get-Content (Join-Path $KernelDirectory 'modules.sha256') -Raw).Replace("`r`n", "`n").Trim()
+        if ($moduleInventory.Replace("`r`n", "`n").Trim() -cne $expectedInventory) {
+            throw 'running module inventory differs from the exact pair'
+        }
+        $report.complete_kernel_modules_pair = $true
+        $report.module_inventory_entries = $expectedInventory.Split([char]10).Count
     }
     $report.before = $before
     $report.phase = 'ordinary-turnover'

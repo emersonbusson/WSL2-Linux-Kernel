@@ -1,8 +1,9 @@
 name: WSL channel lifetime experiment
 
 # Ordinary x86_64 WSL protocol evidence on disposable hosted Windows machines.
-# MODULES=n makes this a protocol configuration, not qualification of the
-# complete locally installed kernel/modules pair or confidential transitions.
+# Builds preserve the Microsoft module configuration. Runtime qualification
+# requires exact running notes and the complete module inventory; no
+# confidential transition is claimed.
 on:
   push:
     branches: [vmbus-rescind-ack-investigation-20261005]
@@ -46,7 +47,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        variant: [retention-baseline, ack-candidate]
+        variant: ${{ inputs.variant_scope == 'ack-candidate' && fromJSON('["ack-candidate"]') || inputs.variant_scope == 'retention-baseline' && fromJSON('["retention-baseline"]') || fromJSON('["retention-baseline","ack-candidate"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -57,19 +58,18 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libelf-dev libssl-dev
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev qemu-utils
           mkdir -p protocol-out protocol-evidence
           git rev-parse HEAD > protocol-evidence/source-sha.txt
           cp Microsoft/config-wsl protocol-out/.config
           scripts/config --file protocol-out/.config \
-            -d MODULES -d DEBUG_INFO -d DEBUG_INFO_BTF -e DEBUG_INFO_NONE \
+            -e MODULES -d DEBUG_INFO -d DEBUG_INFO_BTF -e DEBUG_INFO_NONE \
             -d KUNIT -e KPROBES -e KPROBE_EVENTS -e FTRACE \
-            -e HYPERV_VMBUS -e HYPERV_STORAGE -e HYPERV_VSOCKETS \
-            --set-str LOCALVERSION "-channel-${VARIANT}"
+            -e HYPERV_VMBUS -e HYPERV_STORAGE -e HYPERV_VSOCKETS
           make O="$PWD/protocol-out" olddefconfig
           cp protocol-out/.config protocol-evidence/config
-          test -z "$(sed -n '/^CONFIG_MODULES=y$/p' protocol-out/.config)"
-          make O="$PWD/protocol-out" -j2 W=1 bzImage \
+          test "$(sed -n '/^CONFIG_MODULES=y$/p' protocol-out/.config)" = 'CONFIG_MODULES=y'
+          make O="$PWD/protocol-out" -j2 W=1 bzImage modules \
             2>&1 | tee protocol-evidence/build.log
           cp protocol-out/arch/x86/boot/bzImage protocol-evidence/kernel
           objcopy --dump-section .notes=protocol-evidence/kernel-notes.bin \
@@ -79,8 +79,20 @@ jobs:
           make -s O="$PWD/protocol-out" kernelrelease \
             > protocol-evidence/kernel-release.txt
           readelf -n protocol-out/vmlinux > protocol-evidence/gnu-notes.txt
+          make O="$PWD/protocol-out" INSTALL_MOD_PATH="$PWD/protocol-modules" \
+            INSTALL_MOD_STRIP=1 modules_install
+          make O="$PWD/protocol-out" INSTALL_HDR_PATH="$PWD/protocol-headers" headers_install
+          mkdir -p protocol-perf
+          kernel_release=$(cat protocol-evidence/kernel-release.txt)
+          (cd "protocol-modules/lib/modules/$kernel_release" && \
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
+            > protocol-evidence/modules.sha256
+          Microsoft/scripts/gen_artifacts_vhdx.sh "$PWD/protocol-modules" \
+            "$PWD/protocol-headers" "$PWD/protocol-perf" "$kernel_release" \
+            "$PWD/protocol-evidence/modules.vhdx"
           (cd protocol-evidence && sha256sum kernel config kernel-notes.bin \
-            source-sha.txt kernel-release.txt notes-sha256.txt > SHA256SUMS)
+            source-sha.txt kernel-release.txt notes-sha256.txt \
+            modules.vhdx modules.sha256 > SHA256SUMS)
       - name: Preserve kernel and build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
