@@ -169,3 +169,23 @@ Run 37264606869 reaches the new backport suite but its per-suite assertion
 still expects four UIO tests. It must require five alongside total 17 and the
 named real UIO withdrawal case. This correction changes CI only; the runtime
 already in progress is retained on unchanged production bytes.
+
+
+LOCAL OBSERVATION IMPORT
+collect-kernel-pair-evidence.py replaces stale fixed hashes with manifest,
+executing GNU build ID, fresh boot, configuration-pair, installed-module and
+kernel-log checks. Six parser/refusal fixtures pass. Actions evidence_only
+validates and archives a sanitized operator report without a build; report
+validation never proves a runner boot or confidential-platform execution.
+The initial local observation is FAIL: the predecessor is still executing.
+No local installation or restart occurred.
+
+CURRENT CONTROLLED HOST RESULT
+Runtime 37264609327 passes both candidate jobs, including 100-cycle/all-five
+lifecycle and matching real offer-rescind plus target absence. windows-2025
+also reaches zero order-7+ supply. windows-latest remains fragmentation
+PARTIAL with one order-7+ block; its job success is not a full fragmentation
+PASS. Both have zero panic/fault and complete verified owner accounting:
+684/683 creates, 673/672 reclaimed, 9 active and 2 conservatively retained
+per guest. Both baselines fail; windows-2025 baseline fragmentation exits 137.
+No confidential ordering or page-state transition is inferred.

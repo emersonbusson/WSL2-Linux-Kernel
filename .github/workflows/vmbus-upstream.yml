@@ -19,16 +19,33 @@ on:
       - drivers/uio/uio_hv_generic.c
       - include/linux/hyperv.h
   workflow_dispatch:
+    inputs:
+      evidence_only:
+        description: Validate and archive an operator report without rebuilding
+        type: boolean
+        default: false
+      evidence_kind:
+        description: Observation environment
+        type: choice
+        options:
+          - local-wsl
+          - coco
+        default: local-wsl
+      evidence_report:
+        description: Sanitized JSON report; validation never proves a runner boot
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: vmbus-upstream-global
+  group: ${{ inputs.evidence_only && format('vmbus-evidence-{0}', github.run_id) || 'vmbus-upstream-global' }}
   cancel-in-progress: false
 
 jobs:
   wsl-backport:
+    if: ${{ !inputs.evidence_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -562,3 +579,51 @@ jobs:
           name: vmbus-${{ matrix.arch }}
           path: vmbus-artifacts/
           if-no-files-found: error
+
+  operator-evidence:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.evidence_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate the report and its stated scope
+        env:
+          REPORT: ${{ inputs.evidence_report }}
+          KIND: ${{ inputs.evidence_kind }}
+        run: |
+          set -euo pipefail
+          mkdir -p operator-evidence
+          python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          text = os.environ['REPORT']
+          if not text or len(text.encode()) > 65536:
+              raise ValueError('missing or oversized report')
+          Path('operator-evidence/report.json').write_text(text)
+          PYTHON
+          DOSSIER=Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2
+          if [ "$KIND" = coco ]; then
+            python3 -m pip install 'jsonschema==4.25.1'
+            python3 "$DOSSIER/coco-validate.py" operator-evidence/report.json
+          else
+            python3 "$DOSSIER/test-kernel-pair-evidence.py"
+            python3 "$DOSSIER/collect-kernel-pair-evidence.py" \
+              --validate operator-evidence/report.json
+          fi
+          python3 - <<'PYTHON'
+          import hashlib, json, os
+          from pathlib import Path
+          p = Path('operator-evidence/report.json')
+          report = json.loads(p.read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Operator observation; schema validation is separate from runtime qualification.\n\n')
+              summary.write('Environment: ' + os.environ['KIND'] + '\n\n')
+              summary.write('Reported verdict: ' + str(report.get('verdict', 'see per-row results')) + '\n\n')
+              summary.write('Report SHA-256: `' + hashlib.sha256(p.read_bytes()).hexdigest() + '`\n')
+          PYTHON
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: success()
+        with:
+          name: operator-${{ inputs.evidence_kind }}-${{ github.run_id }}
+          path: operator-evidence/report.json
+          retention-days: 30
