@@ -1,7 +1,7 @@
 MANIFEST — VMBus upstream v2 reproduction dossier
 ==================================================
 Updated: 2026-10-04
-Status: unsent; ordinary hosted validation pending; CoCo hardware unqualified.
+Status: review-ready, unsent; ordinary hosted gates pass; CoCo hardware unqualified.
 Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
 Applied source tip: 934ef265c4b82130be2ca84b17e82424eed79793
 (previous 84be078d2389 plus notifier reference across callback shutdown)
@@ -9,8 +9,8 @@ Mail shape: cover 0/13, thirteen code mails. Apply hashes, not the WSL fork.
 Cover is intentionally outside series/SHA256SUMS.
 
 COVER
-883afe32fa8fb64b40e9a6266c0fc9ab20216c5fe97a1f9b471edaf354597cf5  series/0000-cover-letter.patch
-lines=195
+cdcb1ab8193d9736618a1e9e043d17086c7f97c3f15fcbbb14cfafe20e0cf658  series/0000-cover-letter.patch
+lines=200
 
 PRODUCTION MAILS
 c962e2019a2404c9c57555a2bb8eef1cc87855b2111bd1208d77f9989967fd18  0001-ring-allocation.patch
@@ -67,14 +67,30 @@ CURRENT LOCAL EVIDENCE
   independent reader observer fixtures 3/3.
 - series/SHA256SUMS: verify all thirteen before applying/building.
 
+HOSTED EXACT-BYTE QUALIFICATION
+Build 37242875605 on dossier 98a403eb6ba8 succeeds: all thirteen stages,
+x86_64/arm64 strict style/build, mainline KUnit 51/51 and WSL KUnit 16/16.
+Runtime 37245264874 on capture dossier 444c7968ad16 succeeds on both
+candidate legs: 100 cycles, five lifecycle subgates, exhausted-buddy ring
+allocation and zero OOM/splat/fault. Complete checksum-verified owner
+captures: windows-latest 680 created/669 reclaimed/11 active; windows-2025
+683 created/672 reclaimed/11 active. Zero missing creates or unsafe events.
+All thirteen production hashes are unchanged between those dossiers.
+
+Both baseline legs fail restoration. windows-2025 baseline additionally
+OOM-kills the fragmentation shell, exit 137. Its zero splat/fault fields do
+not imply zero OOM. The runtime workflow's aggregate conclusion is failure.
+Earlier runtime 37242875661 has one complete candidate lifecycle but corrupt
+owner transfer; another candidate and one baseline timeout in phase 1.
+Their cause remains UNPROVEN. Subsequent success does not rule out a
+timing-dependent hang. Builds 37238479046/37239830275 and runtime
+37238479048 are preserved failed attempts, not relabeled PASS.
+
 NOT QUALIFIED
-Real host rescind/GPADL response ordering, confidential page-state transitions,
-full device restoration, live kernfs removal and non-NULL skb completion.
-Prior hosted runs 37179681746/37179681743 are older bytes, not this recut.
-The new workflow runs baseline and candidate using the same harness/config
-on both Windows runner images, and retries restoration after helpers close
-fds and mappings. Runs 37239830275/37238479048 failed before this UIO/transport revision.
-A fresh build/runtime pair must test these exact bytes; results are pending.
+Real host-controlled rescind/GPADL response ordering, confidential page-state
+transitions and non-NULL skb completion. An ordinary guest does not exercise
+the chunked confidential allocator path. The overall hardware status stays
+PARTIAL. Review readiness follows the explicit disclosure policy.
 
 BUNDLE LIMITS
 No confidential transition-failure injection delta is supplied. No runtime
@@ -89,20 +105,11 @@ zero overrun/dropped events and the end marker. The analyzer never logs
 raw lines or addresses. Active owners are not automatically leaks.
 No email has been sent. The operator sends the qualified frozen package.
 
-FOLLOW-UP
-37241455320 built the preceding revision successfully; 37241455209
-passed both candidate lifecycles but failed both baseline restores. One
-candidate capture accounted for 682 owners with zero errors; the other
-was PARTIAL due to transport corruption. A fresh pair must qualify the
-notifier-reference and paced/asynchronously drained serial follow-up.
-The native named-pipe burst fixture passes on the actual reader.
-
-CAPTURE TRANSPORT FOLLOW-UP
-A paced single copy still lost one base64 character in runtime 37242875661.
-The capture stays PARTIAL. Numbered rows now travel in three replicas;
-reconstruction must verify the full original packed SHA-256. Conflicting,
-missing or corrupt copies cannot produce PASS. All 22 analyzer fixtures
-pass. Production mails and mainline source 934ef265c4b8 are unchanged;
-build 37242875605 passed all three jobs. Run the runtime workflow explicitly
-to qualify the new capture; no production rebuild is required for tool-only
-changes. No email or host activation occurred.
+CAPTURE TRANSPORT
+Numbered compressed rows travel in three replicas. Only complete original
+packed SHA-256 verification permits reconciliation; missing/conflicting
+rows remain PARTIAL. All 22 analyzer fixtures and the actual native
+named-pipe reader burst pass. Runtime 37245264874 validates this transport
+against the unchanged production mails. The final cover includes the
+measured results and all outstanding hardware/protocol limitations.
+No email or host activation occurred.
