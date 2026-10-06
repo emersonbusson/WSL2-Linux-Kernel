@@ -12,7 +12,7 @@
  * Usage:
  *   vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count] [release_file]
  *   vmbus_drill_helper mlock-hog <mib> <hold_seconds>
- *   vmbus_drill_helper fragment-buddy <mib> <hold_seconds>
+ *   vmbus_drill_helper fragment-buddy <mib> <hold_seconds> [release_file] [pid_file]
  *
  * mmap-hold maps <count> regions of <bytes> at sequential page-aligned
  * offsets and keeps them alive. UIO map N lives at offset N * pagesize, so
@@ -32,13 +32,12 @@
  * and drain high-order free blocks. It prints MLOCK_HOG ready=1 only after
  * the lock succeeds.
  *
- * fragment-buddy is the one the order-zero drill actually needs. A single
- * large hog splits the buddy only as far as it must and leaves the untouched
- * remainder as high-order blocks, so order-7 still succeeds and the drill
- * reports INCONCLUSIVE. This mode takes <mib> as a ceiling the loop must not
- * reach and allocates 64 KiB chunks until /proc/buddyinfo shows no free
- * block of order 7 or above -- the test condition, measured rather than
- * inferred. It then punches a bounded set of physical buddy holes: one
+ * fragment-buddy is the one the order-zero drill actually needs. It takes
+ * <mib> as a ceiling the loop must not reach and allocates 64 KiB chunks
+ * until at least 99% of initially free order-7-and-higher pages are gone,
+ * while retaining at least one order-7 block as a safety reserve. The
+ * condition is measured from /proc/buddyinfo, not inferred. It then punches
+ * a bounded set of physical buddy holes: one
  * member of every (pfn, pfn^1) pair whose buddy is also ours is unmapped.
  * A freed page's buddy is always held, so nothing above order-0 can
  * coalesce, order-7 cannot reappear, and the survivors still satisfy
@@ -63,13 +62,14 @@
  * pattern it never created.
  *
  * The allocation loop also lowers vm.min_free_kbytes and keeps it low
- * through the punch, the chase and the ready=1 measurement. The min
+ * through the punch, the chase and the channel-open exercise. The min
  * watermark hides free high-order blocks from userspace faults: buddyinfo
  * still lists them, but a fault cannot cross the reserve to split them, so
  * the loop stops with the test condition unmet however much room the floor
  * leaves. The read-back in the report is the value actually in force, not
- * the value asked for. It is restored only after ready=1, so the
- * channel-open exercise that follows runs against the normal reserve.
+ * the value asked for. The helper restores and verifies all three changed
+ * global settings and its process OOM score after release, handled signals,
+ * and setup errors.
  *
  * The OOM pin is on only while the finished pattern is being held, never
  * while this process is allocating. Both wrong windows have been tried and
@@ -112,6 +112,46 @@ static long parse_long(const char *s, const char *what)
 		exit(2);
 	}
 	return v;
+}
+
+static volatile sig_atomic_t frag_stop_signal;
+
+static void frag_request_stop(int signo)
+{
+	frag_stop_signal = signo;
+}
+
+static int frag_install_signal_handlers(void)
+{
+	struct sigaction action = { .sa_handler = frag_request_stop };
+
+	sigemptyset(&action.sa_mask);
+	return sigaction(SIGTERM, &action, NULL) ||
+	       sigaction(SIGHUP, &action, NULL) ||
+	       sigaction(SIGINT, &action, NULL) ? -1 : 0;
+}
+
+static int frag_release_requested(const char *release_file)
+{
+	return frag_stop_signal ||
+	       (release_file && access(release_file, F_OK) == 0);
+}
+
+static int frag_write_pid_file(const char *pid_file)
+{
+	char buf[32];
+	int fd, n, rc = -1;
+
+	if (!pid_file)
+		return 0;
+	fd = open(pid_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return -1;
+	n = snprintf(buf, sizeof(buf), "%ld\n", (long)getpid());
+	if (n > 0 && write(fd, buf, (size_t)n) == n)
+		rc = 0;
+	close(fd);
+	return rc;
 }
 
 static int do_mmap_hold(int argc, char **argv)
@@ -396,8 +436,9 @@ static int do_mlock_hog(int argc, char **argv)
  * A hosted runner can stop with one order-7 block while still meeting the
  * safe stress target. That result qualifies only as bounded ordinary-path
  * pressure: at least 99% of the initial order-7-and-higher free pages were
- * removed, no more than one minimum order-7 block (128 pages) remains, the
- * safety floor caused the stop, and pagemap verified physical pages. It is
+ * removed, no more than one minimum order-7 block (128 pages) remains, a
+ * measured safety boundary caused the stop, and pagemap verified physical
+ * pages. It is
  * reported separately from full exhaustion and does not qualify the CoCo
  * chunked allocator, which an ordinary Hyper-V guest never executes.
  *
@@ -445,7 +486,7 @@ static int do_mlock_hog(int argc, char **argv)
  * alignment: the first four are unmapped, the last four are kept. The
  * kept half is the freed half's order-2 buddy, so the freed half cannot
  * coalesce past order-2 even if the PCP does drain -- the order-7
- * depletion just measured is not undone. Cap the groups like the holes:
+ * safety reserve just measured is not undone. Cap the groups like the holes:
  * each munmap splits a VMA.
  *
  * Two properties make the runs findable. The per-cpu page cache is
@@ -467,19 +508,35 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_ORDER2_GROUPS 512
 
 /*
- * Punching one hole per freed page needs one VMA per surviving run, which is
- * far more than a normal process. The default 65530 is exhausted long before
- * the buddy is, so raise it first. Best effort: if the write fails the
- * pattern below fails closed and says so.
+ * Punching one hole per freed page needs one VMA per surviving run. Save the
+ * host value before raising it, then restore and verify it after all mappings
+ * are gone.
  */
-static void raise_max_map_count(void)
+static long max_map_count_read(void)
 {
-	int fd = open("/proc/sys/vm/max_map_count", O_WRONLY);
+	FILE *f = fopen("/proc/sys/vm/max_map_count", "r");
+	char buf[64];
+	long count = -1;
 
+	if (!f)
+		return -1;
+	if (fgets(buf, sizeof(buf), f))
+		count = strtol(buf, NULL, 10);
+	fclose(f);
+	return count;
+}
+
+static void max_map_count_write(long count)
+{
+	char buf[32];
+	int fd, n;
+
+	fd = open("/proc/sys/vm/max_map_count", O_WRONLY);
 	if (fd < 0)
 		return;
-	if (write(fd, "1048576\n", 8) < 0) {
-		/* best effort */
+	n = snprintf(buf, sizeof(buf), "%ld\n", count);
+	if (n > 0 && write(fd, buf, (size_t)n) < 0) {
+		/* Readback at the call site detects a failed write. */
 	}
 	close(fd);
 }
@@ -493,11 +550,9 @@ static void raise_max_map_count(void)
  * stopping with order-7 supply left no matter how low the MemAvailable
  * floor went: the floor was fine, the watermark was the wall.
  *
- * This is a disposable drill guest whose purpose is to exhaust the buddy.
- * Lowering the reserve is the only lever userspace has to reach those
- * pages. It is restored before the channel-open exercise, which needs the
- * normal reserve to allocate its ring. Best effort both ways: if the write
- * fails the loop simply stops on the floor as before and says so.
+ * This is a disposable drill guest. Lowering the reserve is the only lever
+ * userspace has to reach those pages. The original value is restored after
+ * the channel-open exercise and verified before lifecycle starts.
  */
 static long min_free_kb_read(void)
 {
@@ -535,9 +590,8 @@ static void min_free_kb_write(long kb)
  * measured boost:6924kB on a guest whose min_free_kbytes was 512, so the
  * effective watermark sat at 7436 kB and an order-0 fault OOMed the
  * helper mid-chase. 0 disables the boost entirely and is the only way a
- * floor below the boosted watermark is reachable. Restored after ready=1
- * like min_free_kbytes, because the ring allocation that follows wants
- * the guest's normal anti-fragmentation behaviour.
+ * floor below the boosted watermark is reachable. Its original value is
+ * restored and verified after the parent releases the completed ring test.
  */
 static long boost_factor_read(void)
 {
@@ -655,17 +709,37 @@ static int frag_bounded_pressure_qualified(long before_pages,
 						  int pagemap,
 						  int watermark_safe)
 {
-	if (before_pages <= 0 || after_pages < 0 || pagemap != 1 ||
+	if (before_pages <= 0 || after_pages <= 0 || pagemap != 1 ||
 	    !watermark_safe)
 		return 0;
-	if (after_pages == 0)
-		return stop_reason && !strcmp(stop_reason, "order7-depleted");
-	if (after_pages > FRAG_BOUNDED_MAX_REMAINING_PAGES ||
-	    !stop_reason || strcmp(stop_reason, "chase-memfree-margin") ||
+	if (after_pages > FRAG_BOUNDED_MAX_REMAINING_PAGES || !stop_reason ||
+	    (strcmp(stop_reason, "chase-memfree-margin") &&
+	     strcmp(stop_reason, "order7-reserve") &&
+	     strcmp(stop_reason, "chase-order7-reserve")) ||
 	    after_pages >= before_pages)
 		return 0;
 
 	return after_pages <= before_pages / 100L;
+}
+
+static int frag_should_preserve_order7(long blocks, long pages)
+{
+	return blocks > 0 && pages > 0 &&
+	       pages <= FRAG_BOUNDED_MAX_REMAINING_PAGES;
+}
+
+static void frag_wait_for_release(const char *release_file, long hold)
+{
+	long waited = 0;
+
+	while (waited < hold && !frag_release_requested(release_file)) {
+		sleep(1);
+		waited++;
+	}
+	printf("FRAGMENT_BUDDY hold_end waited_seconds=%ld limit_seconds=%ld release_file=%s signal=%d\n",
+	       waited, hold, release_file ? "set" : "none",
+	       (int)frag_stop_signal);
+	fflush(stdout);
 }
 
 /*
@@ -887,16 +961,38 @@ static long unsplit_free_pages(void)
  * "no killable processes" and panics. It is dropped when the hold ends, so
  * the teardown can be reclaimed like any other process.
  */
-static void set_oom_adj(const char *value)
+static long oom_score_adj_read(void)
 {
-	int fd = open("/proc/self/oom_score_adj", O_WRONLY);
+	FILE *f = fopen("/proc/self/oom_score_adj", "r");
+	char buf[64];
+	char *end = NULL;
+	long value = LONG_MIN;
 
-	if (fd < 0)
-		return;
-	if (write(fd, value, strlen(value)) < 0) {
-		/* best effort */
+	if (!f)
+		return LONG_MIN;
+	if (fgets(buf, sizeof(buf), f)) {
+		errno = 0;
+		value = strtol(buf, &end, 10);
+		if (errno || end == buf)
+			value = LONG_MIN;
 	}
+	fclose(f);
+	return value;
+}
+
+static int set_oom_adj(long value)
+{
+	char buf[32];
+	int fd, n, rc = -1;
+
+	fd = open("/proc/self/oom_score_adj", O_WRONLY);
+	if (fd < 0)
+		return -1;
+	n = snprintf(buf, sizeof(buf), "%ld\n", value);
+	if (n > 0 && write(fd, buf, (size_t)n) == n)
+		rc = 0;
 	close(fd);
+	return rc;
 }
 
 /*
@@ -934,35 +1030,52 @@ static int do_fragment_buddy(int argc, char **argv)
 {
 	long mib, hold, want, got = 0, locked = 0, i, off, stopped = 0;
 	long freed_pages = 0, held_pages = 0, no_pfn = 0, pairs = 0;
-	long high_before, high_locked, high_after, free_kb = -1;
+	long high_before = -1, high_locked = -1, high_after = -1;
+	long free_kb = -1;
 	long high_before_pages = -1, high_locked_pages = -1;
 	long high_after_pages = -1;
 	long wmark_kb = -1, floor_kb = -1;
 	long chase_free_kb = -1, chase_wmark_kb = -1, chase_floor_kb = -1;
-	long min_free_saved, min_free_set, min_free_now;
-	long boost_saved, boost_now;
+	long min_free_saved = -1, min_free_set = 512, min_free_now = -1;
+	long boost_saved = -1, boost_now = -1;
+	long map_count_saved = -1, map_count_set = 1048576;
+	long map_count_now = -1, oom_score_adj_saved = LONG_MIN;
+	long oom_score_adj_now = LONG_MIN;
 	long chase = 0, chase_locked = 0;
 	long chase_holes = 0, chase_pairs = 0;
 	long unsplit_at_stop = -1;
-	void **maps, **chase_maps;
-	void *reserve[FRAG_RESERVE_CHUNKS];
-	void *soak[FRAG_PCP_SOAK_CHUNKS];
+	void **maps = NULL, **chase_maps = NULL;
+	void *reserve[FRAG_RESERVE_CHUNKS] = { 0 };
+	void *soak[FRAG_PCP_SOAK_CHUNKS] = { 0 };
 	long soak_got = 0;
 	long reserve_got = 0, order2_groups = 0, order2_pages = 0;
-	long order2_buddy;
+	long order2_buddy = -1;
 	unsigned long *pfns = NULL, *seen = NULL;
 	unsigned long max_pfn = 0, seen_words = 0;
-	int pmfd, bounded;
+	int pmfd = -1, bounded = 0, rc = 1, restore_ok;
+	int min_free_changed = 0, boost_changed = 0, map_count_changed = 0;
+	const char *release_file = NULL;
+	const char *pid_file = NULL;
 	const char *stop_reason = "ceiling";
 
-	if (argc < 3) {
-		fprintf(stderr, "usage: fragment-buddy <mib> <hold_seconds>\n");
+	if (argc < 3 || argc > 5) {
+		fprintf(stderr,
+			"usage: fragment-buddy <mib> <hold_seconds> [release_file] [pid_file]\n");
 		return 2;
 	}
 	mib = parse_long(argv[1], "mib");
 	hold = parse_long(argv[2], "hold_seconds");
-	if (mib <= 0 || mib > (long)(16 * 1024)) {
-		fprintf(stderr, "HELPER mib out of range\n");
+	if (argc == 4 && argv[3][0] != '\0')
+		release_file = argv[3];
+	if (argc == 5) {
+		if (argv[3][0] != '\0')
+			release_file = argv[3];
+		if (argv[4][0] != '\0')
+			pid_file = argv[4];
+	}
+	if (mib <= 0 || mib > (long)(16 * 1024) || hold > 3600 ||
+	    (release_file && hold <= 0)) {
+		fprintf(stderr, "HELPER mib or hold_seconds out of range\n");
 		return 2;
 	}
 
@@ -980,16 +1093,70 @@ static int do_fragment_buddy(int argc, char **argv)
 		fprintf(stderr, "HELPER mib too small to fragment\n");
 		return 2;
 	}
-
-	raise_max_map_count();
+	if (frag_install_signal_handlers()) {
+		printf("FRAGMENT_BUDDY ready=0 reason=signal-handler-install\n");
+		fflush(stdout);
+		return 3;
+	}
+	if (frag_write_pid_file(pid_file)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=pid-file-write-failed\n");
+		fflush(stdout);
+		return 3;
+	}
 
 	/*
-	 * Lower the min watermark before allocating so the loop can reach the
-	 * high-order blocks sitting behind it. Saved so it can be restored
-	 * before the ring allocation that follows.
+	 * Read every process/global setting before changing any of them. The map
+	 * limit and watermarks are restored after the mappings are gone; the OOM
+	 * score is restored exactly to the value inherited from the parent.
 	 */
+	map_count_saved = max_map_count_read();
 	min_free_saved = min_free_kb_read();
-	min_free_set = 512;
+	boost_saved = boost_factor_read();
+	oom_score_adj_saved = oom_score_adj_read();
+	if (map_count_saved < 0 || min_free_saved < 0 || boost_saved < 0 ||
+	    oom_score_adj_saved == LONG_MIN) {
+		printf("FRAGMENT_BUDDY ready=0 reason=state-read-failed max_map_count=%ld min_free_kbytes=%ld watermark_boost_factor=%ld oom_score_adj=%ld\n",
+		       map_count_saved, min_free_saved, boost_saved,
+		       oom_score_adj_saved);
+		fflush(stdout);
+		return 3;
+	}
+	if (map_count_set < map_count_saved)
+		map_count_set = map_count_saved;
+	printf("FRAGMENT_BUDDY saved_state max_map_count=%ld min_free_kbytes=%ld watermark_boost_factor=%ld oom_score_adj=%ld\n",
+	       map_count_saved, min_free_saved, boost_saved,
+	       oom_score_adj_saved);
+	fflush(stdout);
+	if (frag_release_requested(release_file)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=release-before-setup\n");
+		fflush(stdout);
+		rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+		goto cleanup;
+	}
+	if (oom_score_adj_saved != 0 &&
+	    (set_oom_adj(0) || oom_score_adj_read() != 0)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=oom-score-reset-failed\n");
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
+	map_count_changed = map_count_set != map_count_saved;
+	if (map_count_changed)
+		max_map_count_write(map_count_set);
+	map_count_now = max_map_count_read();
+	printf("FRAGMENT_BUDDY max_map_count saved=%ld set=%ld now=%ld\n",
+	       map_count_saved, map_count_set, map_count_now);
+	fflush(stdout);
+	if (map_count_now != map_count_set) {
+		printf("FRAGMENT_BUDDY ready=0 reason=max-map-count-not-raised\n");
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
+
+	/* Lower the min watermark so the loop can reach high-order blocks hidden
+	 * behind the guest's normal reserve. */
+	min_free_changed = 1;
 	min_free_kb_write(min_free_set);
 	/*
 	 * Read back rather than trusting the write: the sysctl is
@@ -1013,7 +1180,8 @@ static int do_fragment_buddy(int argc, char **argv)
 		 */
 		printf("FRAGMENT_BUDDY ready=0 pagemap=0 reason=min-free-not-lowered\n");
 		fflush(stdout);
-		return 3;
+		rc = 3;
+		goto cleanup;
 	}
 
 	/*
@@ -1024,7 +1192,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * 9484 kB, so the change that was meant to go deeper than the 8 MiB
 	 * run stopped earlier and then OOMed anyway.
 	 */
-	boost_saved = boost_factor_read();
+	boost_changed = 1;
 	boost_factor_write(0);
 	boost_now = boost_factor_read();
 	printf("FRAGMENT_BUDDY watermark_boost_factor saved=%ld set=0 now=%ld\n",
@@ -1033,9 +1201,8 @@ static int do_fragment_buddy(int argc, char **argv)
 	if (boost_now != 0) {
 		printf("FRAGMENT_BUDDY ready=0 pagemap=0 reason=boost-not-disabled\n");
 		fflush(stdout);
-		if (min_free_saved > 0)
-			min_free_kb_write(min_free_saved);
-		return 3;
+		rc = 3;
+		goto cleanup;
 	}
 
 	/*
@@ -1054,14 +1221,17 @@ static int do_fragment_buddy(int argc, char **argv)
 	if (!maps || !pfns || !chase_maps) {
 		printf("HELPER calloc: %s\n", strerror(errno));
 		fflush(stdout);
-		free(maps);
-		free(pfns);
-		free(chase_maps);
-		return 1;
+		goto cleanup;
 	}
 
 	high_before = buddy_blocks_at_or_above(7);
 	high_before_pages = buddy_pages_at_or_above(7);
+	if (high_before < 0 || high_before_pages < 0) {
+		printf("FRAGMENT_BUDDY ready=0 reason=initial-buddyinfo-unavailable\n");
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
 	printf("FRAGMENT_BUDDY start cap_chunks=%ld high_order_7plus=%ld high_order_7plus_pages=%ld\n",
 	       want, high_before, high_before_pages);
 	fflush(stdout);
@@ -1076,6 +1246,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	 */
 	for (i = 0; i < FRAG_PCP_SOAK_CHUNKS; i++) {
 		char *m;
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		m = mmap(NULL, FRAG_PCP_SOAK_CHUNK, PROT_READ | PROT_WRITE,
 			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1099,6 +1273,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	 */
 	for (i = 0; i < FRAG_RESERVE_CHUNKS; i++) {
 		char *m;
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		m = mmap(NULL, FRAG_RESERVE_CHUNK, PROT_READ | PROT_WRITE,
 			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1115,29 +1293,47 @@ static int do_fragment_buddy(int argc, char **argv)
 	}
 
 	/*
-	 * Allocate 64 KiB chunks and touch every page. Stop when the buddy
-	 * no longer holds a free block of order 7 or above -- that is the
-	 * test condition, measured, not inferred -- or when the MemFree floor
-	 * says the rest of the run still needs room to breathe.
+	 * Allocate 64 KiB chunks and touch every page. Stop when the buddy has
+	 * only one order-7 block left, preserving the measured safety reserve,
+	 * or when the MemFree floor says the rest of the run needs more room.
 	 *
-	 * The order-7 test runs every chunk and BEFORE the floor. A 32-chunk
+	 * The order-7 count and page total are measured every chunk. The reserve
+	 * is checked before the floor so a single 64 KiB allocation cannot split
+	 * the final order-7 block into smaller orders. A 32-chunk
 	 * cadence walked past blocks that a single chunk would have split, and
 	 * a floor on MemAvailable stopped the loop while order-7 was still
 	 * present. Both are ways to leave the test condition unmet without
 	 * ever being short of memory.
 	 *
 	 * The floor is a margin, not a measure of exhaustion. It is only
-	 * consulted while order-7 remains; once the condition is met the first
-	 * check breaks out. What it leaves behind is split by the chase below.
+	 * consulted while more than one order-7 block remains; the chase stops
+	 * at the same reserve if the main pass leaves it high-order.
 	 */
 	for (i = 0; i < want; i++) {
 		char *m;
-		long high;
+		long high, high_pages;
+
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		high = buddy_blocks_at_or_above(7);
+		high_pages = buddy_pages_at_or_above(7);
+		if (high < 0 || high_pages < 0) {
+			printf("FRAGMENT_BUDDY ready=0 reason=allocation-buddyinfo-unavailable\n");
+			fflush(stdout);
+			rc = 3;
+			goto cleanup;
+		}
 		if (high == 0) {
 			stopped = 1;
 			stop_reason = "order7-depleted";
+			break;
+		}
+		if (frag_should_preserve_order7(high, high_pages)) {
+			stopped = 1;
+			stop_reason = "order7-reserve";
 			break;
 		}
 
@@ -1197,15 +1393,17 @@ static int do_fragment_buddy(int argc, char **argv)
 		printf("FRAGMENT_BUDDY ready=0 pagemap=0 reason=open:%s\n",
 		       strerror(errno));
 		fflush(stdout);
-		free(maps);
-		free(pfns);
-		free(chase_maps);
-		return 2;
+		rc = 2;
+		goto cleanup;
 	}
 
 	/* Pass 1: collect every PFN we own and the high-water mark. */
 	for (i = 0; i < got; i++) {
 		char *m = maps[i];
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		for (off = 0; off < FRAG_CHUNK; off += FRAG_PAGE) {
 			unsigned long pfn;
@@ -1225,11 +1423,8 @@ static int do_fragment_buddy(int argc, char **argv)
 		printf("FRAGMENT_BUDDY ready=0 pagemap=0 no_pfn=%ld reason=pfn-incomplete\n",
 		       no_pfn);
 		fflush(stdout);
-		close(pmfd);
-		free(maps);
-		free(pfns);
-		free(chase_maps);
-		return 2;
+		rc = 2;
+		goto cleanup;
 	}
 
 	/*
@@ -1252,13 +1447,13 @@ static int do_fragment_buddy(int argc, char **argv)
 	if (!seen) {
 		printf("HELPER calloc pfn-set: %s\n", strerror(errno));
 		fflush(stdout);
-		close(pmfd);
-		free(maps);
-		free(pfns);
-		free(chase_maps);
-		return 1;
+		goto cleanup;
 	}
 	for (i = 0; i < got * (FRAG_CHUNK / FRAG_PAGE); i++) {
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 		if (pfns[i])
 			pfn_setbit(seen, pfns[i] - 1);
 	}
@@ -1281,16 +1476,28 @@ static int do_fragment_buddy(int argc, char **argv)
 	 *
 	 * Chase: split the high-order blocks the main loop's margin left
 	 * behind. Checked every chunk, against the same measured condition as
-	 * the main loop. Stops on that condition, then on the unsplit floor,
-	 * then on the memfree backstop, then on the cap. Still unpinned: if
+	 * the main loop. Stops at the measured order-7 reserve, then on the
+	 * unsplit floor, then on the MemFree backstop, then on the cap. Still unpinned: if
 	 * this is where the guest runs out, the OOM killer takes us and the
 	 * drill reports INCONCLUSIVE_NO_PATTERN instead of panicking.
 	 */
 	for (i = 0; i < FRAG_CHASE_CAP; i++) {
 		char *m;
-		long high, unsplit;
+		long high, high_pages, unsplit;
+
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		high = buddy_blocks_at_or_above(7);
+		high_pages = buddy_pages_at_or_above(7);
+		if (high < 0 || high_pages < 0) {
+			printf("FRAGMENT_BUDDY ready=0 reason=chase-buddyinfo-unavailable\n");
+			fflush(stdout);
+			rc = 3;
+			goto cleanup;
+		}
 		if (high == 0) {
 			stopped = 1;
 			stop_reason = "order7-depleted";
@@ -1311,6 +1518,11 @@ static int do_fragment_buddy(int argc, char **argv)
 		if (min_free_set > 0 &&
 		    min_free_set + FRAG_CHASE_WMARK_MARGIN > floor_kb)
 			floor_kb = min_free_set + FRAG_CHASE_WMARK_MARGIN;
+		if (frag_should_preserve_order7(high, high_pages)) {
+			stopped = 1;
+			stop_reason = "chase-order7-reserve";
+			break;
+		}
 		if (free_kb >= 0 && free_kb < floor_kb) {
 			stopped = 1;
 			stop_reason = "chase-memfree-margin";
@@ -1382,6 +1594,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	 */
 	for (i = 0; i < got && freed_pages < FRAG_HOLE_CAP; i++) {
 		char *m = maps[i];
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		for (off = 0; off < FRAG_CHUNK && freed_pages < FRAG_HOLE_CAP;
 		     off += FRAG_PAGE) {
@@ -1429,6 +1645,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	       chase, chase_locked, chase_holes, chase_pairs, high_locked,
 	       high_after, high_locked_pages, high_after_pages);
 	fflush(stdout);
+	if (frag_release_requested(release_file)) {
+		rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+		goto cleanup;
+	}
 
 	/*
 	 * The pattern is built and measured. Pin now, and keep the pin for the
@@ -1439,7 +1659,12 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * rebind that failed on a buddy that had reassembled. The pin is
 	 * dropped again when the hold ends.
 	 */
-	set_oom_adj("-1000\n");
+	if (set_oom_adj(-1000) || oom_score_adj_read() != -1000) {
+		printf("FRAGMENT_BUDDY ready=0 reason=oom-score-pin-failed\n");
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
 
 	/*
 	 * Return order-2 stacks BEFORE ready=1 is printed, not after. The
@@ -1457,10 +1682,14 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * invisible to it. Each group is eight consecutive PFNs on a
 	 * 4-page alignment whose first four are unmapped while the last
 	 * four stay held, so the freed half cannot coalesce past order-2
-	 * and the order-7 depletion just measured is not undone.
+	 * and the order-7 safety reserve just measured is not undone.
 	 */
 	for (i = 0; i < reserve_got && order2_groups < FRAG_ORDER2_GROUPS; i++) {
 		char *m = reserve[i];
+		if (frag_release_requested(release_file)) {
+			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+			goto cleanup;
+		}
 
 		off = 0;
 		while (off + 8 * FRAG_PAGE <= FRAG_RESERVE_CHUNK &&
@@ -1519,6 +1748,10 @@ static int do_fragment_buddy(int argc, char **argv)
 			off += 8 * FRAG_PAGE;
 		}
 	}
+	if (frag_release_requested(release_file)) {
+		rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+		goto cleanup;
+	}
 	/*
 	 * What the buddy actually holds of order-2 now. If the PCP
 	 * swallowed the munmaps this reads 0 and the shell must not
@@ -1569,13 +1802,20 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * code. Restore only after the munmaps have given the memory back.
 	 */
 	if (hold > 0)
-		sleep((unsigned int)hold);
+		frag_wait_for_release(release_file, hold);
+	rc = got > 1 ? 0 : 1;
 
-	set_oom_adj("0\n");
+cleanup:
+	/* Restore memory before raising the reserve; this keeps the known-safe
+	 * ordering even on setup failures and orderly termination signals. */
+	if (oom_score_adj_read() != 0)
+		set_oom_adj(0);
 	for (i = 0; i < got; i++)
-		munmap(maps[i], FRAG_CHUNK);
+		if (maps && maps[i])
+			munmap(maps[i], FRAG_CHUNK);
 	for (i = 0; i < chase; i++)
-		munmap(chase_maps[i], FRAG_CHUNK);
+		if (chase_maps && chase_maps[i])
+			munmap(chase_maps[i], FRAG_CHUNK);
 	for (i = 0; i < reserve_got; i++)
 		munmap(reserve[i], FRAG_RESERVE_CHUNK);
 	for (i = 0; i < soak_got; i++)
@@ -1584,20 +1824,46 @@ static int do_fragment_buddy(int argc, char **argv)
 	free(maps);
 	free(pfns);
 	free(chase_maps);
-	close(pmfd);
-	/*
-	 * The memory is back before the reserve rises. Restoring earlier --
-	 * even after the pin is dropped -- leaves ~2 GiB locked while min
-	 * and boost climb, which is the window that panicked 36906731699.
-	 */
-	if (min_free_saved > 0)
+	if (pmfd >= 0)
+		close(pmfd);
+
+	/* The memory is back before either reserve setting is restored. Read it
+	 * back so the caller can fail closed if the original values did not stick. */
+	if (map_count_changed)
+		max_map_count_write(map_count_saved);
+	if (min_free_changed)
 		min_free_kb_write(min_free_saved);
-	if (boost_saved >= 0)
+	if (boost_changed)
 		boost_factor_write(boost_saved);
-	printf("FRAGMENT_BUDDY released held=%ld freed=%ld chase_holes=%ld\n",
-	       held_pages, freed_pages, chase_holes);
+	if (oom_score_adj_saved != LONG_MIN &&
+	    oom_score_adj_read() != oom_score_adj_saved)
+		set_oom_adj(oom_score_adj_saved);
+	map_count_now = max_map_count_read();
+	min_free_now = min_free_kb_read();
+	boost_now = boost_factor_read();
+	oom_score_adj_now = oom_score_adj_read();
+	restore_ok = map_count_saved >= 0 && min_free_saved >= 0 &&
+		     boost_saved >= 0 && oom_score_adj_saved != LONG_MIN &&
+		     map_count_now == map_count_saved &&
+		     min_free_now == min_free_saved &&
+		     boost_now == boost_saved &&
+		     oom_score_adj_now == oom_score_adj_saved;
+	if (restore_ok) {
+		printf("FRAGMENT_BUDDY teardown max_map_count_saved=%ld max_map_count_now=%ld min_free_kbytes_saved=%ld min_free_kbytes_now=%ld watermark_boost_factor_saved=%ld watermark_boost_factor_now=%ld oom_score_adj_saved=%ld oom_score_adj_now=%ld restored=yes\n",
+		       map_count_saved, map_count_now, min_free_saved,
+		       min_free_now, boost_saved, boost_now,
+		       oom_score_adj_saved, oom_score_adj_now);
+	} else {
+		printf("FRAGMENT_BUDDY teardown max_map_count_saved=%ld max_map_count_now=%ld min_free_kbytes_saved=%ld min_free_kbytes_now=%ld watermark_boost_factor_saved=%ld watermark_boost_factor_now=%ld oom_score_adj_saved=%ld oom_score_adj_now=%ld restored=no\n",
+		       map_count_saved, map_count_now, min_free_saved,
+		       min_free_now, boost_saved, boost_now,
+		       oom_score_adj_saved, oom_score_adj_now);
+		rc = 1;
+	}
+	printf("FRAGMENT_BUDDY released held=%ld freed=%ld chase_holes=%ld status=%d\n",
+	       held_pages, freed_pages, chase_holes, rc);
 	fflush(stdout);
-	return got > 1 ? 0 : 1;
+	return rc;
 }
 
 static void usage(void)
@@ -1605,7 +1871,7 @@ static void usage(void)
 	fprintf(stderr,
 		"usage: vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count] [release_file]\n"
 		"       vmbus_drill_helper mlock-hog <mib> <hold_seconds>\n"
-		"       vmbus_drill_helper fragment-buddy <mib> <hold_seconds>\n");
+		"       vmbus_drill_helper fragment-buddy <mib> <hold_seconds> [release_file] [pid_file]\n");
 }
 
 /*

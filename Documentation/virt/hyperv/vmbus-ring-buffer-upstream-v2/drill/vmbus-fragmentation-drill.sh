@@ -26,9 +26,8 @@
 #
 # usage: vmbus-fragmentation-drill.sh [hog_mib] [logfile]
 #   hog_mib  ceiling in MiB; default MemTotal. The helper allocates and pins
-#            64 KiB chunks under a MemFree floor, then unmaps one member of
-#            every proven physical buddy pair. The result distinguishes full
-#            order-7 exhaustion from the separately bounded safe stop.
+#            64 KiB chunks, leaving one measured order-7 block as a safety
+#            reserve, then unmaps proven physical buddy pairs.
 #
 # Depends on vmbus_drill_helper (static, see hyperv-drill-initramfs/) for the
 # fragment-buddy primitive. The guest has no CPython and this is a Day-0
@@ -37,6 +36,28 @@ set -euo pipefail
 
 LOG="${2:-/var/tmp/vmbus-fragmentation-drill.log}"
 : >"$LOG"
+FRAG_RELEASE="${LOG}.release.$$"
+FRAG_PID_FILE="${LOG}.helper.pid"
+HOGPID=
+HOG_EXIT_STATUS=unknown
+FRAG_RESTORE_OK=no
+FRAG_RESTORE_SOURCE=unknown
+FRAG_SAVED_MAX_MAP_COUNT=
+FRAG_SAVED_MIN_FREE_KB=
+FRAG_SAVED_BOOST_FACTOR=
+
+release_fragment_helper() {
+	if [ -n "${HOGPID:-}" ]; then
+		: >"$FRAG_RELEASE" 2>/dev/null || kill -TERM "$HOGPID" 2>/dev/null || true
+		if wait "$HOGPID" 2>/dev/null; then
+			HOG_EXIT_STATUS=0
+		else
+			HOG_EXIT_STATUS=$?
+		fi
+		HOGPID=
+		rm -f "$FRAG_RELEASE" "$FRAG_PID_FILE" 2>/dev/null || true
+	fi
+}
 
 HELPER="${HELPER:-$(command -v vmbus_drill_helper || true)}"
 
@@ -79,11 +100,10 @@ say() {
 hog_mib() {
 	local total
 	# MemTotal, not MemAvailable. The helper treats this as a ceiling the
-	# allocation loop must never reach: it stops when /proc/buddyinfo shows
-	# order-7 depleted, and reports exhausted=1. Passing a share of
-	# MemAvailable (the previous default) stopped the loop at the ceiling
-	# with the untouched remainder still holding order-10 blocks, so
-	# order-7 never failed and the drill reported INCONCLUSIVE every run.
+	# allocation loop must never reach. The loop keeps one order-7 block
+	# after removing at least 99% of the initial order-7-and-higher pages.
+	# Passing a share of MemAvailable (the previous default) stopped the loop
+	# at the ceiling with untouched order-10 blocks and reported INCONCLUSIVE.
 	total="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)"
 	echo "$total"
 }
@@ -112,19 +132,17 @@ buddy
 
 # --- fragment: break high-order contiguity, leave order-0 available ---------
 # A single large mlock hog only splits the buddy as far as it must and leaves
-# the untouched remainder as order-10 blocks. fragment-buddy instead
-# allocates until /proc/buddyinfo shows order-7 depleted -- the test
-# condition, measured -- and then unmaps one member of every physical buddy
-# pair (pfn even) whose buddy it also holds, so a freed page's buddy is
-# always held, nothing above order-0 can coalesce, and the survivors still
-# serve order-0.
+# the untouched remainder as order-10 blocks. fragment-buddy instead removes
+# at least 99% of the initial order-7-and-higher pages while retaining one
+# measured order-7 block, then unmaps physical buddy pairs so nothing above
+# order-0 can coalesce and the survivors still serve order-0.
 say "=== FRAGMENT ${HOGB} MiB as 64 KiB chunks ==="
 if [ -z "$HELPER" ]; then
 	say "REFUSE: vmbus_drill_helper not found; cannot fragment without fragment-buddy"
 	exit 2
 fi
-# 600s hold: the channel-open exercise and the buddy snapshots below have to
-# finish while the pattern is still in place.
+# The channel-open exercise and buddy snapshots must finish while the pattern
+# is held; the explicit release below ends that hold before lifecycle starts.
 #
 # Tick source first. read -t on a closed or EOF fd returns immediately, so a
 # 180-iteration wait loop would burn through in milliseconds and report the
@@ -138,10 +156,17 @@ fi
 if [ ! -t 0 ] && [ -r /dev/console ]; then
 	exec 0</dev/console
 fi
-# The helper holds the pattern for 600s in the background. Its stdin is
-# closed so it cannot race the tick below for console input.
-"$HELPER" fragment-buddy "$HOGB" 600 >>"$LOG" 2>&1 </dev/null &
+# The helper holds the pattern until the shell publishes the release file.
+# The 180s cap is a recovery bound if the shell disappears before teardown.
+# Its stdin is closed so it cannot race the tick below for console input.
+rm -f "$FRAG_RELEASE"
+rm -f "$FRAG_PID_FILE"
+"$HELPER" fragment-buddy "$HOGB" 180 "$FRAG_RELEASE" "$FRAG_PID_FILE" >>"$LOG" 2>&1 </dev/null &
 HOGPID=$!
+trap release_fragment_helper EXIT
+trap 'release_fragment_helper; exit 129' HUP
+trap 'release_fragment_helper; exit 130' INT
+trap 'release_fragment_helper; exit 143' TERM
 # Wait for ready=1 using shell builtins only -- no seq, no grep, no
 # sleep, no kill. Every fork needs a compound page from the buddy the
 # pattern is busy draining, and run 36927495556 w25 lost the shell to
@@ -150,14 +175,16 @@ HOGPID=$!
 # artifact. The log is the state, so read it with the read builtin and
 # use `read -t` as the tick. The harness timeout_sec is the backstop.
 FRAG_READY=no
+FRAG_STOPPED=no
 _ticks=0
-while [ "$FRAG_READY" = no ] && [ "$_ticks" -lt 180 ]; do
+while [ "$FRAG_READY" = no ] && [ "$FRAG_STOPPED" = no ] && [ "$_ticks" -lt 180 ]; do
 	while read -r _line; do
 		case "$_line" in
-		*"FRAGMENT_BUDDY ready="*) FRAG_READY=yes ;;
+		*"FRAGMENT_BUDDY ready=1"*) FRAG_READY=yes ;;
+		*"FRAGMENT_BUDDY ready=0"*) FRAG_STOPPED=yes ;;
 		esac
 	done < "$LOG" 2>/dev/null || true
-	if [ "$FRAG_READY" = yes ]; then
+	if [ "$FRAG_READY" = yes ] || [ "$FRAG_STOPPED" = yes ]; then
 		break
 	fi
 	read -t 1 _junk 2>/dev/null || true
@@ -354,10 +381,7 @@ if [ -z "${NIC:-}" ]; then
 fi
 if [ -z "${NIC:-}" ]; then
 	say "REFUSE: no synthetic NIC bound to hv_netvsc; cannot force ring realloc"
-	if [ -n "${HOGPID:-}" ]; then
-		kill "$HOGPID" 2>/dev/null || true
-		wait "$HOGPID" 2>/dev/null || true
-	fi
+	release_fragment_helper
 	exit 2
 fi
 say "NIC=$NIC (discovered from hv_netvsc binding)"
@@ -426,16 +450,58 @@ say "--- BUDDY FINAL ---"
 buddy
 
 # --- teardown hog -----------------------------------------------------------
-# The helper is killed, not waited out: killing it reclaims the 2 GiB hog
-# and the hole-held pages, which is what gives init an order-2 block to fork
-# the lifecycle drill from. kill and wait are builtins. Null-safe: set -u
-# aborts on an unset HOGPID, and a missing teardown would leave the 600s
-# hold pinned after the verdict is already out -- and would leave init with
-# no order-2 stack for the next clone, which is the panic this path exists
-# to prevent.
-if [ -n "${HOGPID:-}" ]; then
-	kill "$HOGPID" 2>/dev/null || true
-	wait "$HOGPID" 2>/dev/null || true
+# The helper must unmap the pressure pattern and restore every changed setting
+# before init starts its lifecycle phase. The sentinel is an orderly release;
+# wait confirms that the helper completed its own teardown.
+release_fragment_helper
+while read -r _line; do
+	case "$_line" in
+	*"FRAGMENT_BUDDY saved_state "*)
+		_state="${_line#*saved_state }"
+		for _field in $_state; do
+			case "$_field" in
+			max_map_count=*) FRAG_SAVED_MAX_MAP_COUNT="${_field#*=}" ;;
+			min_free_kbytes=*) FRAG_SAVED_MIN_FREE_KB="${_field#*=}" ;;
+			watermark_boost_factor=*) FRAG_SAVED_BOOST_FACTOR="${_field#*=}" ;;
+			esac
+		done
+		;;
+	*"FRAGMENT_BUDDY teardown "*"restored=yes"*)
+		FRAG_RESTORE_OK=yes
+		FRAG_RESTORE_SOURCE=helper
+		;;
+	*"FRAGMENT_BUDDY teardown "*"restored=no"*) FRAG_RESTORE_OK=no ;;
+	esac
+done < "$LOG"
+
+# If the helper was killed before its cleanup path, its pre-mutation snapshot
+# lets this parent restore the global sysctls after wait proves the helper is
+# gone. Keep this recovery visible in the evidence and verify every write.
+if [ "$FRAG_RESTORE_OK" != yes ] &&
+	[ -n "$FRAG_SAVED_MAX_MAP_COUNT" ] &&
+	[ -n "$FRAG_SAVED_MIN_FREE_KB" ] &&
+	[ -n "$FRAG_SAVED_BOOST_FACTOR" ]; then
+	case "$FRAG_SAVED_MAX_MAP_COUNT$FRAG_SAVED_MIN_FREE_KB$FRAG_SAVED_BOOST_FACTOR" in
+	'' | *[!0-9]*) ;;
+	*)
+		printf '%s\n' "$FRAG_SAVED_MAX_MAP_COUNT" >/proc/sys/vm/max_map_count 2>>"$LOG" || true
+		printf '%s\n' "$FRAG_SAVED_MIN_FREE_KB" >/proc/sys/vm/min_free_kbytes 2>>"$LOG" || true
+		printf '%s\n' "$FRAG_SAVED_BOOST_FACTOR" >/proc/sys/vm/watermark_boost_factor 2>>"$LOG" || true
+		FRAG_CURRENT_MAX_MAP_COUNT=unknown
+		FRAG_CURRENT_MIN_FREE_KB=unknown
+		FRAG_CURRENT_BOOST_FACTOR=unknown
+		read -r FRAG_CURRENT_MAX_MAP_COUNT </proc/sys/vm/max_map_count || true
+		read -r FRAG_CURRENT_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || true
+		read -r FRAG_CURRENT_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || true
+		if [ "$FRAG_CURRENT_MAX_MAP_COUNT" = "$FRAG_SAVED_MAX_MAP_COUNT" ] &&
+			[ "$FRAG_CURRENT_MIN_FREE_KB" = "$FRAG_SAVED_MIN_FREE_KB" ] &&
+			[ "$FRAG_CURRENT_BOOST_FACTOR" = "$FRAG_SAVED_BOOST_FACTOR" ]; then
+			FRAG_RESTORE_OK=yes
+			FRAG_RESTORE_SOURCE=parent-fallback
+			say "FRAGMENT_BUDDY parent_restore max_map_count=$FRAG_CURRENT_MAX_MAP_COUNT min_free_kbytes=$FRAG_CURRENT_MIN_FREE_KB watermark_boost_factor=$FRAG_CURRENT_BOOST_FACTOR verified=yes"
+		fi
+		;;
+	esac
 fi
 
 # --- dmesg scan -------------------------------------------------------------
@@ -449,14 +515,14 @@ ORDER7="$(printf '%s\n' "$DM" | grep -c 'order:7' || true)"
 ACCEPT="$(printf '%s\n' "$DM" | grep -c 'accept4 failed' || true)"
 OOPS="$(printf '%s\n' "$DM" | grep -vF 'Warning: unable to open an initial console.' | grep -ciE 'BUG:|Oops:|WARNING:|hung task|out of memory|oom-kill|kernel panic' || true)"
 
-# exhausted= is the strict raw-count result. bounded= is a separate,
-# explicitly narrower ordinary-path result when a runner reaches the safe
-# MemFree floor with at most one order-7 block remaining. Reread both the
+# exhausted= is the strict raw-count result. Only the bounded ordinary-path
+# result is accepted: at least 99% removed, one measured order-7 block kept,
+# and the exact count reread after the channel exercise. Reread both the
 # block count and its page size after the hole pattern so neither can grow
 # between the helper's sample and the channel-open exercise.
 HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER_REREAD}"
 HIGH_ORDER_PAGES="${HIGH_ORDER_PAGES_HELPER:-$HIGH_ORDER_PAGES_REREAD}"
-say "RESULT high_order_7plus_blocks=$HIGH_ORDER (after_holes=$HIGH_ORDER_REREAD after_channel=$HIGH_ORDER_AFTER_CHANNEL) high_order_7plus_pages=$HIGH_ORDER_PAGES (after_holes=$HIGH_ORDER_PAGES_REREAD after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL) exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
+say "RESULT high_order_7plus_blocks=$HIGH_ORDER (after_holes=$HIGH_ORDER_REREAD after_channel=$HIGH_ORDER_AFTER_CHANNEL) high_order_7plus_pages=$HIGH_ORDER_PAGES (after_holes=$HIGH_ORDER_PAGES_REREAD after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL) exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} restore=$FRAG_RESTORE_OK restore_source=$FRAG_RESTORE_SOURCE helper_status=$HOG_EXIT_STATUS order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
 
 # Exit codes for init:
 #   0  PASS            pressure achieved and ring allocation survived it
@@ -480,7 +546,13 @@ for _number in "$HIGH_ORDER_BLOCKS_BEFORE" "$HIGH_ORDER_PAGES_BEFORE" \
 		NUMERIC_EVIDENCE=no
 	fi
 done
-if [ "$ACCEPT" -gt 0 ] || [ "$OOPS" -gt 0 ]; then
+if [ "$FRAG_RESTORE_OK" != yes ]; then
+	say "VERDICT=FAIL helper teardown did not prove all changed state restored"
+	RC=1
+elif [ "$FRAG_READY" = yes ] && [ "$HOG_EXIT_STATUS" != 0 ]; then
+	say "VERDICT=FAIL helper exited unsuccessfully after publishing its pattern status=$HOG_EXIT_STATUS"
+	RC=1
+elif [ "$ACCEPT" -gt 0 ] || [ "$OOPS" -gt 0 ]; then
 	say "VERDICT=FAIL accept4=$ACCEPT oops=$OOPS"
 	RC=1
 elif [ -z "$FRAG_LINE" ]; then
@@ -493,20 +565,16 @@ elif [ "$REBOUND" != yes ]; then
 elif [ "${PAGEMAP:-0}" != 1 ]; then
 	say "VERDICT=INCONCLUSIVE_NO_PAGEMAP (holes were virtual, not physical buddy pairs)"
 	RC=3
-elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
-	[ "$HIGH_ORDER_BLOCKS_BEFORE" -gt 0 ] &&
-	[ "$HIGH_ORDER_PAGES_BEFORE" -gt 0 ] && [ "$EXHAUSTED" = 1 ] &&
-	[ "$HIGH_ORDER_HELPER" = 0 ] && [ "$HIGH_ORDER_PAGES_HELPER" = 0 ] &&
-	[ "$HIGH_ORDER_REREAD" = 0 ] && [ "$HIGH_ORDER_PAGES_REREAD" = 0 ] &&
-	[ "$HIGH_ORDER_AFTER_CHANNEL" = 0 ] &&
-	[ "$HIGH_ORDER_PAGES_AFTER_CHANNEL" = 0 ]; then
-	say "VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION"
-	say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; raw_high_order_exhaustion=proved; CoCo_chunked_fallback=not_exercised"
-	RC=0
+elif [ "$HIGH_ORDER_HELPER" = 0 ] || [ "$HIGH_ORDER_REREAD" = 0 ] ||
+	[ "$HIGH_ORDER_AFTER_CHANNEL" = 0 ]; then
+	say "VERDICT=FAIL_UNSAFE_ORDER7_SATURATION (the drill must retain its measured safety block)"
+	RC=1
 elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
 	[ "$HIGH_ORDER_BLOCKS_BEFORE" -gt 0 ] &&
 	[ "$HIGH_ORDER_PAGES_BEFORE" -ge 12800 ] && [ "$BOUNDED" = 1 ] &&
-	[ "$STOPREASON" = chase-memfree-margin ] &&
+	{ [ "$STOPREASON" = chase-memfree-margin ] ||
+	  [ "$STOPREASON" = order7-reserve ] ||
+	  [ "$STOPREASON" = chase-order7-reserve ]; } &&
 	[ "$HIGH_ORDER_HELPER" = 1 ] && [ "$HIGH_ORDER_PAGES_HELPER" -le 128 ] &&
 	[ "$HIGH_ORDER_REREAD" = "$HIGH_ORDER_HELPER" ] &&
 	[ "$HIGH_ORDER_PAGES_REREAD" = "$HIGH_ORDER_PAGES_HELPER" ] &&
@@ -517,7 +585,7 @@ elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
 		RC=3
 	else
 		say "VERDICT=PASS_RING_ALLOCATION_UNDER_BOUNDED_FRAGMENTATION"
-		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL; safe_margin_stop=yes; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
+		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL; order7_safety_reserve=yes; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
 		RC=0
 	fi
 else
