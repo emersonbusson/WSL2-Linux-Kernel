@@ -1,4 +1,4 @@
-From ccbc87fdf9b903f1e86941695e10f9f755a2c38c Mon Sep 17 00:00:00 2001
+From 707ca539d51c000752040c7def0ac854baf1f4ce Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 11/13] hv: vmbus: allocate the requestor array with
@@ -16,12 +16,10 @@ series is about: a dynamically instantiated sub-channel cannot open
 and the channel is dead for the life of the fragmentation. On a WSL2
 guest the failure prints as
 
-  kworker/...: page allocation failure: order:7, mode:0x40dc0(GFP_KERNEL|__GFP_ZERO|__GFP_COMP)
-  Workqueue: hv_sub_chan vmbus_add_channel_work
-  ? ___kmalloc_large_node
-  ? __kmalloc_noprof
-  ? __vmbus_open
-  hv_netvsc ... eth0: sub channel open failed: -12
+  kworker/...: page allocation failure: order:7,
+mode:0x40dc0(GFP_KERNEL|__GFP_ZERO|__GFP_COMP)   Workqueue: hv_sub_chan
+vmbus_add_channel_work   ? ___kmalloc_large_node   ? __kmalloc_noprof
+? __vmbus_open   hv_netvsc ... eth0: sub channel open failed: -12
 
 The rings themselves already come from vmbus_alloc_buffer() (patch
 1/13), so this removes the order-7 allocation from the open path. A
@@ -70,10 +68,10 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  3 files changed, 176 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 0e0eb98f9132..bfa1adad95d3 100644
+index 2793ca1b7f32..bc5311427509 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -1426,14 +1426,22 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
+@@ -1411,14 +1411,22 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
   * keeps track of the next available slot in the array. Initially, each
   * slot points to the next one (as in a Linked List). The last slot
   * does not point to anything, so its value is U64_MAX by default.
@@ -98,7 +96,7 @@ index 0e0eb98f9132..bfa1adad95d3 100644
  	if (!req_arr)
  		return NULL;
  
-@@ -1451,7 +1459,7 @@ static u64 *request_arr_init(u32 size)
+@@ -1436,7 +1444,7 @@ static u64 *request_arr_init(u32 size)
   * Index 0 is the first free slot
   * @size: Size of the requestor array
   */
@@ -107,7 +105,7 @@ index 0e0eb98f9132..bfa1adad95d3 100644
  {
  	u64 *rqst_arr;
  	unsigned long *bitmap;
-@@ -1462,7 +1470,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1447,7 +1455,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  
  	bitmap = bitmap_zalloc(size, GFP_KERNEL);
  	if (!bitmap) {
@@ -116,7 +114,7 @@ index 0e0eb98f9132..bfa1adad95d3 100644
  		return -ENOMEM;
  	}
  
-@@ -1479,9 +1487,9 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -1464,9 +1472,9 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
   * vmbus_free_requestor - Frees memory allocated for @rqstor
   * @rqstor: Pointer to the requestor struct
   */
@@ -129,12 +127,12 @@ index 0e0eb98f9132..bfa1adad95d3 100644
  }
  
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 8035a231a288..6138a74e05b6 100644
+index 2edeb7988bdc..cac6011949a0 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
-@@ -638,4 +638,15 @@ int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
- 			      vmbus_gpadl_post_fn post_msg,
- 			      void *context);
+@@ -648,4 +648,15 @@ int vmbus_gpadl_teardown_request(struct vmbus_channel *channel,
+ void vmbus_complete_gpadl_teardown(struct vmbus_connection *connection,
+ 				   struct vmbus_channel_gpadl_torndown *response);
  
 +/*
 + * Requestor array lifetime helpers, shared with vmbus_buffer_test.c for
@@ -149,18 +147,18 @@ index 8035a231a288..6138a74e05b6 100644
 +
  #endif /* _HYPERV_VMBUS_H */
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
-index 8bee402ccd78..171f188085f7 100644
+index 5c8e70d861ad..e505c7685676 100644
 --- a/drivers/hv/vmbus_buffer_test.c
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -9,6 +9,7 @@
- #include <kunit/test.h>
+@@ -10,6 +10,7 @@
+ #include <linux/completion.h>
  #include <linux/hyperv.h>
  #include <linux/mm.h>
 +#include <linux/sizes.h>
  #include <linux/slab.h>
  #include <linux/vmalloc.h>
  
-@@ -446,6 +447,151 @@ static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
+@@ -776,6 +777,151 @@ static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
  	KUNIT_EXPECT_EQ(test, context.attempts, (unsigned int)MAX_PAGE_ORDER + 1);
  }
  
@@ -312,7 +310,7 @@ index 8bee402ccd78..171f188085f7 100644
  static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_buffer_size_rounding_test),
  	KUNIT_CASE(vmbus_buffer_size_overflow_test),
-@@ -463,6 +609,11 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+@@ -805,6 +951,11 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_gpadl_post_success_test),
  	KUNIT_CASE(vmbus_gpadl_response_state_test),
  	KUNIT_CASE(vmbus_gpadl_teardown_post_failure_test),
@@ -324,6 +322,3 @@ index 8bee402ccd78..171f188085f7 100644
  	{}
  };
  
--- 
-2.43.0
-

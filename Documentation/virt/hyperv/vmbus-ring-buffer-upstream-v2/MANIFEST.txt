@@ -1,153 +1,39 @@
-MANIFEST — VMBus upstream v2 reproduction dossier
-==================================================
-Updated: 2026-10-05
-Status: source/ordinary-host validation and local install PASS; CoCo PARTIAL; unsent.
-Mainline base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4)
-Applied source tip: 6af42b4cdbc34ae5c68b3a05f301ee0860cf7e20
-Production mail identities are authoritative; the WSL fork is a separate backport.
-Mail shape: cover 0/13 and thirteen code mails. Nothing has been sent.
+MANIFEST — corrected VMBus mainline validation snapshot
+=======================================================
+Status: NO_GO for sending; changed-byte architecture qualification pending.
+Mainline base: 93f51579e7df248780214094418f205253383cc5
+Mainline reconstructed tip: 1c07a43a98c2c2c92efb73d40ab07404a6b639d9
+Expected applied source tree: 55eff83ccf8ef5fef028c5f1d612884cad6010d6
+Shape: thirteen code mails plus one provisional cover. Nothing sent.
+The WSL backport and its native/local results are distinct from mainline.
+The original withdrawn mail package is not modified by this CI snapshot.
 
-COVER
-15ed88c732b84ed534befc2322fe08f997c5db00e50fa856bd1167ff1126154f  series/0000-cover-letter.patch
-lines=204
+PRODUCTION MAIL SHA-256
+274aca668ac001ee850400c2b73b1aab22821ecbee9a4f523be984a45f3930b0  0001-ring-allocation.patch
+60807020ec7d12bd8d1fb3042129a8ad63ced8b5110522c173e84fe5129aed05  0002-allocation-safety.patch
+264d18727ee986412da8d157f3e22c36efac599caa471562965726272fba59df  0003-uio-owner.patch
+d56ce0ff7bf1e77e7d4e5c59e4bbbe1411027d3e821fcd6b7f3e0a07b60ad619  0004-gpadl-fault-injection.patch
+82f7534608ba1c6aecc39386f38e768f13a5ae8ee6c478bc084e6b832d90b803  0005-order-zero-fallback-injection.patch
+0f25df329462641185613cf2ebb7229a8b592832750d1a3fb505f82faec3dd73  0006-shared-page-test.patch
+d96bce74881dc5d341dae06f13704ac0b47f4195f08994d5fe9b08f992069e9d  0007-rescind-vs-unload.patch
+9e7f408a0a5cb8bb917764311257f77666371b463bec75a94adb4a503b6d9cd9  0008-buffer-ownership.patch
+4787e16584a4725e6ff37131129e74a86affea3ba8903bf81e6335ec5053a77c  0009-alloc-buffer-prototype.patch
+80f4740cbc797060a199cf9fac3bae995a059b1f8f80c62430110cd645b3d600  0010-uio-mmap-pin.patch
+44ceb889509bcbaac7f3888edd802842e6c4050f88dd11f073e63a66b4d29081  0011-requestor-kvcalloc.patch
+e0675addf91bc5783bfc0a43042ac6eca0132ea3674300191fe28bea9034e1f4  0012-rndis-request-kvmalloc.patch
+d5176dcdf2c2b49f8381cfef4d2d24fce9cb8df830ee6143666a10da60447170  0013-netvsc-empty-completion-null.patch
 
-PRODUCTION MAILS
-c962e2019a2404c9c57555a2bb8eef1cc87855b2111bd1208d77f9989967fd18  0001-ring-allocation.patch
-b5a2cae1d081f0f21e3d4f621daeef0db8c70c09233d4b976e890b96be7a4e01  0002-allocation-safety.patch
-49e28d1849a8f6f78606a7733b7da9b5cdbcca9b34cd6f2263b84dbf61cf2d37  0003-uio-owner.patch
-2a940e6f7d63bd9ca950290c2c0eb922f53ac731632da573878797f77d36c30b  0004-gpadl-fault-injection.patch
-3a6f8d8f3cffe63d171e2b03d3a3f4248b6282017b182b7f3eb46a584e00aed6  0005-order-zero-fallback-injection.patch
-719aea192306eb4aa70000a040509b6f58670b900c8393cb0dae1778298202f6  0006-shared-page-test.patch
-66bbbd876db3e11ab5a0d3012b105241f4ecf0eb74f3e2ea18e82e89df7df209  0007-rescind-vs-unload.patch
-8fbd4907b146beed0f0dbd6a65f91cf2849431b30c1571bbbb4e43cb9bdc0643  0008-buffer-ownership.patch
-2d9dd093fd0282ef6f47e212900af7282e568fa8788ce46ce3f6c0ff941c9579  0009-alloc-buffer-prototype.patch
-eb256aa6037190e6ee13c4abd2024c65a6cc7ee67a927582e84157cc3990078f  0010-uio-mmap-pin.patch
-efca76ff8197c6b12baaa9afa7a9e753082a728b759a11bd47b5bda30660c31b  0011-requestor-kvcalloc.patch
-d11683ba206131556e38168e78d3091e3adebf8f6cbed244664312d876c9441b  0012-rndis-request-kvmalloc.patch
-73052cc8c2b30aed38bdf58d7a375cf4c348df4d3e9029d9f07c1cd374cac690  0013-netvsc-empty-completion-null.patch
+COVER SHA-256
+71fed0932dcb3e05a958cb6f9792de49d5292f93733257b0a7c3115ac1ad4337  0000-cover-letter.patch
 
-REPRODUCTION TOOLS
-5753a1b2f07924a03f5f6dd1ef525d89c6f9e6964d57054ff1a96b9e606f202b  coco-capability-preflight.sh
-640fd94b56bab94532a44d1e2fb6328efa07eb452d0b6961504ec9160763fd0e  coco-collect.sh
-ee5f581ac79a080ec1a64cb23b9779b277b1d9ba9799a80b695e0a3a5cb234c5  coco-result.schema.json
-da8598169add326463b7b106389352eb64e6bd32be6348325a9a40823ed5c203  coco-static-invariants.py
-5811d7287c2c64704fcc458183725dcc76586439794c4cfac142d33225858d28  coco-validate.py
-01b780b07ca260e2642a1b330c9e14a13ac153326752265eb259e49d9d5a2391  collect-kernel-pair-evidence.py
-eb252b329a80440d92a6e42fc99efa39bf9aa167cfc9207729cc72c8451bc7c3  normalize-diagnostics.py
-05364391df16a3a3085be5e6a4b4a2eb0a130e6da9dd88ca7156958a239212c9  test-kernel-pair-evidence.py
-48d5f977a2a1893031ea7bfa4bd60d9013274f4ec0338899683eada38c04bd52  drill/build-drill-kernel.sh
-d4137f151057a06a5d0d96018bbca6aa2d5fba367ee7bb86f5e43f63b8c761dd  drill/host-rescind.ps1
-8aaeb1bb0b125c2c2f9882e894a01deba82a70dd0bf7eae10afd2c797f95ef6d  drill/init
-41cd537e7b345651ab758b516fa6d714d39a504a1f83381f020fc55b8292b291  drill/new-drill-vm.ps1
-cb22f517babcae13d5e5679f426e6adfe538018b002f79e643bc653d85660adf  drill/owner-trace-accounting.py
-8449ebc6d95979b18f80fa404fa832368f98a1f8e47dc30482ad264e6a17a915  drill/test-host-rescind.ps1
-ce8af3cc1530e4dea8dedee0fe4417ce5a87c6ffeacb6a56706b2e1ff64d86b6  drill/test-reader-heartbeat.ps1
-afdcb6ee7ee3dc817b141c233e0bfc8c3e08ea077bb17338b675d9d422af0861  drill/test-serial-reader.ps1
-16d1dae1b55b3880164bf187c38b0ec7fd4d4d35e35db0a3815bb8c047fe3539  drill/uio-ring-exercise.sh
-e18c4c095e542864a8251f5a951af0543ef4dcad616bf2f1b85c95d640c62ddc  drill/vmbus-fragmentation-drill.sh
-2d9ce71900eadb7f2501c42fd8fa93d6b8a257af691b400f82dd9cf1108bae8c  drill/vmbus-lifecycle-drill.sh
-311a284a29774600e79122492d5cc7df6092b6b28c4269d88414e0968994ede6  drill/vmbus_drill_helper.c
-
-CURRENT SOURCE AND HOST EVIDENCE
-Build 37265334683 on e12825e84515 passes all three jobs: thirteen sequential
-x86_64/arm64 stages, cumulative/per-mail strict style, CoCo static conditions,
-mainline linked QEMU KUnit 54/54 and distinct WSL backport KUnit 17/17.
-ARM's initial Fixes-object fetch fails on changed shallow metadata before
-application; the unchanged exact-source job retry passes. Both attempts stay.
-All thirteen mail bytes match the local 21-file committed mainline source.
-
-Local KUnit has 21 VMBus, 14 UIO, 11 completion, 4 RNDIS and 4 refcount cases.
-Two real-skb cases cover host success/error, send-slot release, queue 1
-accounting/statistics, synchronous disposal and duplicate refusal. An actual
-UIO unregister case pins its notifier, withdraws info and wakes a waiter.
-W=1/C=2 reports four inherited diagnostics, no new kind. Its configuration
-differs from the preceding matched 4/5 comparison; neither is Sparse-clean.
-Static invariants 6/6, checker fixtures 18/18, schema fixtures 11/11,
-owner fixtures 22/22, lifecycle fixtures 15/15 and native observer 3/3 pass.
-The actual native named-pipe burst and seven host-target refusal/effect cases
-pass. Missing/conflicting transport remains PARTIAL; unsafe ownership FAIL.
-
-Controlled runtime 37264609327 on f67a72ca25a5 passes both candidate jobs:
-100 cycles, all five lifecycle subgates, a matching real host offer-rescind,
-target disappearance, zero splat/fault and complete verified owner capture.
-windows-2025: 684 creates / 673 reclaimed / 9 active / 2 retained; order-7+
-supply 499->25->0, fragmentation PASS without OOM.
-windows-latest: 683 / 672 / 9 / 2; supply 493->26->1, fragmentation PARTIAL.
-The two retentions preserve uncertain host ownership, not a revocation proof.
-Both baseline lifecycles fail. Baseline-2025 fragmentation exits 137 (OOM);
-baseline-latest fragmentation is INCONCLUSIVE. Aggregate workflow is failure
-because of baselines; candidate job success is not full fragmentation PASS.
-
-PRECEDING NEGATIVE EVIDENCE
-37261427641 exposes a real stale-UIO-callback panic after netvsc restoration
-in windows-2025; the other candidate starts sysfs mmap before UIO readiness
-and publishes maps=0. Current 0010 removes private rescind registration and
-uses ordinary VMBus unregister. The harness awaits UIO readiness without
-relaxing the independent mapping verdict. The corrected host sequence passes.
-37264606869 executes WSL 17/17 but still asserts four instead of five UIO
-cases. CI-only e12825e84515 corrects that assertion; the fresh build passes.
-37259972312 runs mainline 53/53 but asserts old 51; preceding CI corrects it.
-37242875661 has corrupted owner transport and phase-1 timeouts; their cause
-remains unproven. A later successful run does not exclude a timing-dependent
-hang. Earlier style/Fixes fetch failures remain preserved, never relabeled.
-37245264874 qualifies the preceding 934ef265c4b8 production bytes, including
-both exhausted-buddy legs and verified 680/683-owner capture. Those results
-are historical and do not substitute for current exact-source qualification.
-
-LOCAL WSL PAIR AND ACTIONS IMPORT
-Current kernel SHA-256:
-106bb9d96897064a73d7ffaafb8285ba62cf3e888d3e812f25158458dcd414b5
-Current UIO module SHA-256:
-2b7d6f309a647bf053f63a614a1403b34235ae37da76a1bbff3920cf2ed26c76
-Independent VHDX-to-raw/debugfs readback verifies all 738 modules.
-VHDX SHA-256:
-3f28249d5c5b652073b3887f4b68a42f55445845cb8f2efaf8bf4e3161f252a9
-Immutable pair manifest SHA-256:
-c32274c7347c85677cb9507f40f4fa91f2181c76c7c6128505e5e971399e84bc
-Isolated QEMU validates the image, three supplied modules and zero-module
-boot; a supplied invalid module is refused despite a successful boot.
-No Hyper-V UIO execution under ordinary QEMU is claimed.
-
-The collector checks the manifest pair, executing GNU build ID, fresh boot,
-both configuration keys, installed UIO hash/vermagic and fatal-free readable
-kernel logs. Seven parser/refusal fixtures pass, including strict ABI/whitespace checks. Raw host paths/addresses and
-logs are excluded from the public report; counters and log digest remain.
-Actions 37266143176 archives the byte-matched actual pre-install FAIL report:
-7824922a6101ceaf2d2ab149aff63db6204f3c396c6ad5d16b557dc4439e21db
-That historical report predates installation and remains FAIL.
-An attended atomic pair transaction now boots a measured bundled baseline
-and the exact corrected backport. Both shutdowns return zero with empty-Job
-proof, and fresh GNU identities/boot IDs establish actual VM renewal.
-Full local logs are preserved. All ten maintained runtime checks pass.
-A subsequent actual boot retains the same pair/GNU/module identities and
-passes again, with zero kernel fatals, FORTIFY, init timeout or unclean journal.
-The supported initTimeout=60000 is identical for both comparison legs;
-stock startup measured 13.704 seconds against the default 10000 ms.
-Baseline binfmt failure and 23 DXG metadata query errors match the candidate.
-Prior failed attempts are preserved. This is not product READY; the existing
-production installer remains refused. Neither ordinary runtime observation
-nor report validation qualifies a confidential platform.
-
-Actions 37340362101 and 37340880355 both complete SUCCESS on tooling 8808e225.
-Only the operator-report job runs; prior exact-source build qualification is
-unchanged. The public reports below preserve their actual runtime PASS.
-Report artifacts are byte-matched to the originals after download.
-
-
-CONFIDENTIAL PLATFORM LIMITS
-No SEV-SNP, TDX without paravisor or Arm CCA page-state transition is qualified.
-Ordinary x86_64 uses vzalloc and does not exercise confidential chunk descent.
-No confidential transition-failure diagnostic delta or runtime chunk/order
-counters are supplied. Every unobserved COCO-1..5 row/subcheck stays open.
-coco-collect.sh assembles a draft; complete placeholders and run the full
-coco-validate.py schema/semantic validator before importing a real result.
-Actions can validate/archive a supplied CoCo report; that validates its stated
-scope, not runner hardware or report authenticity. No hardware report exists.
-Real traffic/confidential DMA and every GPADL response ordering remain open.
-The code retains uncertain ownership pending protocol clarification.
-No email, local device binding or cascade pressure is performed by installation.
-Original boot-unit enablement is restored without starting the cascade.
-
-SANITIZED LOCAL OBSERVATIONS
-c9b45e04f3ae0cc0bdc1c1f777c3bb73aeebaa974b464dd884ce67aab9861ccf  local-wsl-installed-report.json
-86b17c3fa0227f601cc8fad91e50c7245aec97a223d73ba0cd248f6e46da9acf  local-wsl-restart-report.json
+MEASURED SCOPE
+Exact final mainline tree: linked x86_64 QEMU KUnit 68/68 locally.
+Shutdown decision mutation: two running-window failures, then restoration PASS.
+Wrapper-unpin mutation: two real-MM failures, then restoration PASS.
+Every reconstructed stage preserves the four-argument exported interfaces.
+Strict mail style: zero errors/checks; only FILE_PATH_CHANGES on 2/10/12/13.
+Per-stage x86_64/arm64 compilation for these mail bytes: pending.
+WSL request/matcher KUnit: 25/25; native collector regressions: 34/34.
+Native ordinary WSL Actions 37395696464: executed PASS, 456 matching ACKs.
+Corrected ordinary local pair: installed and observed; active-data soak pending.
+Confidential transitions and complete mainline unload/destruction: unqualified.

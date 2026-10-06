@@ -1,53 +1,38 @@
-From 1c8317840631cfe12fcdc66bf6c8086111daff29 Mon Sep 17 00:00:00 2001
+From 32a47e763ddd0f557abac0f8c75c2872c5975fd1 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 21:34:10 -0300
-Subject: [PATCH v2 08/13] hv: vmbus: retain buffer ownership across GPADL and
- page state
+Subject: [PATCH v2 08/13] hv: vmbus: retain backing until ownership and
+ references clear
 
-A ring or data buffer can reach release while a GPADL post may have
-reached the host, its teardown has not been acknowledged, or its page
-encryption state is unresolved. Retain a separately owned record until
-host ownership and page state are known and mapping references are gone.
+Keep allocation and GPADL state in one retained owner. Unknown create or
+teardown ownership and failed page transitions retain backing. A known
+live handle may request teardown after a host rescind, but only an
+actual matching reply releases host ownership; timeout and local removal
+do not. Remove response waiters under their list lock before freeing
+them.
 
-A channel-offer rescind is not a GPADL teardown acknowledgment. Neither
-a host-originated rescind nor local unload clears a GPADL handle, leak
-state, or retained host ownership. A matching GPADL_TORNDOWN response or
-a create that could not have reached the host can clear that ownership.
-Without an applicable host protocol guarantee, rescinded buffers remain
-retained; this deliberately prefers retention over host-visible reuse.
+Drain only pending reclaim work successfully acquired by cancellation. A
+running callback retains custody and is never queued for another
+execution. Native-workqueue and private-connection tests cover those
+boundaries without mutating the live connection.
 
-The reclaim workqueue waits for folio references to return to the
-allocator's own reference. It re-encrypts direct-map chunks before
-freeing, and retains backing after an unknown page-state transition.
-Shutdown drains reclaimable owners and preserves unresolved owners.
-
-Introduce the owned allocation/GPADL entry points alongside the existing
-interfaces. The next patch restores the external allocator prototype.
-
-Opaque, monotonically assigned owner identifiers and trace events describe
-create, release, retention, discard and reclaim without kernel addresses.
-Same-sized allocations remain distinct; a release can be reconciled with
-its actual owner rather than a size class.
-
-Five KUnit cases cover the reclaim and scheduling gates, production
-GPADL teardown after host and local rescind (both established handles
-and possibly delivered creates), mapping references, and repeated
-release. Rescind tests require -ENODEV, preserved handles/leak state,
-retained host ownership, and no reclaim scheduling.
+Rollback trigger: revert the lifecycle change if ordinary backing,
+response identity or callback custody cannot be qualified; never free
+unknown host-owned pages to satisfy a bound.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/hv/channel.c           | 677 +++++++++++++++++++++++++++++++++--------
- drivers/hv/channel_mgmt.c      |   3 +
+ drivers/hv/channel.c           | 757 ++++++++++++++++++++++++++-------
+ drivers/hv/channel_mgmt.c      |  24 +-
  drivers/hv/hv_trace.h          |  24 ++
- drivers/hv/hyperv_vmbus.h      |  38 +++
- drivers/hv/vmbus_buffer_test.c | 135 +++++++-
+ drivers/hv/hyperv_vmbus.h      |  51 +++
+ drivers/hv/vmbus_buffer_test.c | 453 +++++++++++++++++++-
  drivers/hv/vmbus_drv.c         |   1 +
- include/linux/hyperv.h         |  18 ++
- 7 files changed, 774 insertions(+), 122 deletions(-)
+ include/linux/hyperv.h         |  18 +
+ 7 files changed, 1171 insertions(+), 157 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index a44903627068..9222d84fc9c3 100644
+index 8ed155f2669f..aa33a0f08a7f 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -23,11 +23,37 @@
@@ -88,10 +73,15 @@ index a44903627068..9222d84fc9c3 100644
  /*
   * vmbus_buffer_round_size() and the order-descent helpers are also called
   * from vmbus_buffer_test.c, which is built into this same object. They are
-@@ -98,6 +124,266 @@ bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
+@@ -98,11 +124,276 @@ bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
  	       !buffer->gpadl.gpadl_handle;
  }
  
+-static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
+-				  u32 size,
+-				  bool confidential,
+-				  struct page ***chunks_out,
+-				  u32 *chunk_cnt_out);
 +/* Caller holds the owner lock or exclusive custody of this owner. */
 +static void vmbus_buffer_trace_owner(const struct vmbus_buffer_retained *owner,
 +				     const char *action)
@@ -316,6 +306,20 @@ index a44903627068..9222d84fc9c3 100644
 +	vmbus_buffer_owner_free(owner);
 +}
 +
++/* Caller holds the owner lock or exclusive custody of this owner. */
++void vmbus_buffer_owner_drain(struct vmbus_buffer_retained *owner,
++			      struct workqueue_struct *wq)
++{
++	if (!cancel_delayed_work(&owner->reclaim_work))
++		return;
++
++	owner->work_active = false;
++	if (wq && vmbus_buffer_owner_can_reclaim(owner)) {
++		owner->work_active = true;
++		mod_delayed_work(wq, &owner->reclaim_work, 0);
++	}
++}
++
 +void vmbus_buffer_reclaimer_shutdown(void)
 +{
 +	struct workqueue_struct *wq;
@@ -336,26 +340,22 @@ index a44903627068..9222d84fc9c3 100644
 +	 * destroy_workqueue() below waits for it to finish.
 +	 *
 +	 * An owner that is already ready to reclaim must not be lost
-+	 * with its cancelled timer. Queue it once more so the drain
-+	 * below frees its pages before the workqueue goes away.
++	 * with its cancelled timer. Requeue only work that was actually
++	 * cancelled: a running callback owns its embedded work item and
++	 * may free the owner before a second queued execution can run.
++	 * destroy_workqueue() drains that running callback itself.
 +	 */
-+	list_for_each_entry(owner, &vmbus_buffer_owners, list) {
-+		cancel_delayed_work(&owner->reclaim_work);
-+		if (wq && vmbus_buffer_owner_can_reclaim(owner)) {
-+			owner->work_active = true;
-+			mod_delayed_work(wq, &owner->reclaim_work, 0);
-+		}
-+	}
++	list_for_each_entry(owner, &vmbus_buffer_owners, list)
++		vmbus_buffer_owner_drain(owner, wq);
 +	mutex_unlock(&vmbus_buffer_owners_lock);
 +
 +	if (wq)
 +		destroy_workqueue(wq);
 +}
-+
+ 
  /*
   * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
-  *
-@@ -242,30 +528,20 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
+@@ -248,30 +539,20 @@ int vmbus_alloc_ring(struct vmbus_channel *newchannel,
  {
  	struct vmbus_buffer *buffer = &newchannel->ringbuffer;
  	u32 size;
@@ -367,9 +367,9 @@ index a44903627068..9222d84fc9c3 100644
  	    check_add_overflow(send_size, recv_size, &size))
  		return -EINVAL;
  
--	buffer->addr = vmbus_alloc_buffer(newchannel, size,
--					  newchannel->co_ring_buffer,
--					  &buffer->chunks, &buffer->chunk_cnt);
+-	buffer->addr = __vmbus_alloc_buffer(newchannel, size,
+-					    newchannel->co_ring_buffer,
+-					    &buffer->chunks, &buffer->chunk_cnt);
 -	if (!buffer->addr)
 -		return -ENOMEM;
 +	ret = vmbus_alloc_buffer_owned(newchannel, size,
@@ -391,7 +391,7 @@ index a44903627068..9222d84fc9c3 100644
  
  	return 0;
  }
-@@ -565,12 +841,15 @@ int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
+@@ -571,12 +852,15 @@ int vmbus_post_gpadl_messages(struct vmbus_channel_msginfo *msginfo,
  int vmbus_gpadl_response_status(u32 creation_status, bool rescind,
  				bool *posted)
  {
@@ -409,7 +409,7 @@ index a44903627068..9222d84fc9c3 100644
  	return 0;
  }
  
-@@ -593,21 +872,22 @@ int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
+@@ -599,21 +883,22 @@ int vmbus_post_gpadl_teardown(u32 child_relid,
  }
  
  static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
@@ -438,7 +438,7 @@ index a44903627068..9222d84fc9c3 100644
  	gpadl->leak = false;
  
  	next_gpadl_handle =
-@@ -635,6 +915,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -641,6 +926,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  			dev_warn(&channel->device_obj->device,
  				"Failed to set host visibility for new GPADL %d.\n",
  				ret);
@@ -448,7 +448,7 @@ index a44903627068..9222d84fc9c3 100644
  			vmbus_free_channel_msginfo(msginfo);
  			return ret;
  		}
-@@ -662,6 +945,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -668,6 +956,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	ret = vmbus_post_gpadl_messages(msginfo, next_gpadl_handle, &posted,
  					vmbus_gpadl_post_real, NULL);
@@ -457,7 +457,7 @@ index a44903627068..9222d84fc9c3 100644
  	if (ret)
  		goto cleanup;
  
-@@ -681,6 +966,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -687,6 +977,8 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	gpadl->gpadl_handle = gpadlmsg->gpadl;
  	gpadl->buffer = kbuffer;
  	gpadl->size = size;
@@ -466,7 +466,7 @@ index a44903627068..9222d84fc9c3 100644
  
  cleanup:
  	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
-@@ -689,40 +976,44 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -695,40 +987,44 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  
  	vmbus_free_channel_msginfo(msginfo);
  
@@ -518,7 +518,7 @@ index a44903627068..9222d84fc9c3 100644
  			  u32 size, struct vmbus_gpadl *gpadl)
  {
 -	return __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, kbuffer, size,
--				       0U, false, NULL, gpadl);
+-				       0U, false, &gpadl->leak, gpadl);
 +	struct vmbus_buffer buffer = {
 +		.addr = kbuffer,
 +		.size = size,
@@ -533,12 +533,17 @@ index a44903627068..9222d84fc9c3 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
  
-@@ -744,8 +1035,21 @@ int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
- 					   bool *leak,
- 					   struct vmbus_gpadl *gpadl)
+@@ -746,11 +1042,20 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
+  * The caller is responsible for re-encrypting the buffer before freeing it.
+  */
+ int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
+-					   void *kbuffer, u32 size,
+-					   struct vmbus_gpadl *gpadl)
++					  void *kbuffer, u32 size,
++					  struct vmbus_gpadl *gpadl)
  {
 -	return __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER,
--				       kbuffer, size, 0U, true, leak, gpadl);
+-				       kbuffer, size, 0U, true, &gpadl->leak, gpadl);
 +	struct vmbus_buffer buffer = {
 +		.addr = kbuffer,
 +		.size = size,
@@ -546,18 +551,14 @@ index a44903627068..9222d84fc9c3 100644
 +	};
 +	int ret;
 +
-+	if (leak)
-+		*leak = false;
 +	ret = __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, &buffer,
 +				      0U, true);
 +	*gpadl = buffer.gpadl;
-+	if (ret && gpadl->leak && leak)
-+		*leak = true;
 +	return ret;
  }
  EXPORT_SYMBOL_GPL(vmbus_establish_gpadl_caller_decrypted);
  
-@@ -788,16 +1092,51 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+@@ -793,16 +1098,51 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
  }
  EXPORT_SYMBOL_GPL(vmbus_free_buffer);
  
@@ -571,7 +572,7 @@ index a44903627068..9222d84fc9c3 100644
 +		if (owner)
 +			vmbus_buffer_owner_remove(owner);
 +		memset(buffer, 0, sizeof(*buffer));
-+		return;
+ 		return;
 +	}
 +
 +	if (!owner) {
@@ -585,7 +586,7 @@ index a44903627068..9222d84fc9c3 100644
 +			pr_warn_ratelimited("VMBus buffer has no ownership record; retaining backing pages\n");
 +		}
 +		memset(buffer, 0, sizeof(*buffer));
- 		return;
++		return;
 +	}
 +
 +	mutex_lock(&vmbus_buffer_owners_lock);
@@ -614,11 +615,11 @@ index a44903627068..9222d84fc9c3 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_release_buffer);
  
-@@ -810,14 +1149,13 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+@@ -815,14 +1155,13 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
  }
  
  /**
-- * vmbus_alloc_buffer - allocate a host-visible, virtually-contiguous buffer.
+- * __vmbus_alloc_buffer - allocate host-visible, virtually-contiguous backing.
 + * vmbus_alloc_buffer_owned - allocate a host-visible, virtually-contiguous
 + * buffer with VMBus-managed backing-page lifetime.
   *
@@ -632,18 +633,18 @@ index a44903627068..9222d84fc9c3 100644
   *
   * Buffers not requiring decryption are allocated with vzalloc().
   *
-@@ -827,51 +1165,67 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
+@@ -832,51 +1171,67 @@ static struct page *vmbus_alloc_pages_node(void *context, int nid,
   * host-visible via set_memory_decrypted() on its direct-map address, then all
   * chunks are combined into a virtually-contiguous range via vmap().
   *
 - * Return: the buffer's virtual address, or NULL on failure.
 + * Return: 0 on success, or a negative error code.
   */
--void *vmbus_alloc_buffer(struct vmbus_channel *channel,
--			 u32 size,
--			 bool confidential,
--			 struct page ***chunks_out,
--			 u32 *chunk_cnt_out)
+-static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
+-				  u32 size,
+-				  bool confidential,
+-				  struct page ***chunks_out,
+-				  u32 *chunk_cnt_out)
 +int vmbus_alloc_buffer_owned(struct vmbus_channel *channel, u32 size,
 +			     bool confidential, struct vmbus_buffer *buffer)
  {
@@ -722,7 +723,7 @@ index a44903627068..9222d84fc9c3 100644
  		goto err;
  
  	while (remaining) {
-@@ -889,6 +1243,11 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -894,6 +1249,11 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  		if (!page)
  			goto err;
  
@@ -734,7 +735,7 @@ index a44903627068..9222d84fc9c3 100644
  		ret = set_memory_decrypted((unsigned long)page_address(page),
  					   1U << order);
  		if (ret) {
-@@ -896,32 +1255,58 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -901,40 +1261,56 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  			 * set_memory_decrypted() failed; the page state is
  			 * unknown so it must be leaked rather than freed.
  			 */
@@ -773,19 +774,22 @@ index a44903627068..9222d84fc9c3 100644
 -	return NULL;
 +	vmbus_release_buffer(buffer);
 +	return -ENOMEM;
-+}
+ }
+-
+-void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+-			 u32 size, struct page ***chunks_out,
+-			 u32 *chunk_cnt_out)
 +EXPORT_SYMBOL_GPL(vmbus_alloc_buffer_owned);
 +/*
 + * vmbus_alloc_buffer - compatibility allocator for callers managing lifetime.
 + * New callers that need retained GPADL and mmap ownership should use
 + * vmbus_alloc_buffer_owned().
 + */
-+void *vmbus_alloc_buffer(struct vmbus_channel *channel,
-+			 u32 size,
-+			 bool confidential,
-+			 struct page ***chunks_out,
-+			 u32 *chunk_cnt_out)
-+{
++void *vmbus_alloc_buffer(struct vmbus_channel *channel, u32 size,
++			 struct page ***chunks_out, u32 *chunk_cnt_out)
+ {
+-	return __vmbus_alloc_buffer(channel, size, channel->co_external_memory,
+-				    chunks_out, chunk_cnt_out);
 +	struct vmbus_buffer buffer = {};
 +	void *addr;
 +	int ret;
@@ -795,7 +799,8 @@ index a44903627068..9222d84fc9c3 100644
 +
 +	*chunks_out = NULL;
 +	*chunk_cnt_out = 0;
-+	ret = vmbus_alloc_buffer_owned(channel, size, confidential, &buffer);
++	ret = vmbus_alloc_buffer_owned(channel, size,
++				       channel->co_external_memory, &buffer);
 +	if (ret)
 +		return NULL;
 +
@@ -809,7 +814,7 @@ index a44903627068..9222d84fc9c3 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
  
-@@ -1025,11 +1410,9 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -1038,11 +1414,9 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  	/* Establish the gpadl for the ring buffer */
  	buffer->gpadl.gpadl_handle = 0;
  
@@ -823,7 +828,7 @@ index a44903627068..9222d84fc9c3 100644
  	if (err)
  		goto error_clean_ring;
  
-@@ -1120,8 +1503,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -1133,8 +1507,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  error_free_info:
  	kfree(open_info);
  error_free_gpadl:
@@ -833,13 +838,17 @@ index a44903627068..9222d84fc9c3 100644
  error_clean_ring:
  	hv_ringbuffer_cleanup(&newchannel->outbound);
  	hv_ringbuffer_cleanup(&newchannel->inbound);
-@@ -1167,12 +1549,30 @@ EXPORT_SYMBOL_GPL(vmbus_open);
+@@ -1180,62 +1553,155 @@ EXPORT_SYMBOL_GPL(vmbus_open);
  /*
   * vmbus_teardown_gpadl -Teardown the specified GPADL handle
   */
 -int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpadl)
-+static int __vmbus_teardown_gpadl_buffer(struct vmbus_channel *channel,
-+					 struct vmbus_buffer *buffer)
++int vmbus_gpadl_teardown_request(struct vmbus_channel *channel,
++				 struct vmbus_buffer *buffer,
++				 vmbus_gpadl_info_alloc_fn alloc_info,
++				 struct vmbus_connection *connection,
++				 vmbus_gpadl_teardown_post_fn post,
++				 unsigned long timeout)
  {
  	struct vmbus_channel_gpadl_teardown *msg;
  	struct vmbus_channel_msginfo *info;
@@ -849,44 +858,75 @@ index a44903627068..9222d84fc9c3 100644
 -	int ret;
 +	int ret = -ENODEV;
 +	u32 handle = gpadl->gpadl_handle;
++	u32 relid = channel->offermsg.child_relid;
 +
 +	if (!handle && !gpadl->leak)
 +		return 0;
 +
-+	/* An offer rescind is not a GPADL teardown acknowledgment. */
-+	if (READ_ONCE(channel->rescind)) {
-+		gpadl->leak = true;
-+		return -ENODEV;
-+	}
++	/* Host rescind permits a request, but only the actual ACK releases it. */
++	if (relid == INVALID_RELID ||
++	    (READ_ONCE(channel->rescind) &&
++	     !READ_ONCE(channel->rescind_from_host)))
++		goto retain;
 +
 +	if (!handle) {
-+		gpadl->leak = true;
-+		return -EINPROGRESS;
++		ret = -EINPROGRESS;
++		goto retain;
 +	}
  
- 	info = kzalloc(sizeof(*info) +
- 		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
-@@ -1192,37 +1592,75 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
- 		      &vmbus_connection.chn_msg_list);
- 	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
+-	info = kzalloc(sizeof(*info) +
+-		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
++	info = alloc_info();
+ 	if (!info) {
+-		gpadl->leak = true;
+-		return -ENOMEM;
++		ret = -ENOMEM;
++		goto retain;
+ 	}
+ 
+ 	init_completion(&info->waitevent);
+-	info->waiting_channel = channel;
++	/* A synthetic rescind completion must not stand in for the host reply. */
++	info->waiting_channel = NULL;
+ 
+ 	msg = (struct vmbus_channel_gpadl_teardown *)info->msg;
++	msg->header.msgtype = CHANNELMSG_GPADL_TEARDOWN;
++	msg->child_relid = relid;
++	msg->gpadl = handle;
+ 
+ 
+-	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
+-	list_add_tail(&info->msglistentry,
+-		      &vmbus_connection.chn_msg_list);
+-	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
++	spin_lock_irqsave(&connection->channelmsg_lock, flags);
++	list_add_tail(&info->msglistentry, &connection->chn_msg_list);
++	spin_unlock_irqrestore(&connection->channelmsg_lock, flags);
  
 -	if (channel->rescind)
 -		goto post_msg_err;
-+	if (READ_ONCE(channel->rescind))
-+		goto resolve_rescind;
++	if (channel->offermsg.child_relid != relid ||
++	    (READ_ONCE(channel->rescind) &&
++	     !READ_ONCE(channel->rescind_from_host)))
++		goto cleanup;
  
--	ret = vmbus_post_gpadl_teardown(channel, msg, gpadl->gpadl_handle,
-+	ret = vmbus_post_gpadl_teardown(channel, msg, handle,
- 					vmbus_gpadl_post_real, NULL);
+-	ret = vmbus_post_gpadl_teardown(channel->offermsg.child_relid, msg, gpadl->gpadl_handle,
+-					vmbus_gpadl_post_real, NULL);
++	ret = post(connection, info);
  
  	if (ret)
 -		goto post_msg_err;
+-
+-	wait_for_completion(&info->waitevent);
 +		goto cleanup;
  
- 	wait_for_completion(&info->waitevent);
- 
 -	gpadl->gpadl_handle = 0;
--
++	/* A lost transport is bounded; expiry retains unknown host ownership. */
++	if (!wait_for_completion_timeout(&info->waitevent, timeout)) {
++		ret = -ETIMEDOUT;
++		goto cleanup;
++	}
+ 
 -post_msg_err:
 -	/*
 -	 * If the channel has been rescinded;
@@ -894,7 +934,9 @@ index a44903627068..9222d84fc9c3 100644
 -	 * handler; set the error code to zero so we don't leak memory.
 -	 */
 -	if (channel->rescind)
-+	if (info->response.gpadl_torndown.gpadl == handle) {
++	if (info->response.gpadl_torndown.header.msgtype ==
++	    CHANNELMSG_GPADL_TORNDOWN &&
++	    info->response.gpadl_torndown.gpadl == handle) {
  		ret = 0;
 +		gpadl->gpadl_handle = 0;
 +		gpadl->leak = false;
@@ -903,19 +945,20 @@ index a44903627068..9222d84fc9c3 100644
 +		goto cleanup;
 +	}
  
-+resolve_rescind:
+-	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
 +	ret = -ENODEV;
-+	gpadl->leak = true;
 +
 +cleanup:
- 	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
++	spin_lock_irqsave(&connection->channelmsg_lock, flags);
  	list_del(&info->msglistentry);
- 	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
+-	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
++	spin_unlock_irqrestore(&connection->channelmsg_lock, flags);
  
  	kfree(info);
  
 -	if (!ret && gpadl->decrypted) {
 -		int encrypt_ret;
++retain:
 +	if (ret) {
 +		gpadl->leak = true;
 +		if (owner)
@@ -923,6 +966,30 @@ index a44903627068..9222d84fc9c3 100644
 +	}
 +
 +	return ret;
++}
+ 
++static struct vmbus_channel_msginfo *vmbus_alloc_teardown_info(void)
++{
++	return kzalloc(sizeof(struct vmbus_channel_msginfo) +
++		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
++}
++
++static int vmbus_gpadl_teardown_post_real(struct vmbus_connection *connection,
++					  struct vmbus_channel_msginfo *info)
++{
++	struct vmbus_channel_gpadl_teardown *msg = (void *)info->msg;
++
++	return vmbus_post_gpadl_teardown(msg->child_relid, msg, msg->gpadl,
++					vmbus_gpadl_post_real, NULL);
++}
++
++static int __vmbus_teardown_gpadl_buffer(struct vmbus_channel *channel,
++					 struct vmbus_buffer *buffer)
++{
++	return vmbus_gpadl_teardown_request(channel, buffer,
++					  vmbus_alloc_teardown_info,
++					  &vmbus_connection,
++					  vmbus_gpadl_teardown_post_real, 5 * HZ);
 +}
 +
 +int vmbus_teardown_gpadl_owned(struct vmbus_channel *channel,
@@ -943,7 +1010,7 @@ index a44903627068..9222d84fc9c3 100644
 +
 +	ret = __vmbus_teardown_gpadl_buffer(channel, &buffer);
 +	*gpadl = buffer.gpadl;
- 
++
 +	/*
 +	 * The compat entry point builds an owner-less buffer, so the
 +	 * reclaim path never sees it and cannot re-encrypt on its
@@ -957,7 +1024,7 @@ index a44903627068..9222d84fc9c3 100644
  		encrypt_ret = set_memory_encrypted((unsigned long)gpadl->buffer,
  						   PFN_UP(gpadl->size));
  		if (encrypt_ret) {
-@@ -1232,8 +1670,6 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1245,8 +1711,6 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  		}
  		gpadl->decrypted = !!encrypt_ret;
  	}
@@ -966,7 +1033,7 @@ index a44903627068..9222d84fc9c3 100644
  
  	return ret;
  }
-@@ -1310,9 +1746,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
+@@ -1323,9 +1787,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
  
  	/* Tear down the gpadl for the channel's ring buffer */
  	else if (channel->ringbuffer.gpadl.gpadl_handle) {
@@ -978,7 +1045,7 @@ index a44903627068..9222d84fc9c3 100644
  			/*
  			 * If we failed to teardown gpadl,
 diff --git a/drivers/hv/channel_mgmt.c b/drivers/hv/channel_mgmt.c
-index 93fc105cd179..271c9508de00 100644
+index 93fc105cd179..be0f70a3541c 100644
 --- a/drivers/hv/channel_mgmt.c
 +++ b/drivers/hv/channel_mgmt.c
 @@ -26,6 +26,8 @@
@@ -998,6 +1065,53 @@ index 93fc105cd179..271c9508de00 100644
  	WRITE_ONCE(channel->rescind, false);
  	WRITE_ONCE(channel->rescind_from_host, false);
  
+@@ -1484,26 +1487,23 @@ static void vmbus_onmodifychannel_response(struct vmbus_channel_message_header *
+  * Find the matching request, copy the response and signal the requesting
+  * thread.
+  */
+-static void vmbus_ongpadl_torndown(
+-			struct vmbus_channel_message_header *hdr)
++void vmbus_complete_gpadl_teardown(struct vmbus_connection *connection,
++				   struct vmbus_channel_gpadl_torndown *gpadl_torndown)
+ {
+-	struct vmbus_channel_gpadl_torndown *gpadl_torndown;
+ 	struct vmbus_channel_msginfo *msginfo;
+ 	struct vmbus_channel_message_header *requestheader;
+ 	struct vmbus_channel_gpadl_teardown *gpadl_teardown;
+ 	unsigned long flags;
+ 
+-	gpadl_torndown = (struct vmbus_channel_gpadl_torndown *)hdr;
+-
+ 	trace_vmbus_ongpadl_torndown(gpadl_torndown);
+ 
+ 	/*
+ 	 * Find the open msg, copy the result and signal/unblock the wait event
+ 	 */
+-	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
++	spin_lock_irqsave(&connection->channelmsg_lock, flags);
+ 
+-	list_for_each_entry(msginfo, &vmbus_connection.chn_msg_list,
+-				msglistentry) {
++	list_for_each_entry(msginfo, &connection->chn_msg_list,
++			    msglistentry) {
+ 		requestheader =
+ 			(struct vmbus_channel_message_header *)msginfo->msg;
+ 
+@@ -1521,7 +1521,13 @@ static void vmbus_ongpadl_torndown(
+ 			}
+ 		}
+ 	}
+-	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
++	spin_unlock_irqrestore(&connection->channelmsg_lock, flags);
++}
++
++static void vmbus_ongpadl_torndown(struct vmbus_channel_message_header *hdr)
++{
++	vmbus_complete_gpadl_teardown(&vmbus_connection,
++				      (struct vmbus_channel_gpadl_torndown *)hdr);
+ }
+ 
+ /*
 diff --git a/drivers/hv/hv_trace.h b/drivers/hv/hv_trace.h
 index c02a1719e92f..a3eeb817b00e 100644
 --- a/drivers/hv/hv_trace.h
@@ -1034,7 +1148,7 @@ index c02a1719e92f..a3eeb817b00e 100644
  	TP_PROTO(const struct vmbus_channel_message_header *hdr),
  	TP_ARGS(hdr),
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index e4bb33548b98..01fd3b488b86 100644
+index 06094000f2f1..2edeb7988bdc 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -354,6 +354,7 @@ struct vmbus_channel_message_table_entry {
@@ -1077,7 +1191,7 @@ index e4bb33548b98..01fd3b488b86 100644
  /*
   * vmbus buffer sizing, order-descent and free-decision helpers.
   *
-@@ -578,6 +604,18 @@ struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
+@@ -578,6 +604,20 @@ struct page *vmbus_alloc_pages_with_fallback(int nid, gfp_t gfp,
  					     vmbus_alloc_pages_fn alloc,
  					     void *context);
  
@@ -1090,18 +1204,45 @@ index e4bb33548b98..01fd3b488b86 100644
 +bool vmbus_buffer_owner_should_schedule(const struct vmbus_buffer_retained *owner,
 +					bool stopping, bool queue_live);
 +bool vmbus_buffer_pages_busy(struct vmbus_buffer_retained *owner);
++void vmbus_buffer_owner_drain(struct vmbus_buffer_retained *owner,
++			      struct workqueue_struct *wq);
 +struct vmbus_buffer_retained *
 +vmbus_buffer_owner_alloc(struct vmbus_channel *channel);
 +
  /*
   * GPADL post and response helpers, also shared with vmbus_buffer_test.c.
   * Same deal as the sizing helpers above: defined in channel.c, built into
+@@ -596,5 +636,16 @@ int vmbus_post_gpadl_teardown(u32 child_relid,
+ 			      u32 gpadl,
+ 			      vmbus_gpadl_post_fn post_msg,
+ 			      void *context);
++typedef struct vmbus_channel_msginfo *(*vmbus_gpadl_info_alloc_fn)(void);
++typedef int (*vmbus_gpadl_teardown_post_fn)(struct vmbus_connection *connection,
++					 struct vmbus_channel_msginfo *info);
++int vmbus_gpadl_teardown_request(struct vmbus_channel *channel,
++				 struct vmbus_buffer *buffer,
++				 vmbus_gpadl_info_alloc_fn alloc_info,
++				 struct vmbus_connection *connection,
++				 vmbus_gpadl_teardown_post_fn post,
++				 unsigned long timeout);
++void vmbus_complete_gpadl_teardown(struct vmbus_connection *connection,
++				   struct vmbus_channel_gpadl_torndown *response);
+ 
+ #endif /* _HYPERV_VMBUS_H */
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
-index 515fc14dc708..d71d56296023 100644
+index 9b401ef2ceea..5c8e70d861ad 100644
 --- a/drivers/hv/vmbus_buffer_test.c
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -57,6 +57,134 @@ static void vmbus_buffer_private_shared_selection_test(struct kunit *test)
- 			   vmbus_needs_shared_pages(true, true, true));
+@@ -7,6 +7,7 @@
+  * without exporting them.
+  */
+ #include <kunit/test.h>
++#include <linux/completion.h>
+ #include <linux/hyperv.h>
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+@@ -66,6 +67,439 @@ static void vmbus_buffer_private_shared_selection_test(struct kunit *test)
+ 				cases[i].shared);
  }
  
 +static void vmbus_buffer_owner_reclaim_gate_test(struct kunit *test)
@@ -1150,6 +1291,133 @@ index 515fc14dc708..d71d56296023 100644
 +			   vmbus_buffer_owner_should_schedule(&owner, false, false));
 +}
 +
++struct vmbus_reclaim_test_work {
++	struct vmbus_buffer_retained owner;
++	struct workqueue_struct *wq;
++	struct completion entered;
++	struct completion proceed;
++	atomic_t calls;
++	bool claim_owner;
++};
++
++static void vmbus_reclaim_test_callback(struct work_struct *work)
++{
++	struct vmbus_buffer_retained *owner =
++		container_of(to_delayed_work(work),
++			     struct vmbus_buffer_retained, reclaim_work);
++	struct vmbus_reclaim_test_work *ctx =
++		container_of(owner, struct vmbus_reclaim_test_work, owner);
++
++	atomic_inc(&ctx->calls);
++	if (ctx->claim_owner)
++		owner->reclaiming = true;
++	complete(&ctx->entered);
++	wait_for_completion(&ctx->proceed);
++}
++
++static void vmbus_reclaim_test_cleanup(void *data)
++{
++	struct vmbus_reclaim_test_work *ctx = data;
++
++	complete_all(&ctx->proceed);
++	cancel_delayed_work_sync(&ctx->owner.reclaim_work);
++	destroy_workqueue(ctx->wq);
++}
++
++static struct vmbus_reclaim_test_work *
++vmbus_reclaim_test_init(struct kunit *test)
++{
++	struct vmbus_reclaim_test_work *ctx;
++
++	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return NULL;
++	init_completion(&ctx->entered);
++	init_completion(&ctx->proceed);
++	atomic_set(&ctx->calls, 0);
++	ctx->owner.released = true;
++	ctx->owner.work_active = true;
++	INIT_DELAYED_WORK(&ctx->owner.reclaim_work,
++			  vmbus_reclaim_test_callback);
++	ctx->wq = alloc_workqueue("vmbus-reclaim-test",
++				  WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
++	if (!ctx->wq)
++		return NULL;
++	if (kunit_add_action_or_reset(test, vmbus_reclaim_test_cleanup, ctx))
++		return NULL;
++	return ctx;
++}
++
++static void vmbus_reclaim_running_test(struct kunit *test, bool claim_owner)
++{
++	struct vmbus_reclaim_test_work *ctx = vmbus_reclaim_test_init(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	ctx->claim_owner = claim_owner;
++	KUNIT_ASSERT_TRUE(test,
++			  queue_delayed_work(ctx->wq, &ctx->owner.reclaim_work, 0));
++	KUNIT_ASSERT_NE(test,
++			wait_for_completion_timeout(&ctx->entered,
++						    msecs_to_jiffies(1000)), 0UL);
++
++	/*
++	 * The native workqueue cleared pending before entering the callback.
++	 * Test both windows around the callback taking ownership. Keep the
++	 * fixture alive so an incorrect second queue fails without a UAF.
++	 */
++	vmbus_buffer_owner_drain(&ctx->owner, ctx->wq);
++	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&ctx->owner.reclaim_work));
++	KUNIT_EXPECT_TRUE(test, ctx->owner.work_active);
++	complete_all(&ctx->proceed);
++	flush_workqueue(ctx->wq);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->calls), 1);
++}
++
++static void vmbus_reclaim_shutdown_before_claim_test(struct kunit *test)
++{
++	vmbus_reclaim_running_test(test, false);
++}
++
++static void vmbus_reclaim_shutdown_during_reclaim_test(struct kunit *test)
++{
++	vmbus_reclaim_running_test(test, true);
++}
++
++static void vmbus_reclaim_shutdown_pending_test(struct kunit *test)
++{
++	struct vmbus_reclaim_test_work *ctx = vmbus_reclaim_test_init(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	KUNIT_ASSERT_TRUE(test,
++			  queue_delayed_work(ctx->wq, &ctx->owner.reclaim_work,
++					     msecs_to_jiffies(60000)));
++	complete_all(&ctx->proceed);
++	vmbus_buffer_owner_drain(&ctx->owner, ctx->wq);
++	flush_workqueue(ctx->wq);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->calls), 1);
++}
++
++static void vmbus_reclaim_shutdown_unsafe_pending_test(struct kunit *test)
++{
++	struct vmbus_reclaim_test_work *ctx = vmbus_reclaim_test_init(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	ctx->owner.host_may_own = true;
++	KUNIT_ASSERT_TRUE(test,
++			  queue_delayed_work(ctx->wq, &ctx->owner.reclaim_work,
++					     msecs_to_jiffies(60000)));
++	vmbus_buffer_owner_drain(&ctx->owner, ctx->wq);
++	KUNIT_EXPECT_FALSE(test, delayed_work_pending(&ctx->owner.reclaim_work));
++	KUNIT_EXPECT_FALSE(test, ctx->owner.work_active);
++	flush_workqueue(ctx->wq);
++	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->calls), 0);
++}
++
++static struct vmbus_channel_msginfo *vmbus_test_alloc_teardown_fail(void)
++{
++	return NULL;
++}
++
 +static void vmbus_buffer_rescind_retains_gpadl_test(struct kunit *test)
 +{
 +	struct vmbus_channel channel = { .rescind = true };
@@ -1162,15 +1430,18 @@ index 515fc14dc708..d71d56296023 100644
 +	u32 handle;
 +	int ret;
 +
-+	/* Exercise the production teardown entry, including unknown creates. */
++	/* Exercise the request core without touching the live connection. */
 +	for (origin = 0; origin < 2; origin++) {
 +		channel.rescind_from_host = origin;
 +		for (pending = 0; pending < 2; pending++) {
 +			buffer.gpadl.gpadl_handle = pending ? 0 : 17;
 +			buffer.gpadl.leak = pending;
 +			handle = buffer.gpadl.gpadl_handle;
-+			ret = vmbus_teardown_gpadl_owned(&channel, &buffer);
-+			KUNIT_EXPECT_EQ(test, ret, -ENODEV);
++			ret = vmbus_gpadl_teardown_request(&channel, &buffer,
++							   vmbus_test_alloc_teardown_fail,
++							   NULL, NULL, 1);
++			KUNIT_EXPECT_EQ(test, ret, !origin ? -ENODEV :
++					  pending ? -EINPROGRESS : -ENOMEM);
 +			KUNIT_EXPECT_EQ(test, buffer.gpadl.gpadl_handle, handle);
 +			KUNIT_EXPECT_TRUE(test, buffer.gpadl.leak);
 +			KUNIT_EXPECT_TRUE(test, owner.host_may_own);
@@ -1179,6 +1450,181 @@ index 515fc14dc708..d71d56296023 100644
 +			KUNIT_EXPECT_FALSE(test, vmbus_buffer_owner_can_reclaim(&owner));
 +		}
 +	}
++}
++
++enum vmbus_test_teardown_reply {
++	VMBUS_TEST_REPLY_ACK,
++	VMBUS_TEST_REPLY_NONE,
++	VMBUS_TEST_REPLY_WRONG_HANDLE,
++	VMBUS_TEST_REPLY_WRONG_TYPE,
++	VMBUS_TEST_REPLY_POST_FAILURE,
++};
++
++struct vmbus_teardown_test_context {
++	struct vmbus_connection connection;
++	struct vmbus_channel channel;
++	struct vmbus_buffer buffer;
++	struct vmbus_buffer_retained owner;
++	struct kunit *test;
++	enum vmbus_test_teardown_reply reply;
++	unsigned int post_calls;
++};
++
++static struct vmbus_channel_msginfo *vmbus_test_alloc_teardown(void)
++{
++	return kzalloc(sizeof(struct vmbus_channel_msginfo) +
++		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
++}
++
++static int vmbus_test_post_teardown(struct vmbus_connection *connection,
++				    struct vmbus_channel_msginfo *info)
++{
++	struct vmbus_teardown_test_context *ctx =
++		container_of(connection, struct vmbus_teardown_test_context,
++			     connection);
++	struct vmbus_channel_gpadl_teardown *msg = (void *)info->msg;
++	struct vmbus_channel_gpadl_torndown response = {
++		.header.msgtype = CHANNELMSG_GPADL_TORNDOWN,
++		.gpadl = msg->gpadl,
++	};
++
++	ctx->post_calls++;
++	KUNIT_EXPECT_EQ(ctx->test, msg->header.msgtype, CHANNELMSG_GPADL_TEARDOWN);
++	KUNIT_EXPECT_EQ(ctx->test, msg->child_relid, 71U);
++	KUNIT_EXPECT_EQ(ctx->test, msg->gpadl, 51U);
++	KUNIT_EXPECT_PTR_EQ(ctx->test, info->waiting_channel, NULL);
++	if (ctx->reply == VMBUS_TEST_REPLY_POST_FAILURE)
++		return -EIO;
++	if (ctx->reply == VMBUS_TEST_REPLY_NONE)
++		return 0;
++	if (ctx->reply == VMBUS_TEST_REPLY_WRONG_HANDLE)
++		response.gpadl++;
++	if (ctx->reply == VMBUS_TEST_REPLY_WRONG_TYPE)
++		response.header.msgtype = CHANNELMSG_GPADL_CREATED;
++	vmbus_complete_gpadl_teardown(connection, &response);
++	return 0;
++}
++
++static struct vmbus_teardown_test_context *
++vmbus_test_teardown_context(struct kunit *test)
++{
++	struct vmbus_teardown_test_context *ctx;
++
++	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return NULL;
++	ctx->test = test;
++	ctx->buffer.gpadl.gpadl_handle = 51;
++	ctx->buffer.owner = &ctx->owner;
++	ctx->owner.host_may_own = true;
++	ctx->channel.rescind = true;
++	ctx->channel.rescind_from_host = true;
++	ctx->channel.offermsg.child_relid = 71;
++	INIT_LIST_HEAD(&ctx->connection.chn_msg_list);
++	spin_lock_init(&ctx->connection.channelmsg_lock);
++	return ctx;
++}
++
++static int vmbus_test_teardown_request(struct vmbus_teardown_test_context *ctx)
++{
++	return vmbus_gpadl_teardown_request(&ctx->channel, &ctx->buffer,
++					  vmbus_test_alloc_teardown,
++					  &ctx->connection,
++					  vmbus_test_post_teardown, 1);
++}
++
++static void vmbus_host_rescind_teardown_ack_test(struct kunit *test)
++{
++	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), 0);
++	KUNIT_EXPECT_EQ(test, ctx->post_calls, 1U);
++	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl.gpadl_handle, 0U);
++	KUNIT_EXPECT_FALSE(test, ctx->buffer.gpadl.leak);
++	KUNIT_EXPECT_FALSE(test, ctx->owner.host_may_own);
++	KUNIT_EXPECT_TRUE(test, vmbus_buffer_should_free(&ctx->buffer));
++	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->connection.chn_msg_list));
++}
++
++static void vmbus_test_teardown_failure(struct kunit *test,
++					enum vmbus_test_teardown_reply reply,
++					int expected)
++{
++	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	ctx->reply = reply;
++	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), expected);
++	KUNIT_EXPECT_EQ(test, ctx->post_calls, 1U);
++	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl.gpadl_handle, 51U);
++	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&ctx->buffer));
++	KUNIT_EXPECT_TRUE(test, ctx->owner.host_may_own);
++	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->connection.chn_msg_list));
++}
++
++static void vmbus_host_rescind_teardown_timeout_test(struct kunit *test)
++{
++	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_NONE, -ETIMEDOUT);
++}
++
++static void vmbus_host_rescind_teardown_wrong_handle_test(struct kunit *test)
++{
++	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_WRONG_HANDLE,
++				    -ETIMEDOUT);
++}
++
++static void vmbus_host_rescind_teardown_wrong_type_test(struct kunit *test)
++{
++	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_WRONG_TYPE, -ENODEV);
++}
++
++static void vmbus_host_rescind_teardown_post_failure_test(struct kunit *test)
++{
++	vmbus_test_teardown_failure(test, VMBUS_TEST_REPLY_POST_FAILURE, -EIO);
++}
++
++static void vmbus_local_rescind_skips_teardown_test(struct kunit *test)
++{
++	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	ctx->channel.rescind_from_host = false;
++	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), -ENODEV);
++	KUNIT_EXPECT_EQ(test, ctx->post_calls, 0U);
++	KUNIT_EXPECT_TRUE(test, ctx->buffer.gpadl.leak);
++	KUNIT_EXPECT_TRUE(test, ctx->owner.host_may_own);
++	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl.gpadl_handle, 51U);
++}
++
++static void vmbus_invalid_relid_skips_teardown_test(struct kunit *test)
++{
++	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	ctx->channel.offermsg.child_relid = INVALID_RELID;
++	KUNIT_EXPECT_EQ(test, vmbus_test_teardown_request(ctx), -ENODEV);
++	KUNIT_EXPECT_EQ(test, ctx->post_calls, 0U);
++	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl.gpadl_handle, 51U);
++}
++
++static void vmbus_host_rescind_teardown_late_ack_test(struct kunit *test)
++{
++	struct vmbus_teardown_test_context *ctx = vmbus_test_teardown_context(test);
++	struct vmbus_channel_gpadl_torndown response = {
++		.header.msgtype = CHANNELMSG_GPADL_TORNDOWN,
++		.gpadl = 51,
++	};
++
++	KUNIT_ASSERT_NOT_NULL(test, ctx);
++	ctx->reply = VMBUS_TEST_REPLY_NONE;
++	KUNIT_ASSERT_EQ(test, vmbus_test_teardown_request(ctx), -ETIMEDOUT);
++	/* Run the production response matcher after its waiter has been freed. */
++	vmbus_complete_gpadl_teardown(&ctx->connection, &response);
++	KUNIT_EXPECT_TRUE(test, list_empty(&ctx->connection.chn_msg_list));
++	KUNIT_EXPECT_EQ(test, ctx->buffer.gpadl.gpadl_handle, 51U);
++	KUNIT_EXPECT_FALSE(test, vmbus_buffer_should_free(&ctx->buffer));
++	KUNIT_EXPECT_TRUE(test, ctx->owner.host_may_own);
 +}
 +
 +static void vmbus_buffer_mapping_reference_test(struct kunit *test)
@@ -1235,7 +1681,7 @@ index 515fc14dc708..d71d56296023 100644
  static void vmbus_ring_fallback_order_zero_test(struct kunit *test)
  {
  	unsigned int order;
-@@ -256,7 +384,7 @@ static void vmbus_gpadl_response_state_test(struct kunit *test)
+@@ -265,7 +699,7 @@ static void vmbus_gpadl_response_state_test(struct kunit *test)
  	posted = true;
  	KUNIT_EXPECT_EQ(test,
  			vmbus_gpadl_response_status(0, true, &posted), -ENODEV);
@@ -1244,13 +1690,25 @@ index 515fc14dc708..d71d56296023 100644
  }
  
  static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
-@@ -342,7 +470,12 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+@@ -348,7 +782,24 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_buffer_private_shared_selection_test),
  	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
  	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
 +	KUNIT_CASE(vmbus_buffer_owner_reclaim_gate_test),
 +	KUNIT_CASE(vmbus_buffer_reclaim_schedule_gate_test),
++	KUNIT_CASE(vmbus_reclaim_shutdown_before_claim_test),
++	KUNIT_CASE(vmbus_reclaim_shutdown_during_reclaim_test),
++	KUNIT_CASE(vmbus_reclaim_shutdown_pending_test),
++	KUNIT_CASE(vmbus_reclaim_shutdown_unsafe_pending_test),
 +	KUNIT_CASE(vmbus_buffer_rescind_retains_gpadl_test),
++	KUNIT_CASE(vmbus_host_rescind_teardown_ack_test),
++	KUNIT_CASE(vmbus_host_rescind_teardown_timeout_test),
++	KUNIT_CASE(vmbus_host_rescind_teardown_wrong_handle_test),
++	KUNIT_CASE(vmbus_host_rescind_teardown_wrong_type_test),
++	KUNIT_CASE(vmbus_host_rescind_teardown_post_failure_test),
++	KUNIT_CASE(vmbus_local_rescind_skips_teardown_test),
++	KUNIT_CASE(vmbus_invalid_relid_skips_teardown_test),
++	KUNIT_CASE(vmbus_host_rescind_teardown_late_ack_test),
 +	KUNIT_CASE(vmbus_buffer_mapping_reference_test),
  	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
 +	KUNIT_CASE(vmbus_buffer_repeated_owner_release_test),
@@ -1270,7 +1728,7 @@ index 723252f1b551..bce835c4a015 100644
  	cpuhp_remove_state(hyperv_cpuhp_online);
  	hv_synic_free();
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 6d019ebb351f..b36208ada4ed 100644
+index 096054fa07a3..90bdbacee054 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -784,13 +784,18 @@ struct vmbus_gpadl {
@@ -1300,7 +1758,7 @@ index 6d019ebb351f..b36208ada4ed 100644
  	struct completion rescind_event;
  
  	/* Allocated memory for ring buffer */
-@@ -1230,6 +1236,18 @@ extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -1228,6 +1234,18 @@ extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  				u32 *chunk_cnt_out);
  
  extern void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt);
@@ -1319,5 +1777,3 @@ index 6d019ebb351f..b36208ada4ed 100644
  void vmbus_release_buffer(struct vmbus_buffer *buffer);
  
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
--- 
-2.43.0

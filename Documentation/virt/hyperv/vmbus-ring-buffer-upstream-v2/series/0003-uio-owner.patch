@@ -1,30 +1,20 @@
-From 52be0ecf8ceb062f3eddb43bb2fa5b35cdc09f5a Mon Sep 17 00:00:00 2001
+From d5101eb6b4019770ef6e698d908ab9d8e042f07a Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH v2 03/13] uio: hv_generic: allocate host-visible buffers
- through VMBus
+Subject: [PATCH v2 03/13] uio: hv_generic: describe buffers for owned
+ allocation
 
-Route generic VMBus UIO send and receive buffers through the VMBus
-allocator and release path so page and GPADL ownership stay together.
-
-The driver allocated the send and receive buffers itself and then
-established a GPADL over them. The pages and the GPADL had separate
-lifetimes, so a UIO mmap could hold pages whose GPADL was still being
-established, or whose GPADL had already been torn down. Both windows are
-host-visible: the host maps that GPADL.
-
-vmbus_alloc_buffer() and vmbus_establish_gpadl_caller_decrypted() keep
-the pages, the GPADL and the leak flags in one struct vmbus_buffer, and
-teardown takes that whole descriptor. A buffer whose GPADL outcome
-cannot be proven is retained rather than freed.
+Group receive and send backing in VMBus descriptors before adopting the
+owned allocation and release APIs. Keep the existing vzalloc and
+ordinary GPADL path until the lifetime prerequisites land.
 
 Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
- drivers/uio/uio_hv_generic.c | 74 ++++++++++++++++++------------------
- 1 file changed, 36 insertions(+), 38 deletions(-)
+ drivers/uio/uio_hv_generic.c | 70 +++++++++++++++++-------------------
+ 1 file changed, 32 insertions(+), 38 deletions(-)
 
 diff --git a/drivers/uio/uio_hv_generic.c b/drivers/uio/uio_hv_generic.c
-index b3f41ffc74f8..0d7a9802e9db 100644
+index b3f41ffc74f8..2cb95b4786ca 100644
 --- a/drivers/uio/uio_hv_generic.c
 +++ b/drivers/uio/uio_hv_generic.c
 @@ -56,12 +56,10 @@ struct hv_uio_private_data {
@@ -68,16 +58,14 @@ index b3f41ffc74f8..0d7a9802e9db 100644
  }
  
  /* VMBus primary channel is opened on first use */
-@@ -306,48 +298,54 @@ hv_uio_probe(struct hv_device *dev,
+@@ -306,48 +298,50 @@ hv_uio_probe(struct hv_device *dev,
  	pdata->info.mem[MON_PAGE_MAP].memtype = UIO_MEM_LOGICAL;
  
  	if (channel->device_id == HV_NIC) {
 -		pdata->recv_buf = vzalloc(RECV_BUFFER_SIZE);
 -		if (!pdata->recv_buf) {
 +		pdata->recv_buffer.addr =
-+			vmbus_alloc_buffer(channel, RECV_BUFFER_SIZE, false,
-+					   &pdata->recv_buffer.chunks,
-+					   &pdata->recv_buffer.chunk_cnt);
++			vzalloc(RECV_BUFFER_SIZE);
 +		if (!pdata->recv_buffer.addr) {
  			ret = -ENOMEM;
  			goto fail_free_ring;
@@ -89,11 +77,11 @@ index b3f41ffc74f8..0d7a9802e9db 100644
 -			if (!pdata->recv_gpadl.leak &&
 -			    !pdata->recv_gpadl.decrypted)
 -				vfree(pdata->recv_buf);
-+		ret = vmbus_establish_gpadl_caller_decrypted(channel,
-+							     pdata->recv_buffer.addr,
-+							     RECV_BUFFER_SIZE,
-+							     &pdata->recv_buffer.leak,
-+							     &pdata->recv_buffer.gpadl);
++		ret = vmbus_establish_gpadl(channel,
++					    pdata->recv_buffer.addr,
++					    RECV_BUFFER_SIZE,
++					    &pdata->recv_buffer.gpadl);
++		pdata->recv_buffer.leak |= pdata->recv_buffer.gpadl.leak;
 +		if (ret)
  			goto fail_close;
 -		}
@@ -112,9 +100,7 @@ index b3f41ffc74f8..0d7a9802e9db 100644
 -		pdata->send_buf = vzalloc(SEND_BUFFER_SIZE);
 -		if (!pdata->send_buf) {
 +		pdata->send_buffer.addr =
-+			vmbus_alloc_buffer(channel, SEND_BUFFER_SIZE, false,
-+					   &pdata->send_buffer.chunks,
-+					   &pdata->send_buffer.chunk_cnt);
++			vzalloc(SEND_BUFFER_SIZE);
 +		if (!pdata->send_buffer.addr) {
  			ret = -ENOMEM;
  			goto fail_close;
@@ -126,11 +112,11 @@ index b3f41ffc74f8..0d7a9802e9db 100644
 -			if (!pdata->send_gpadl.leak &&
 -			    !pdata->send_gpadl.decrypted)
 -				vfree(pdata->send_buf);
-+		ret = vmbus_establish_gpadl_caller_decrypted(channel,
-+							     pdata->send_buffer.addr,
-+							     SEND_BUFFER_SIZE,
-+							     &pdata->send_buffer.leak,
-+							     &pdata->send_buffer.gpadl);
++		ret = vmbus_establish_gpadl(channel,
++					    pdata->send_buffer.addr,
++					    SEND_BUFFER_SIZE,
++					    &pdata->send_buffer.gpadl);
++		pdata->send_buffer.leak |= pdata->send_buffer.gpadl.leak;
 +		if (ret)
  			goto fail_close;
 -		}
@@ -145,6 +131,3 @@ index b3f41ffc74f8..0d7a9802e9db 100644
  		pdata->info.mem[SEND_BUF_MAP].size = SEND_BUFFER_SIZE;
  		pdata->info.mem[SEND_BUF_MAP].memtype = UIO_MEM_VIRTUAL;
  	}
--- 
-2.43.0
-

@@ -97,6 +97,7 @@ jobs:
           set -euo pipefail
           cat > "$RUNNER_TEMP/wsl-kunitconfig" <<'EOF'
           CONFIG_KUNIT=y
+          CONFIG_SHMEM=y
           CONFIG_HYPERVISOR_GUEST=y
           CONFIG_HYPERV=y
           CONFIG_HYPERV_VMBUS=y
@@ -109,6 +110,14 @@ jobs:
             vmbus-wsl-artifacts/config-kunit-requested
           for case_name in \
             vmbus_gpadl_rescind_retains_state_test \
+            vmbus_host_rescind_teardown_ack_test \
+            vmbus_host_rescind_teardown_timeout_test \
+            vmbus_host_rescind_teardown_wrong_handle_test \
+            vmbus_host_rescind_teardown_wrong_type_test \
+            vmbus_host_rescind_teardown_post_failure_test \
+            vmbus_local_rescind_skips_teardown_test \
+            vmbus_invalid_relid_skips_teardown_test \
+            vmbus_host_rescind_teardown_late_ack_test \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
             vmbus_vmalloc_mapping_ref_defers_free_test \
             vmbus_reclaim_busy_ref_defers_free_test \
@@ -132,7 +141,7 @@ jobs:
             --arch=x86_64 --kunitconfig="$RUNNER_TEMP/wsl-kunitconfig" \
             2>&1 | tee vmbus-wsl-artifacts/kunit.log
           cp wsl-kunit-out/.config vmbus-wsl-artifacts/config-kunit-resolved
-          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(12 subtests\)' \
+          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(20 subtests\)' \
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-gpadl-lifetime' \
             vmbus-wsl-artifacts/kunit.log
@@ -140,10 +149,18 @@ jobs:
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 17 tests: passed: 17$' \
+          grep -Eq 'Testing complete\. Ran 25 tests: passed: 25$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
             vmbus_gpadl_rescind_retains_state_test \
+            vmbus_host_rescind_teardown_ack_test \
+            vmbus_host_rescind_teardown_timeout_test \
+            vmbus_host_rescind_teardown_wrong_handle_test \
+            vmbus_host_rescind_teardown_wrong_type_test \
+            vmbus_host_rescind_teardown_post_failure_test \
+            vmbus_local_rescind_skips_teardown_test \
+            vmbus_invalid_relid_skips_teardown_test \
+            vmbus_host_rescind_teardown_late_ack_test \
             vmbus_buffer_mapping_ref_defers_reencrypt_test \
             vmbus_vmalloc_mapping_ref_defers_free_test \
             vmbus_reclaim_busy_ref_defers_free_test \
@@ -341,6 +358,9 @@ jobs:
             "vmbus-artifacts/build-${ARCH}-stage-${stage}.log"
           done
           test "$stage" -eq 13
+          git -C linux add -- drivers/hv drivers/net/hyperv drivers/uio include/linux/hyperv.h
+          git -C linux write-tree > vmbus-artifacts/final-source-tree.txt
+          test "$(cat vmbus-artifacts/final-source-tree.txt)" = 55eff83ccf8ef5fef028c5f1d612884cad6010d6
           for symbol in \
             vmbus_alloc_buffer \
             vmbus_free_buffer \
@@ -455,6 +475,20 @@ jobs:
           set -euo pipefail
           for case_name in \
             vmbus_buffer_size_rounding_test \
+            vmbus_host_rescind_teardown_ack_test \
+            vmbus_host_rescind_teardown_timeout_test \
+            vmbus_host_rescind_teardown_wrong_handle_test \
+            vmbus_host_rescind_teardown_wrong_type_test \
+            vmbus_host_rescind_teardown_post_failure_test \
+            vmbus_local_rescind_skips_teardown_test \
+            vmbus_invalid_relid_skips_teardown_test \
+            vmbus_host_rescind_teardown_late_ack_test \
+            vmbus_reclaim_shutdown_before_claim_test \
+            vmbus_reclaim_shutdown_during_reclaim_test \
+            vmbus_reclaim_shutdown_pending_test \
+            vmbus_reclaim_shutdown_unsafe_pending_test \
+            vmbus_sysfs_mmap_success_test \
+            vmbus_sysfs_mmap_partial_insert_test \
             vmbus_buffer_size_overflow_test \
             vmbus_buffer_private_shared_selection_test \
             vmbus_ring_fallback_order_zero_test \
@@ -500,6 +534,7 @@ jobs:
           fi
           cat > linux/drivers/hv/.kunitconfig <<'EOF'
           CONFIG_KUNIT=y
+          CONFIG_SHMEM=y
           CONFIG_HYPERVISOR_GUEST=y
           CONFIG_HYPERV=y
           CONFIG_HYPERV_VMBUS=y
@@ -517,7 +552,7 @@ jobs:
             --build_dir="$GITHUB_WORKSPACE/kunit-out" \
             --arch=x86_64 --kunitconfig=drivers/hv/.kunitconfig) \
             2>&1 | tee -a vmbus-artifacts/kunit.log
-          grep -Eq 'hyperv-vmbus-buffer \(21 subtests\)' \
+          grep -Eq 'hyperv-vmbus-buffer \(33 subtests\)' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-buffer' \
             vmbus-artifacts/kunit.log
@@ -525,7 +560,9 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-mmap' \
             vmbus-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 54 tests: passed: 54$' \
+          grep -Eq 'hyperv-vmbus-mmap \(2 subtests\)' vmbus-artifacts/kunit.log
+          grep -Eq '\[PASSED\] hyperv-vmbus-mmap' vmbus-artifacts/kunit.log
+          grep -Eq 'Testing complete\. Ran 68 tests: passed: 68$' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-rndis-request' \
             vmbus-artifacts/kunit.log
@@ -535,6 +572,20 @@ jobs:
           grep -Eq '\[PASSED\] netvsc_tx_complete_skb_error_test$' vmbus-artifacts/kunit.log
           for case_name in \
             vmbus_buffer_size_rounding_test \
+            vmbus_host_rescind_teardown_ack_test \
+            vmbus_host_rescind_teardown_timeout_test \
+            vmbus_host_rescind_teardown_wrong_handle_test \
+            vmbus_host_rescind_teardown_wrong_type_test \
+            vmbus_host_rescind_teardown_post_failure_test \
+            vmbus_local_rescind_skips_teardown_test \
+            vmbus_invalid_relid_skips_teardown_test \
+            vmbus_host_rescind_teardown_late_ack_test \
+            vmbus_reclaim_shutdown_before_claim_test \
+            vmbus_reclaim_shutdown_during_reclaim_test \
+            vmbus_reclaim_shutdown_pending_test \
+            vmbus_reclaim_shutdown_unsafe_pending_test \
+            vmbus_sysfs_mmap_success_test \
+            vmbus_sysfs_mmap_partial_insert_test \
             vmbus_buffer_size_overflow_test \
             vmbus_buffer_private_shared_selection_test \
             vmbus_ring_fallback_order_zero_test \

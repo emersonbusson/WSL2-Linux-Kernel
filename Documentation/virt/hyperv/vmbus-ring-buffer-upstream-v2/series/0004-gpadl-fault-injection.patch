@@ -1,4 +1,4 @@
-From 5150f044d3b3fcf5815ac27a2ed98e57462fb088 Mon Sep 17 00:00:00 2001
+From 4d55ea0540cc36cae7c3934c7eea4d704fcb1a24 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 10:30:00 -0300
 Subject: [PATCH v2 04/13] hv: vmbus: add KUnit tests for GPADL post failure
@@ -23,14 +23,14 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/channel.c           | 142 ++++++++++++++++----------
  drivers/hv/hyperv_vmbus.h      |  19 ++++
- drivers/hv/vmbus_buffer_test.c | 179 +++++++++++++++++++++++++++++++++
- 3 files changed, 289 insertions(+), 51 deletions(-)
+ drivers/hv/vmbus_buffer_test.c | 176 +++++++++++++++++++++++++++++++++
+ 3 files changed, 286 insertions(+), 51 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index d6e5f26577b9..2ae97a82271c 100644
+index 7d5b99281872..6a1bc9b17869 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
-@@ -482,6 +482,84 @@ static void vmbus_free_channel_msginfo(struct vmbus_channel_msginfo *msginfo)
+@@ -488,6 +488,84 @@ static void vmbus_free_channel_msginfo(struct vmbus_channel_msginfo *msginfo)
   *              should be 0 for BUFFER type gpadl
   * @gpadl_handle: some funky thing
   */
@@ -94,7 +94,7 @@ index d6e5f26577b9..2ae97a82271c 100644
 +	return 0;
 +}
 +
-+int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
++int vmbus_post_gpadl_teardown(u32 child_relid,
 +			      struct vmbus_channel_gpadl_teardown *msg,
 +			      u32 gpadl,
 +			      vmbus_gpadl_post_fn post_msg,
@@ -103,7 +103,7 @@ index d6e5f26577b9..2ae97a82271c 100644
 +	int ret;
 +
 +	msg->header.msgtype = CHANNELMSG_GPADL_TEARDOWN;
-+	msg->child_relid = channel->offermsg.child_relid;
++	msg->child_relid = child_relid;
 +	msg->gpadl = gpadl;
 +
 +	ret = post_msg(context, msg, sizeof(*msg), true);
@@ -115,7 +115,7 @@ index d6e5f26577b9..2ae97a82271c 100644
  static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  				   enum hv_gpadl_type type, void *kbuffer,
  				   u32 size, u32 send_offset, bool memory_prepared,
-@@ -489,11 +567,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -495,11 +573,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  				   struct vmbus_gpadl *gpadl)
  {
  	struct vmbus_channel_gpadl_header *gpadlmsg;
@@ -128,7 +128,7 @@ index d6e5f26577b9..2ae97a82271c 100644
  	unsigned long flags;
  	bool posted = false;
  	int ret = 0;
-@@ -552,49 +628,20 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -558,49 +634,20 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  		goto cleanup;
  	}
  
@@ -188,7 +188,7 @@ index d6e5f26577b9..2ae97a82271c 100644
  		goto cleanup;
  	}
  
-@@ -602,8 +649,6 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
+@@ -608,8 +655,6 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
  	gpadl->gpadl_handle = gpadlmsg->gpadl;
  	gpadl->buffer = kbuffer;
  	gpadl->size = size;
@@ -197,7 +197,7 @@ index d6e5f26577b9..2ae97a82271c 100644
  
  cleanup:
  	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
-@@ -1105,9 +1150,6 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1118,9 +1163,6 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  
  	msg = (struct vmbus_channel_gpadl_teardown *)info->msg;
  
@@ -207,7 +207,7 @@ index d6e5f26577b9..2ae97a82271c 100644
  
  	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
  	list_add_tail(&info->msglistentry,
-@@ -1117,10 +1159,8 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1130,10 +1172,8 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  	if (channel->rescind)
  		goto post_msg_err;
  
@@ -215,13 +215,13 @@ index d6e5f26577b9..2ae97a82271c 100644
 -			     true);
 -
 -	trace_vmbus_teardown_gpadl(msg, ret);
-+	ret = vmbus_post_gpadl_teardown(channel, msg, gpadl->gpadl_handle,
++	ret = vmbus_post_gpadl_teardown(channel->offermsg.child_relid, msg, gpadl->gpadl_handle,
 +					vmbus_gpadl_post_real, NULL);
  
  	if (ret)
  		goto post_msg_err;
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 93df3b35cfd4..711a9f4bec76 100644
+index 93df3b35cfd4..bb585ac2ceac 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -563,4 +563,23 @@ unsigned int vmbus_buffer_order(unsigned long remaining,
@@ -241,7 +241,7 @@ index 93df3b35cfd4..711a9f4bec76 100644
 +			      void *context);
 +int vmbus_gpadl_response_status(u32 creation_status, bool rescind,
 +				bool *posted);
-+int vmbus_post_gpadl_teardown(struct vmbus_channel *channel,
++int vmbus_post_gpadl_teardown(u32 child_relid,
 +			      struct vmbus_channel_gpadl_teardown *msg,
 +			      u32 gpadl,
 +			      vmbus_gpadl_post_fn post_msg,
@@ -249,10 +249,10 @@ index 93df3b35cfd4..711a9f4bec76 100644
 +
  #endif /* _HYPERV_VMBUS_H */
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
-index d0a927a46caf..ac994ee01fde 100644
+index d0a927a46caf..fbf7c4351d64 100644
 --- a/drivers/hv/vmbus_buffer_test.c
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -85,12 +85,191 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
+@@ -85,12 +85,188 @@ static void vmbus_buffer_partial_allocation_cleanup_test(struct kunit *test)
  	vmbus_release_buffer(&buffer);
  }
  
@@ -419,13 +419,10 @@ index d0a927a46caf..ac994ee01fde 100644
 +		.first_msgtype = CHANNELMSG_GPADL_TEARDOWN,
 +		.expected_gpadl = 17,
 +	};
-+	struct vmbus_channel channel = {
-+		.offermsg.child_relid = 7,
-+	};
 +	struct vmbus_channel_gpadl_teardown msg = {};
 +	int ret;
 +
-+	ret = vmbus_post_gpadl_teardown(&channel, &msg, 17,
++	ret = vmbus_post_gpadl_teardown(7, &msg, 17,
 +					vmbus_gpadl_test_post, &context);
 +	KUNIT_EXPECT_EQ(test, ret, -EIO);
 +	KUNIT_EXPECT_EQ(test, context.call_count, 1U);
@@ -444,6 +441,3 @@ index d0a927a46caf..ac994ee01fde 100644
  	{}
  };
  
--- 
-2.43.0
-

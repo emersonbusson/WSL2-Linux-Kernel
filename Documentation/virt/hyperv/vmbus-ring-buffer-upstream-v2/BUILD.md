@@ -1,3 +1,6 @@
+> Current snapshot: corrected thirteen-mail source; architecture CI pending.
+> Ordinary WSL evidence qualifies its distinct backport. Sending is NO_GO.
+
 # BUILD — image for one CoCo attempt
 
 **Role in the bundle:** how to turn the thirteen patches into a kernel a

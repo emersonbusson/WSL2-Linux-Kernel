@@ -1,4 +1,4 @@
-From 78e7d9474a2bcb03a98c077a341a24618a05c53e Mon Sep 17 00:00:00 2001
+From 264a8fa0da1625fc897eaf871d3556f05d37c833 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 20:53:00 -0300
 Subject: [PATCH v2 07/13] hv: vmbus: distinguish host rescind from local
@@ -176,7 +176,7 @@ index 5ebdbe24b5a1..723252f1b551 100644
  	queue_work(vmbus_connection.work_queue, &ctx->work);
  }
 diff --git a/include/linux/hyperv.h b/include/linux/hyperv.h
-index 567679c68da1..6d019ebb351f 100644
+index 2878aed14c45..096054fa07a3 100644
 --- a/include/linux/hyperv.h
 +++ b/include/linux/hyperv.h
 @@ -809,6 +809,7 @@ struct vmbus_channel {
@@ -197,6 +197,3 @@ index 567679c68da1..6d019ebb351f 100644
  
  int vmbus_request_offers(void);
  
--- 
-2.43.0
-

@@ -1,4 +1,4 @@
-From 8a07ef9a6130673b08f726f82d44fb62c9216918 Mon Sep 17 00:00:00 2001
+From 8c602dd88b2f31ad99336037989dbc34ce45ce14 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
 Subject: [PATCH v2 02/13] hv: vmbus: validate chunk buffer allocation and
@@ -79,7 +79,7 @@ index 888a748cc7cb..80d33e9c0e57 100644
  mshv_root-y := mshv_root_main.o mshv_synic.o mshv_eventfd.o mshv_irq.o \
  	       mshv_root_hv_call.o mshv_portid_table.o mshv_regions.o
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 464b890ab34b..d6e5f26577b9 100644
+index f8feb2a0ec0a..7d5b99281872 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -28,6 +28,44 @@
@@ -124,10 +124,10 @@ index 464b890ab34b..d6e5f26577b9 100644
 +	       !buffer->gpadl.gpadl_handle;
 +}
 +
- /*
-  * hv_gpadl_size - Return the real size of a gpadl, the size that Hyper-V uses
-  *
-@@ -656,7 +694,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
+ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 				  u32 size,
+ 				  bool confidential,
+@@ -661,7 +699,8 @@ void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt)
  		return;
  	}
  
@@ -137,7 +137,7 @@ index 464b890ab34b..d6e5f26577b9 100644
  
  	for (i = 0; i < chunk_cnt; i++) {
  		unsigned long vaddr =
-@@ -678,8 +717,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+@@ -683,8 +722,7 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
  		return;
  
  	kvfree(buffer->pages);
@@ -147,9 +147,9 @@ index 464b890ab34b..d6e5f26577b9 100644
  		vmbus_free_buffer(buffer->addr, buffer->chunks,
  				  buffer->chunk_cnt);
  	memset(buffer, 0, sizeof(*buffer));
-@@ -712,12 +750,13 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
- 			 struct page ***chunks_out,
- 			 u32 *chunk_cnt_out)
+@@ -717,12 +755,13 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
+ 				  struct page ***chunks_out,
+ 				  u32 *chunk_cnt_out)
  {
 -	unsigned long nr_pages = PFN_UP(size);
 -	unsigned long remaining = nr_pages;
@@ -164,7 +164,7 @@ index 464b890ab34b..d6e5f26577b9 100644
  	u32 chunk_cnt = 0;
  	void *addr;
  	u32 i;
-@@ -726,13 +765,15 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -731,13 +770,15 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  	*chunks_out = NULL;
  	*chunk_cnt_out = 0;
  
@@ -182,7 +182,7 @@ index 464b890ab34b..d6e5f26577b9 100644
  
  	/* Worst case: every chunk is a single page. */
  	chunks = kvmalloc_objs(*chunks, nr_pages, GFP_KERNEL | __GFP_ZERO);
-@@ -747,7 +788,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -752,7 +793,7 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  		struct page *page;
  		gfp_t gfp;
  
@@ -191,7 +191,7 @@ index 464b890ab34b..d6e5f26577b9 100644
  
  		/*
  		 * Use __GFP_NORETRY | __GFP_NOWARN to avoid OOM-killing,
-@@ -762,7 +803,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -767,7 +808,7 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  		page = alloc_pages_node(cpu_to_node(channel->target_cpu),
  					gfp, order);
  		if (!page) {
@@ -200,7 +200,7 @@ index 464b890ab34b..d6e5f26577b9 100644
  				goto err;
  			continue;
  		}
-@@ -789,7 +830,7 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -794,7 +835,7 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  	if (!addr)
  		goto err;
  
@@ -209,7 +209,7 @@ index 464b890ab34b..d6e5f26577b9 100644
  
  	kvfree(pages);
  	*chunks_out = chunks;
-@@ -1054,8 +1095,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
+@@ -1067,8 +1108,10 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
  
  	info = kzalloc(sizeof(*info) +
  		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
@@ -350,6 +350,3 @@ index 000000000000..d0a927a46caf
 +};
 +
 +kunit_test_suite(vmbus_buffer_test_suite);
--- 
-2.43.0
-

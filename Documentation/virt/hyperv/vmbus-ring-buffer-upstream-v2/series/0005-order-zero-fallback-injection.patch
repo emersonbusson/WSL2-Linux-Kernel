@@ -1,4 +1,4 @@
-From 22816d3f649a47c1367e5f9acd00f1ea840e2bd7 Mon Sep 17 00:00:00 2001
+From 129511467097b367595a80cec1c55d59572b7b4d Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 25 Sep 2026 11:05:00 -0300
 Subject: [PATCH v2 05/13] hv: vmbus: add KUnit test for order-zero allocation
@@ -31,7 +31,7 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
  3 files changed, 111 insertions(+), 16 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 2ae97a82271c..3663ebe94fd1 100644
+index 6a1bc9b17869..0c025a12808a 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -60,6 +60,31 @@ bool vmbus_buffer_lower_order(unsigned int *order)
@@ -66,7 +66,7 @@ index 2ae97a82271c..3663ebe94fd1 100644
  bool vmbus_buffer_should_free(const struct vmbus_buffer *buffer)
  {
  	return !buffer->leak && !buffer->gpadl.leak &&
-@@ -769,6 +794,14 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
+@@ -774,6 +799,14 @@ void vmbus_release_buffer(struct vmbus_buffer *buffer)
  }
  EXPORT_SYMBOL_GPL(vmbus_release_buffer);
  
@@ -79,9 +79,9 @@ index 2ae97a82271c..3663ebe94fd1 100644
 +}
 +
  /**
-  * vmbus_alloc_buffer - allocate a host-visible, virtually-contiguous buffer.
+  * __vmbus_alloc_buffer - allocate host-visible, virtually-contiguous backing.
   *
-@@ -832,26 +865,17 @@ void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+@@ -837,26 +870,17 @@ static void *__vmbus_alloc_buffer(struct vmbus_channel *channel,
  	while (remaining) {
  		struct page *page;
  		gfp_t gfp;
@@ -116,7 +116,7 @@ index 2ae97a82271c..3663ebe94fd1 100644
  		ret = set_memory_decrypted((unsigned long)page_address(page),
  					   1U << order);
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 711a9f4bec76..ad4675f2589b 100644
+index bb585ac2ceac..e08c472041d5 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -563,6 +563,19 @@ unsigned int vmbus_buffer_order(unsigned long remaining,
@@ -140,10 +140,10 @@ index 711a9f4bec76..ad4675f2589b 100644
   * GPADL post and response helpers, also shared with vmbus_buffer_test.c.
   * Same deal as the sizing helpers above: defined in channel.c, built into
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
-index ac994ee01fde..46145f326d45 100644
+index fbf7c4351d64..60fc526af1af 100644
 --- a/drivers/hv/vmbus_buffer_test.c
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -260,12 +260,70 @@ static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
+@@ -257,12 +257,70 @@ static void vmbus_gpadl_teardown_post_failure_test(struct kunit *test)
  	KUNIT_EXPECT_EQ(test, context.call_count, 1U);
  }
  
@@ -214,6 +214,3 @@ index ac994ee01fde..46145f326d45 100644
  	KUNIT_CASE(vmbus_gpadl_post_failure_test),
  	KUNIT_CASE(vmbus_gpadl_post_success_test),
  	KUNIT_CASE(vmbus_gpadl_response_state_test),
--- 
-2.43.0
-
