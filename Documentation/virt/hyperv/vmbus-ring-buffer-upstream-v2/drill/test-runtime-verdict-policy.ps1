@@ -20,6 +20,7 @@ function Assert-Decision {
 }
 
 $expectedBaseline = @'
+[    0.731452] Warning: unable to open an initial console.
 HYPERV_DRILL_LIFECYCLE status=1
 CLEANUP_VERDICT=FAIL teardown released nothing
 MAP_ACCOUNTING_VERDICT=FAIL outside the expected band: tuple unreadable
@@ -27,6 +28,11 @@ RESTORE_VERDICT=PARTIAL rebind=no (hv_netvsc did not rebind; open channel is the
 LIFECYCLE_VERDICT=FAIL cleanup=FAIL map_uio=PASS map_sysfs=PASS map_accounting=FAIL restore=PARTIAL cycles=100 maps=(0 0 0) gap_retained=(0/0/0)
 HYPERV_DRILL_SPLATS count=0
 HYPERV_DRILL_FAULTS count=0
+HYPERV_DRILL_RESULT status=FAIL
+HYPERV_DRILL_RESULT status=FAIL
+HYPERV_DRILL_RESULT status=FAIL
+HYPERV_DRILL_RESULT lifecycle=1 fragment=0 splats=0 faults=0
+HYPERV_DRILL_RESULT scope=drill-failed
 '@
 
 Assert-Decision Observe PASS '' 0 'observe accepts pass'
@@ -45,5 +51,12 @@ Assert-Decision ExpectedBaselineFailure PARTIAL $expectedBaseline 1 'baseline re
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'tuple unreadable', 'unexpected allocator result') 1 'baseline rejects unrelated failure'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_SPLATS count=0', 'HYPERV_DRILL_SPLATS count=1') 1 'baseline rejects kernel splat'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'cycles=100', 'cycles=99') 1 'baseline rejects incomplete lifecycle run'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'fragment=0', 'fragment=3') 1 'baseline rejects partial fragmentation result'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline + "`nHYPERV_DRILL_RESULT status=PASS") 1 'baseline rejects conflicting aggregate result'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_RESULT status=FAIL', '') 1 'baseline rejects missing repeated status'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'Warning: unable to open an initial console\.', 'WARNING: unexpected kernel warning') 1 'baseline rejects unexpected kernel warning'
+$singleStatus = $expectedBaseline -replace '(?m)^HYPERV_DRILL_RESULT status=FAIL[ \t]*\r?\n', ''
+$singleStatus += "`nHYPERV_DRILL_RESULT status=FAIL`n"
+Assert-Decision ExpectedBaselineFailure FAIL $singleStatus 0 'baseline accepts intact status after serial copy loss'
 
 Write-Output 'runtime verdict policy tests: PASS'

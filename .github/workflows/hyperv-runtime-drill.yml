@@ -21,11 +21,9 @@ name: Hyper-V runtime drill
 # WSL2 host. new-drill-vm.ps1 refuses to run outside CI or an explicitly
 # acknowledged lab machine, and the drills themselves refuse on a WSL2 kernel.
 #
-# FAIL SEMANTICS: unlike the capability probes, a drill that reports FAIL is a
-# real candidate failure and reddens the job. A harness failure (cannot define
-# the VM, cannot boot, no console) also reddens: we failed to measure. An
-# INCONCLUSIVE drill -- insufficient pressure, order-7 supply still present --
-# is green for the job and recorded PARTIAL for the gate.
+# FAIL SEMANTICS: the baseline is green only when it reproduces the exact,
+# fault-free negative-control signature. The candidate requires full PASS;
+# PARTIAL, FAIL, no console, or incomplete pressure evidence reddens it.
 #
 # EVIDENCE SCOPE (re-stated because it is easy to over-read a green job):
 # The allocator takes its chunked order-N -> order-0 path when guest-memory
@@ -156,7 +154,12 @@ jobs:
           printf '%s\n' '${{ matrix.variant }}' > drill-artifacts/variant.txt
           sha256sum "$DRILL"/build-drill-kernel.sh "$DRILL"/init \
             "$DRILL"/vmbus-lifecycle-drill.sh "$DRILL"/vmbus-fragmentation-drill.sh \
-            "$DRILL"/vmbus_drill_helper.c > drill-artifacts/harness-sha256.txt
+            "$DRILL"/vmbus_drill_helper.c "$DRILL"/test-fragmentation-policy.c \
+            "$DRILL"/new-drill-vm.ps1 "$DRILL"/runtime-verdict-policy.psm1 \
+            "$DRILL"/test-runtime-verdict-policy.ps1 "$DRILL"/test-serial-reader.ps1 \
+            "$DRILL"/test-reader-heartbeat.ps1 "$DRILL"/test-host-rescind.ps1 \
+            "$DRILL"/host-rescind.ps1 "$DRILL"/owner-trace-accounting.py \
+            "$DRILL"/uio-ring-exercise.sh > drill-artifacts/harness-sha256.txt
           # The guest has no CPython. If a script that ships inside the
           # initramfs still calls python3 the whole job would fail only at
           # boot time, minutes later. Scope the check to the guest drills:
@@ -204,6 +207,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $DRILL = 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill'
+          & (Join-Path $DRILL 'test-runtime-verdict-policy.ps1')
           & (Join-Path $DRILL 'test-serial-reader.ps1')
           & (Join-Path $DRILL 'test-reader-heartbeat.ps1')
           & (Join-Path $DRILL 'test-host-rescind.ps1')
@@ -222,6 +226,7 @@ jobs:
             -TimeoutSec 1200 `
             -MemoryMB 2048 `
             -CpuCount 2 `
+            -VerdictPolicy '${{ matrix.variant == 'baseline' && 'ExpectedBaselineFailure' || 'RequirePass' }}' `
             -HostRescind:${{ inputs.host_rescind && '$true' || '$false' }}
           $code = $LASTEXITCODE
           Write-Host "DRILL-RUNTIME harness_exit=$code"
@@ -237,7 +242,7 @@ jobs:
                 Tee-Object -FilePath 'drill-vm-work/owner-accounting.json'
               $ownerCode = $LASTEXITCODE
               Write-Host "DRILL-RUNTIME owner_accounting_exit=$ownerCode (3 means PARTIAL)"
-              if ($ownerCode -eq 1) { $code = 1 }
+              if ($ownerCode -ne 0) { $code = 1 }
             }
           }
           exit $code

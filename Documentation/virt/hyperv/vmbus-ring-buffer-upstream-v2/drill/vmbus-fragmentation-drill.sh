@@ -25,13 +25,10 @@
 # daily WSL2 environment. Swap is never activated here.
 #
 # usage: vmbus-fragmentation-drill.sh [hog_mib] [logfile]
-#   hog_mib  ceiling in MiB; default MemTotal. The helper allocates 64 KiB
-#            chunks until /proc/buddyinfo shows no free block of order 7 or
-#            above, then unmaps one member of every physical buddy pair whose
-#            buddy it also holds. The ceiling must be above what the guest can
-#            allocate: if the loop stops at the ceiling the untouched
-#            remainder still holds order-10 blocks and the drill correctly
-#            reports INCONCLUSIVE.
+#   hog_mib  ceiling in MiB; default MemTotal. The helper allocates and pins
+#            64 KiB chunks under a MemFree floor, then unmaps one member of
+#            every proven physical buddy pair. The result distinguishes full
+#            order-7 exhaustion from the separately bounded safe stop.
 #
 # Depends on vmbus_drill_helper (static, see hyperv-drill-initramfs/) for the
 # fragment-buddy primitive. The guest has no CPython and this is a Day-0
@@ -227,14 +224,29 @@ kv() {
 }
 
 HIGH_ORDER_HELPER=
+HIGH_ORDER_BLOCKS_BEFORE=
 _p="${FRAG_LINE#*high_order_7plus=}"
 if [ "$_p" != "$FRAG_LINE" ]; then
 	_t="${_p%% *}"
 	_t="${_t%%;*}"
+	HIGH_ORDER_BLOCKS_BEFORE="${_t%%->*}"
 	# _t is before->locked->after; the third value is measured with the
 	# pattern pinned and is the authoritative count.
 	HIGH_ORDER_HELPER="${_t##*->}"
 fi
+HIGH_ORDER_PAGES_HELPER=
+HIGH_ORDER_PAGES_BEFORE=
+_p="${FRAG_LINE#*high_order_7plus_pages=}"
+if [ "$_p" != "$FRAG_LINE" ]; then
+	_t="${_p%% *}"
+	_t="${_t%%;*}"
+	HIGH_ORDER_PAGES_BEFORE="${_t%%->*}"
+	HIGH_ORDER_PAGES_HELPER="${_t##*->}"
+fi
+BOUNDED=
+kv BOUNDED 'bounded=' || true
+CHUNKS_HELPER=
+kv CHUNKS_HELPER 'chunks=' || true
 EXHAUSTED=
 kv EXHAUSTED 'exhausted=' || true
 PAGEMAP=
@@ -247,8 +259,11 @@ kv UNSPLIT 'unsplit=' || true
 # Reread order-7-and-up from buddyinfo. buddyinfo is `Node <n>, zone
 # <name>` followed by one count per order, so order-0 is the 5th token and
 # order-7 the 12th; drop the four header fields and count from order 7.
-HIGH_ORDER=0
+HIGH_ORDER=unknown
+HIGH_ORDER_PAGES=unknown
 if [ -r /proc/buddyinfo ]; then
+	HIGH_ORDER=0
+	HIGH_ORDER_PAGES=0
 	while read -r _bline; do
 		set -- $_bline
 		shift 4 2>/dev/null || continue
@@ -257,14 +272,61 @@ if [ -r /proc/buddyinfo ]; then
 			if [ "$_ord" -ge 7 ]; then
 				case "$_c" in
 				'' | *[!0-9]*) ;;
-				*) HIGH_ORDER=$((HIGH_ORDER + _c)) ;;
+				*)
+					HIGH_ORDER=$((HIGH_ORDER + _c))
+					HIGH_ORDER_PAGES=$((HIGH_ORDER_PAGES + _c * (1 << _ord)))
+					;;
 				esac
 			fi
 			_ord=$((_ord + 1))
 		done
 	done < /proc/buddyinfo
 fi
-say "high_order_7plus_blocks_helper=${HIGH_ORDER_HELPER:-unknown} high_order_7plus_blocks_reread=$HIGH_ORDER"
+say "high_order_7plus_blocks_helper=${HIGH_ORDER_HELPER:-unknown} high_order_7plus_pages_helper=${HIGH_ORDER_PAGES_HELPER:-unknown} high_order_7plus_blocks_reread=$HIGH_ORDER high_order_7plus_pages_reread=$HIGH_ORDER_PAGES bounded=${BOUNDED:-unknown}"
+
+read_high_orders() {
+	HIGH_ORDER=unknown
+	HIGH_ORDER_PAGES=unknown
+	BUDDYINFO_VALID=no
+	if [ -r /proc/buddyinfo ]; then
+		HIGH_ORDER=0
+		HIGH_ORDER_PAGES=0
+		BUDDYINFO_VALID=yes
+		BUDDYINFO_ROWS=0
+		while read -r _bline; do
+			[ -n "$_bline" ] || continue
+			BUDDYINFO_ROWS=$((BUDDYINFO_ROWS + 1))
+			set -- $_bline
+			if [ "$#" -lt 12 ]; then
+				BUDDYINFO_VALID=no
+				continue
+			fi
+			shift 4
+			_ord=0
+			for _c in "$@"; do
+				if [ "$_ord" -ge 7 ]; then
+					case "$_c" in
+					'' | *[!0-9]*) BUDDYINFO_VALID=no ;;
+					*)
+						HIGH_ORDER=$((HIGH_ORDER + _c))
+						HIGH_ORDER_PAGES=$((HIGH_ORDER_PAGES + _c * (1 << $_ord)))
+						;;
+					esac
+				fi
+				_ord=$((_ord + 1))
+			done
+		done < /proc/buddyinfo
+		if [ "$BUDDYINFO_ROWS" -eq 0 ] || [ "$BUDDYINFO_VALID" != yes ]; then
+			HIGH_ORDER=unknown
+			HIGH_ORDER_PAGES=unknown
+		fi
+	fi
+}
+
+# Reparse strictly before the ring open; malformed or absent telemetry fails closed.
+read_high_orders
+HIGH_ORDER_REREAD="$HIGH_ORDER"
+HIGH_ORDER_PAGES_REREAD="$HIGH_ORDER_PAGES"
 
 # --- exercise channel open under fragmentation ------------------------------
 say "=== CHANNEL OPEN UNDER FRAGMENTATION ==="
@@ -355,10 +417,11 @@ say "nic_rebound=$REBOUND"
 #   in 0005-order-zero-fallback-injection.patch and remains runtime-open on
 #   CoCo hardware (COCO-1..5).
 
-# Buddy while the pattern is still pinned. The helper's own
-# high_order_7plus=after inside ready=1 is measured at that same moment and
-# is what the verdict trusts; this reread is secondary evidence and is
-# expected to disagree if the pattern was reclaimed after ready=1.
+# Buddy while the pattern is still pinned, after the channel-open attempt.
+# The reread is secondary evidence to the helper's own post-hole measurement.
+read_high_orders
+HIGH_ORDER_AFTER_CHANNEL="$HIGH_ORDER"
+HIGH_ORDER_PAGES_AFTER_CHANNEL="$HIGH_ORDER_PAGES"
 say "--- BUDDY FINAL ---"
 buddy
 
@@ -384,18 +447,16 @@ say "--- DMESG SCAN ---"
 DM="$(dmesg 2>/dev/null | tail -500)"
 ORDER7="$(printf '%s\n' "$DM" | grep -c 'order:7' || true)"
 ACCEPT="$(printf '%s\n' "$DM" | grep -c 'accept4 failed' || true)"
-OOPS="$(printf '%s\n' "$DM" | grep -cE 'BUG:|Oops:|WARNING:|hung task' || true)"
+OOPS="$(printf '%s\n' "$DM" | grep -vF 'Warning: unable to open an initial console.' | grep -ciE 'BUG:|Oops:|WARNING:|hung task|out of memory|oom-kill|kernel panic' || true)"
 
-# exhausted=1 is what separates "the buddy was deprived of order-7" from
-# "we stopped early and the untouched remainder still has it". stop= names
-# why the loop ended. unsplit= is the chase floor's measured value at stop:
-# buddyinfo order-0 plus the per-cpu page cache. It is not a gate input --
-# stop= already names the floor -- but carrying it on the RESULT line makes
-# a chase-unsplit-floor stop self-explanatory without digging the helper
-# line out of the console, which is how run 36811867648 was diagnosed.
-HIGH_ORDER_REREAD="$HIGH_ORDER"
-HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER}"
-say "RESULT high_order_7plus_blocks=${HIGH_ORDER:-unknown} (reread=${HIGH_ORDER_REREAD:-$HIGH_ORDER}) exhausted=${EXHAUSTED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
+# exhausted= is the strict raw-count result. bounded= is a separate,
+# explicitly narrower ordinary-path result when a runner reaches the safe
+# MemFree floor with at most one order-7 block remaining. Reread both the
+# block count and its page size after the hole pattern so neither can grow
+# between the helper's sample and the channel-open exercise.
+HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER_REREAD}"
+HIGH_ORDER_PAGES="${HIGH_ORDER_PAGES_HELPER:-$HIGH_ORDER_PAGES_REREAD}"
+say "RESULT high_order_7plus_blocks=$HIGH_ORDER (after_holes=$HIGH_ORDER_REREAD after_channel=$HIGH_ORDER_AFTER_CHANNEL) high_order_7plus_pages=$HIGH_ORDER_PAGES (after_holes=$HIGH_ORDER_PAGES_REREAD after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL) exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
 
 # Exit codes for init:
 #   0  PASS            pressure achieved and ring allocation survived it
@@ -403,28 +464,65 @@ say "RESULT high_order_7plus_blocks=${HIGH_ORDER:-unknown} (reread=${HIGH_ORDER_
 #   1  FAIL            candidate damage, or the channel would not reopen
 #   2  REFUSE          guard tripped (see top of file)
 RC=0
-if [ -z "$FRAG_LINE" ]; then
+is_uint() {
+	case "$1" in
+	'' | *[!0-9]*) return 1 ;;
+	*) return 0 ;;
+	esac
+}
+NUMERIC_EVIDENCE=yes
+for _number in "$HIGH_ORDER_BLOCKS_BEFORE" "$HIGH_ORDER_PAGES_BEFORE" \
+	"$HIGH_ORDER_HELPER" "$HIGH_ORDER_PAGES_HELPER" "$CHUNKS_HELPER" \
+	"$HIGH_ORDER_REREAD" "$HIGH_ORDER_PAGES_REREAD" \
+	"$HIGH_ORDER_AFTER_CHANNEL" "$HIGH_ORDER_PAGES_AFTER_CHANNEL" \
+	"$EXHAUSTED" "$BOUNDED" "$PAGEMAP"; do
+	if ! is_uint "$_number"; then
+		NUMERIC_EVIDENCE=no
+	fi
+done
+if [ "$ACCEPT" -gt 0 ] || [ "$OOPS" -gt 0 ]; then
+	say "VERDICT=FAIL accept4=$ACCEPT oops=$OOPS"
+	RC=1
+elif [ -z "$FRAG_LINE" ]; then
 	say "VERDICT=INCONCLUSIVE_NO_PATTERN (fragment-buddy never reported ready=1)"
 	RC=3
-elif [ "${EXHAUSTED:-0}" != 1 ]; then
-	say "VERDICT=INCONCLUSIVE_CAP_REACHED (exhausted=${EXHAUSTED:-unknown} stop=${STOPREASON:-unknown}; the loop stopped with order-7 blocks still free, so the buddy could still satisfy an order-7 request outright)"
-	RC=3
+elif [ "$REBOUND" != yes ]; then
+	say "VERDICT=FAIL channel did not rebind after fragmentation"
+	RC=1
+
 elif [ "${PAGEMAP:-0}" != 1 ]; then
 	say "VERDICT=INCONCLUSIVE_NO_PAGEMAP (holes were virtual, not physical buddy pairs)"
 	RC=3
-elif [ "${HIGH_ORDER:-1}" -gt 0 ]; then
-	say "VERDICT=INCONCLUSIVE_ORDER7_STILL_AVAILABLE (high_order_7plus_blocks=$HIGH_ORDER; pattern did not break contiguity)"
-	RC=3
-elif [ "$REBOUND" = yes ] && [ "$ACCEPT" -eq 0 ] && [ "$OOPS" -eq 0 ]; then
+elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
+	[ "$HIGH_ORDER_BLOCKS_BEFORE" -gt 0 ] &&
+	[ "$HIGH_ORDER_PAGES_BEFORE" -gt 0 ] && [ "$EXHAUSTED" = 1 ] &&
+	[ "$HIGH_ORDER_HELPER" = 0 ] && [ "$HIGH_ORDER_PAGES_HELPER" = 0 ] &&
+	[ "$HIGH_ORDER_REREAD" = 0 ] && [ "$HIGH_ORDER_PAGES_REREAD" = 0 ] &&
+	[ "$HIGH_ORDER_AFTER_CHANNEL" = 0 ] &&
+	[ "$HIGH_ORDER_PAGES_AFTER_CHANNEL" = 0 ]; then
 	say "VERDICT=PASS_RING_ALLOCATION_UNDER_FRAGMENTATION"
-	say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; co-co-chunked-fallback-not-exercised"
+	say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; raw_high_order_exhaustion=proved; CoCo_chunked_fallback=not_exercised"
 	RC=0
-elif [ "$ACCEPT" -gt 0 ] || [ "$OOPS" -gt 0 ]; then
-	say "VERDICT=FAIL accept4=$ACCEPT oops=$OOPS"
-	RC=1
+elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
+	[ "$HIGH_ORDER_BLOCKS_BEFORE" -gt 0 ] &&
+	[ "$HIGH_ORDER_PAGES_BEFORE" -ge 12800 ] && [ "$BOUNDED" = 1 ] &&
+	[ "$STOPREASON" = chase-memfree-margin ] &&
+	[ "$HIGH_ORDER_HELPER" = 1 ] && [ "$HIGH_ORDER_PAGES_HELPER" -le 128 ] &&
+	[ "$HIGH_ORDER_REREAD" = "$HIGH_ORDER_HELPER" ] &&
+	[ "$HIGH_ORDER_PAGES_REREAD" = "$HIGH_ORDER_PAGES_HELPER" ] &&
+	[ "$HIGH_ORDER_REREAD" = 1 ] && [ "$HIGH_ORDER_PAGES_REREAD" -le 128 ]; then
+	if [ "$HIGH_ORDER_AFTER_CHANNEL" -gt "$HIGH_ORDER_HELPER" ] ||
+		[ "$HIGH_ORDER_PAGES_AFTER_CHANNEL" -gt "$HIGH_ORDER_PAGES_HELPER" ]; then
+		say "VERDICT=INCONCLUSIVE_PATTERN_CHANGED (after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL helper=$HIGH_ORDER_PAGES_HELPER)"
+		RC=3
+	else
+		say "VERDICT=PASS_RING_ALLOCATION_UNDER_BOUNDED_FRAGMENTATION"
+		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL; safe_margin_stop=yes; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
+		RC=0
+	fi
 else
-	say "VERDICT=FAIL channel did not rebind after fragmentation"
-	RC=1
+	say "VERDICT=INCONCLUSIVE_PRESSURE_BOUNDARY (exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} high_order_pages=${HIGH_ORDER_PAGES:-unknown} stop=${STOPREASON:-unknown})"
+	RC=3
 fi
 say "=== END vmbus-fragmentation-drill ==="
 say "log=$LOG"

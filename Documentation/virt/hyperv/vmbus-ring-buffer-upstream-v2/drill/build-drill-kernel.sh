@@ -33,8 +33,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 [ -d "$SRC" ] || { echo "ERROR: kernel source '$SRC' not found" >&2; exit 2; }
 [ -f "$SRC/Makefile" ] || { echo "ERROR: '$SRC' is not a kernel tree" >&2; exit 2; }
-for f in init vmbus_drill_helper.c vmbus-lifecycle-drill.sh \
-	vmbus-fragmentation-drill.sh uio-ring-exercise.sh; do
+for f in init vmbus_drill_helper.c test-fragmentation-policy.c \
+	vmbus-lifecycle-drill.sh vmbus-fragmentation-drill.sh \
+	uio-ring-exercise.sh; do
 	[ -f "$HERE/$f" ] || { echo "ERROR: missing $HERE/$f" >&2; exit 2; }
 done
 
@@ -48,6 +49,11 @@ say() { echo "DRILL-BUILD $*"; }
 # --- 1. static drill helper --------------------------------------------------
 say "helper: building vmbus_drill_helper"
 mkdir -p "$OUT/bin"
+say "policy: running fragmentation qualification tests"
+cc -O2 -Wall -Wextra -Werror \
+	-o "$OUT/bin/test-fragmentation-policy" \
+	"$HERE/test-fragmentation-policy.c"
+"$OUT/bin/test-fragmentation-policy"
 cc -O2 -Wall -Wextra -static -s \
 	-o "$OUT/bin/vmbus_drill_helper" \
 	"$HERE/vmbus_drill_helper.c"

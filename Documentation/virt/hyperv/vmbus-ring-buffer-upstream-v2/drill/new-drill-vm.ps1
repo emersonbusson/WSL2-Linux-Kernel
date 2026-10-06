@@ -50,7 +50,10 @@ param(
 
   [int]$CpuCount = 2,
 
-  [switch]$HostRescind
+  [switch]$HostRescind,
+
+  [ValidateSet('Observe', 'RequirePass', 'ExpectedBaselineFailure')]
+  [string]$VerdictPolicy = 'Observe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +113,12 @@ Note memory_mb $MemoryMB
 Note cpu_count $CpuCount
 Note timeout_sec $TimeoutSec
 
+if (Test-Path $vhdPath) {
+  Note esp_build refused_existing_vhdx
+  Write-Host "REFUSE: refusing to overwrite an existing VHDX at $vhdPath"
+  exit 2
+}
+
 # --- module preflight --------------------------------------------------------
 if (-not (Get-Module -ListAvailable -Name Hyper-V)) {
   Note hyperv_module unavailable
@@ -125,14 +134,17 @@ if (-not (Get-Command New-VM -ErrorAction SilentlyContinue)) {
   exit 1
 }
 Note new_vm_cmdlet present
+if (Get-VM -Name $VmName -ErrorAction SilentlyContinue) {
+  Note vm_define refused_existing_vm
+  Write-Host "REFUSE: refusing to modify an existing VM named $VmName"
+  exit 2
+}
 
 # --- build the ESP VHDX ------------------------------------------------------
 $vhd = $null
 $mounted = $false
 try {
   Note esp_build begin
-  if (Test-Path $vhdPath) { Remove-Item $vhdPath -Force }
-
   # Fixed 128 MiB: one kernel image, nothing else. Small enough to keep the
   # runner's C: footprint bounded and large enough for any bzImage we build.
   $vhd = New-VHD -Path $vhdPath -SizeBytes 128MB -Fixed
@@ -166,15 +178,22 @@ catch {
   if ($mounted) {
     try { Dismount-VHD -Path $vhdPath -ErrorAction SilentlyContinue } catch {}
   }
+  try { Remove-VHD -Path $vhdPath -Force -ErrorAction SilentlyContinue } catch {}
+  if (Test-Path $vhdPath) {
+    try { Remove-Item $vhdPath -Force -ErrorAction SilentlyContinue } catch {}
+  }
   Write-Host "ERROR: could not build the ESP VHDX: $($_.Exception.Message)"
   exit 1
 }
 
 # --- define the guest --------------------------------------------------------
 $vm = $null
+$script:vmOwned = $false
+$script:drillSwitchCreated = $false
 try {
   Note vm_define begin
   $vm = New-VM -Name $VmName -Generation 2 -MemoryStartupBytes ($MemoryMB * 1MB) -VHDPath $vhdPath
+  $script:vmOwned = $true
   Set-VM -Name $VmName -AutomaticCheckpointsEnabled $false -CheckpointType Disabled
   Set-VMProcessor -VMName $VmName -Count $CpuCount
   Set-VMFirmware -VMName $VmName -EnableSecureBoot Off
@@ -198,6 +217,7 @@ try {
   if (-not $switchName) {
     try {
       New-VMSwitch -Name 'vmbus-drill-private' -SwitchType Private -ErrorAction Stop | Out-Null
+      $script:drillSwitchCreated = $true
       Note drill_switch created
       $switchName = 'vmbus-drill-private'
     }
@@ -223,7 +243,30 @@ try {
 catch {
   Note vm_define ("failed: " + $_.Exception.Message)
   Write-Host "ERROR: could not define the VM: $($_.Exception.Message)"
-  try { Remove-VHD -Path $vhdPath -Force -ErrorAction SilentlyContinue } catch {}
+  try {
+    if ($script:vmOwned -and (Get-VM -Name $VmName -ErrorAction SilentlyContinue)) {
+      Stop-VM -Name $VmName -TurnOff -Force -ErrorAction SilentlyContinue
+      Remove-VM -Name $VmName -Force -ErrorAction SilentlyContinue
+    }
+  }
+  catch { Note early_vm_cleanup ("failed: " + $_.Exception.Message) }
+  if ($script:drillSwitchCreated) {
+    try { Remove-VMSwitch -Name 'vmbus-drill-private' -Force -ErrorAction SilentlyContinue } catch {}
+  }
+  $partialVm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+  if (-not $partialVm) {
+    try {
+      Dismount-VHD -Path $vhdPath -Force -ErrorAction SilentlyContinue
+      Remove-VHD -Path $vhdPath -Force -ErrorAction SilentlyContinue
+    }
+    catch { Note early_vhd_cleanup ("failed: " + $_.Exception.Message) }
+    if (Test-Path $vhdPath) {
+      try { Remove-Item $vhdPath -Force -ErrorAction SilentlyContinue } catch {}
+    }
+  }
+  else {
+    Note early_vhd_cleanup 'preserved because same-name VM ownership is unproven'
+  }
   exit 1
 }
 
@@ -466,59 +509,102 @@ Note verdict_source $verdict_source
 Note console_bytes $console.Length
 
 # --- teardown ----------------------------------------------------------------
+$cleanupOk = $true
 try {
-  if (Get-VM -Name $VmName -ErrorAction SilentlyContinue) {
+  $remainingVm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+  if ($script:vmOwned -and $remainingVm) {
     if ($booted) {
       Stop-VM -Name $VmName -TurnOff -Force -ErrorAction SilentlyContinue
     }
-    Remove-VM -Name $VmName -Force -ErrorAction SilentlyContinue
-    Note vm_remove ok
+    Remove-VM -Name $VmName -Force -ErrorAction Stop
   }
-  else {
-    Note vm_remove nothing_to_remove
+  $remainingVm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+  if ($remainingVm) {
+    $cleanupOk = $false
+    if ($script:vmOwned) {
+      Note vm_remove 'failed: VM remains registered after removal'
+    }
+    else {
+      Note vm_remove 'failed: same-name VM was not created by this run and was preserved'
+    }
   }
+  elseif ($script:vmOwned) { Note vm_remove ok }
+  else { Note vm_remove nothing_to_remove }
 }
 catch {
+  $cleanupOk = $false
   Note vm_remove ("failed: " + $_.Exception.Message)
 }
 
 try {
-  if (Test-Path $vhdPath) {
-    try { Dismount-VHD -Path $vhdPath -Force -ErrorAction SilentlyContinue } catch {}
-    Remove-Item $vhdPath -Force -ErrorAction SilentlyContinue
-    Note vhd_remove ok
+  $remainingVm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+  if ($remainingVm -and (Test-Path $vhdPath)) {
+    $cleanupOk = $false
+    Note vhd_remove 'failed: VHDX preserved because the VM remains registered'
   }
+  elseif (Test-Path $vhdPath) {
+    try { Dismount-VHD -Path $vhdPath -Force -ErrorAction SilentlyContinue } catch {}
+    Remove-Item $vhdPath -Force -ErrorAction Stop
+  }
+  if (Test-Path $vhdPath) {
+    $cleanupOk = $false
+    Note vhd_remove 'failed: VHDX remains on disk'
+  }
+  else { Note vhd_remove ok }
 }
 catch {
+  $cleanupOk = $false
   Note vhd_remove ("failed: " + $_.Exception.Message)
 }
 
-# Leave the switch only if this run created it. A pre-existing Default Switch
-# is infrastructure and must survive.
+# Remove only the private switch this run created. Existing switches are
+# shared host infrastructure and remain untouched.
 try {
-  $sw = Get-VMSwitch -Name 'vmbus-drill-private' -ErrorAction SilentlyContinue
-  if ($sw) {
-    Remove-VMSwitch -Name 'vmbus-drill-private' -Force -ErrorAction SilentlyContinue
-    Note drill_switch_remove ok
+  if ($script:drillSwitchCreated) {
+    $sw = Get-VMSwitch -Name 'vmbus-drill-private' -ErrorAction SilentlyContinue
+    if ($sw) {
+      Remove-VMSwitch -Name 'vmbus-drill-private' -Force -ErrorAction Stop
+    }
+    if (Get-VMSwitch -Name 'vmbus-drill-private' -ErrorAction SilentlyContinue) {
+      $cleanupOk = $false
+      Note drill_switch_remove 'failed: switch remains registered after removal'
+    }
+    else { Note drill_switch_remove ok }
   }
+  else { Note drill_switch_remove preserved_existing_or_not_created }
 }
 catch {
+  $cleanupOk = $false
   Note drill_switch_remove ("failed: " + $_.Exception.Message)
+}
+
+if ($cleanupOk) {
+  Note harness_cleanup PASS
+}
+else {
+  Note harness_cleanup FAIL
 }
 
 # --- exit --------------------------------------------------------------------
 Write-Host '---- drill-vm report ----'
 Get-Content $script:report | Write-Host
 
-# PASS and PARTIAL both mean the measurement ran. PARTIAL is green for the job
-# and PARTIAL for the gate -- it is the honest "drill executed, gate not closed"
-# outcome and must not be confused with a failure to measure. FAIL and
-# NO_RESULT redden: either the candidate was damaged or we never got a verdict.
-if ($verdict -eq 'PASS' -or $verdict -eq 'PARTIAL') {
-  Note exit_code 0
+# The selected policy decides whether an observed result can close this gate.
+# The candidate path requires full PASS; the baseline path accepts only its
+# exact, fault-free negative-control signature.
+Import-Module (Join-Path $PSScriptRoot 'runtime-verdict-policy.psm1') -Force
+$decision = Get-HypervDrillDecision `
+  -Policy $VerdictPolicy `
+  -Verdict $verdict `
+  -ConsoleText $console
+if (-not $cleanupOk) {
+  Note runtime_policy_reason 'harness teardown did not prove resource removal'
+  Note exit_code 1
   Note verdict $verdict
-  exit 0
+  exit 1
 }
-Note exit_code 1
+Note runtime_policy $VerdictPolicy
+Note runtime_policy_reason $decision.Reason
+Note exit_code $decision.ExitCode
 Note verdict $verdict
-exit 1
+exit $decision.ExitCode

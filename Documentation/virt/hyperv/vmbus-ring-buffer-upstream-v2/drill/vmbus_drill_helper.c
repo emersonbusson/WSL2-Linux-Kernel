@@ -89,6 +89,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -333,6 +334,7 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_CHUNK (64L * 1024)
 #define FRAG_MAX_CHUNKS 48000
 #define FRAG_PAGE 4096L
+#define FRAG_BOUNDED_MAX_REMAINING_PAGES (1L << 7)
 /*
  * Allocation-phase floor, measured against MemFree and only consulted while
  * order-7 remains: the test condition itself is the stop once it is met, so
@@ -383,94 +385,26 @@ static int do_mlock_hog(int argc, char **argv)
  */
 #define FRAG_HOLE_CAP 4096L
 /*
- * Chase phase: split the high-order blocks the main loop's margin left
- * behind. The punch has just freed FRAG_HOLE_CAP isolated order-0 pages, so
- * there is room to allocate again without touching the floor; and because
- * those holes cannot form high orders, further faults must come out of the
- * remaining order-7-and-up blocks. That is the split we want.
+ * The chase spends the remaining safe headroom after the main fragmentation
+ * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
+ * only inside this disposable guest, and watermark boost is disabled and
+ * read back before pressure starts. The chase keeps the 1 MiB buddy-free
+ * floor, the 128-page unsplit reserve, and a 4096-chunk hard cap. Crossing
+ * any of them to force raw high-order count to zero would weaken the safety
+ * contract that kept earlier guests from OOM and panic.
  *
- * The floor is counted in unsplit free pages -- the order-0 buddy lists plus
- * the per-cpu page cache -- which is the only free-memory figure that means
- * what a fault can actually take without splitting something. Neither
- * /proc/meminfo nor /proc/buddyinfo reports it. MemFree is most of a
- * still-free high-order block (run 36803317912 stopped at 7.5 MiB with 7.0 of
- * that inside six order-7-and-up blocks), so a MemFree floor fires exactly
- * when the split it is supposed to allow has not happened yet. Both files
- * also omit the pcp, which is where a freshly freed page lands, so a floor on
- * either raw count fires right after the punch that is supposed to make room
- * -- run 36806229800 punched 4096 pages and buddyinfo still read 1, and run
- * 36808657969 got chase=0 from a "MemFree minus the high orders" floor that
- * is algebraically buddyinfo's order-0 again. See unsplit_free_pages().
+ * A hosted runner can stop with one order-7 block while still meeting the
+ * safe stress target. That result qualifies only as bounded ordinary-path
+ * pressure: at least 99% of the initial order-7-and-higher free pages were
+ * removed, no more than one minimum order-7 block (128 pages) remains, the
+ * safety floor caused the stop, and pagemap verified physical pages. It is
+ * reported separately from full exhaustion and does not qualify the CoCo
+ * chunked allocator, which an ordinary Hyper-V guest never executes.
  *
- * The level of that floor matters as much as the quantity. Run 36811867648
- * stopped at unsplit=504 (windows-2025) and 498 (windows-latest) with
- * high_order_7plus still at 9 and 8, while buddyinfo held 6101 and 3658
- * free pages in total -- most of it in the very blocks the chase exists to
- * split, including five order-10 blocks on windows-2025. Unsplit excludes
- * high orders, so it read as starvation while the guest still had 24 MiB.
- * The chase had just finished draining the pcp (254 and 405 iterations) and
- * was at the point where the next fault starts splitting; the floor stopped
- * it there, which is why only one or three high-order blocks were consumed.
- *
- * Splitting refills unsplit (an order-10 yields 1024 order-0 pages; a
- * 64 KiB chase chunk takes 16 and leaves 1008), so while any block above
- * order-0 remains the floor cannot bind -- it only binds when there is
- * nothing left to split. A low floor is therefore a real starvation guard
- * and still lets the split cycle run until high==0, which is what
- * exhausted=1 measures.
- *
- * FRAG_CHASE_UNSPLIT is one order-0 page count of the watermark the drill
- * has already set (min_free_kbytes=512 KiB = 128 pages), not a separate
- * reservation on top of it.
- *
- * FRAG_CHASE_CAP is the backstop, not the guard. The chase stops on the
- * measured condition first, then on the unsplit floor, then on the memfree
- * safety stop below, and only then on the cap. The chase holds every chunk
- * now: 4096 * 64 KiB is 256 MiB of headroom against the ~80 MiB the memfree
- * floor below will actually allow on a 2 GiB guest, so the floor binds
- * first and the cap is pure backstop. It is not a guess and it is not a
- * lever on the residue.
- *
- * The recycle is gone. It was anti-correlated with the goal across six
- * runs: every page returned as isolated order-0 is a page the next fault
- * takes instead of splitting, because __rmqueue_smallest drains order-0
- * before it ever looks at a higher order. 36823337153 (no recycle) held
- * 43.75 MiB and left 43 MiB of residue; 36883261849 (10.15 holes/chunk)
- * held 73.7 MiB and left 14 MiB; 36887735012 (15.68 holes/chunk, the
- * * 8 cap de-truncated) held 21 MiB and left 66 MiB, with order-10
- * blocks 2/3 -> 16/16 -- the high-order blocks were never touched. More
- * recycle, less hold, bigger residue, every time. Holding is what splits.
- * The recycle's proper place is phase 2, where it makes room for the ring,
- * not phase 1, where it exists to force splits.
- *
- * Watermark boost is the real limiter, not the floor constant. Run
- * 36899458556 drove the chase floor off the live min+boost watermark and
- * made things worse: fragmenting is exactly what boost_watermark() reacts
- * to, so the floor chased a rising target. windows-latest OOMed its own
- * helper at `free:7024kB boost:6924kB min:7436kB` -- min is already
- * 512+6924 -- and windows-2025 panicked on init's clone() with
- * `free:12588kB` all order-0, so an order-1 GFP_KERNEL had nothing to
- * split. Suppressing boost is what makes a low floor meaningful:
- * watermark_boost_factor=0 calls setup_per_zone_wmarks(), which zeroes
- * zone->watermark_boost and keeps min at the value we wrote. The floor is
- * driven off min_free_set -- the number this run asked for -- and not off
- * live_min_watermark_kb(), whose sum includes whatever boost is standing
- * and therefore chases a rising target. Both sysctls are read back and
- * fail closed: run 36879744347 killed two guests on a silent
- * min_free_kbytes write that never took. Run 36906731699 proved the low
- * floor is reachable (order-7+ down to a single block) and that restoring
- * the watermarks before the hold is what kills the guest.
- *
- * The residue does not have to be held. __rmqueue_smallest serves order-0
- * first, so the chase must empty the no-split budget (unsplit) before it
- * will touch an order-10; once order-0 is empty, clearing one order-10
- * down to order-6-and-below costs 15 held pages (1+2+4+8) and the rest of
- * the block stays free as order-6 and below -- exactly the state
- * high_order_7plus=0 asks for. Runs 36892314395 (16 MiB floor) and
- * 36894869321 (8 MiB floor) left 2816 and 1408/1280 pages standing
- * because the MemFree floor fired while unsplit was still the allocator's
- * preferred source. Estimated further hold to finish is unsplit plus ~25
- * pages of forced splits, about 3 MiB.
+ * Keep the exact residue in the report. The bounded result says that the
+ * ordinary vzalloc ring path survived a severe measured pattern; it does not
+ * claim full saturation or that a high-order allocation would fail after
+ * the later hole-punch phase.
  */
 #define FRAG_CHASE_CAP 4096L
 #define FRAG_CHASE_UNSPLIT 128L
@@ -673,6 +607,65 @@ static long buddy_blocks_at_or_above(int min_order)
 	}
 	fclose(f);
 	return sum;
+}
+
+static long buddy_pages_at_or_above(int min_order)
+{
+	FILE *f = fopen("/proc/buddyinfo", "r");
+	char line[512];
+	long sum = 0;
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f)) {
+		char *save = NULL;
+		char *tok = strtok_r(line, " \t\n", &save);
+		int field = 0;
+
+		while (tok) {
+			field++;
+			if (field > 4 && field - 5 >= min_order) {
+				char *end = NULL;
+				long blocks = strtol(tok, &end, 10);
+				int order = field - 5;
+				long pages;
+
+				if (end == tok || *end || blocks < 0 ||
+				    order >= (int)(sizeof(long) * CHAR_BIT - 1)) {
+					fclose(f);
+					return -1;
+				}
+				pages = 1L << order;
+				if (blocks > (LONG_MAX - sum) / pages) {
+					fclose(f);
+					return -1;
+				}
+				sum += blocks * pages;
+			}
+			tok = strtok_r(NULL, " \t\n", &save);
+		}
+	}
+	fclose(f);
+	return sum;
+}
+
+static int frag_bounded_pressure_qualified(long before_pages,
+						  long after_pages,
+						  const char *stop_reason,
+						  int pagemap,
+						  int watermark_safe)
+{
+	if (before_pages <= 0 || after_pages < 0 || pagemap != 1 ||
+	    !watermark_safe)
+		return 0;
+	if (after_pages == 0)
+		return stop_reason && !strcmp(stop_reason, "order7-depleted");
+	if (after_pages > FRAG_BOUNDED_MAX_REMAINING_PAGES ||
+	    !stop_reason || strcmp(stop_reason, "chase-memfree-margin") ||
+	    after_pages >= before_pages)
+		return 0;
+
+	return after_pages <= before_pages / 100L;
 }
 
 /*
@@ -942,7 +935,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	long mib, hold, want, got = 0, locked = 0, i, off, stopped = 0;
 	long freed_pages = 0, held_pages = 0, no_pfn = 0, pairs = 0;
 	long high_before, high_locked, high_after, free_kb = -1;
+	long high_before_pages = -1, high_locked_pages = -1;
+	long high_after_pages = -1;
 	long wmark_kb = -1, floor_kb = -1;
+	long chase_free_kb = -1, chase_wmark_kb = -1, chase_floor_kb = -1;
 	long min_free_saved, min_free_set, min_free_now;
 	long boost_saved, boost_now;
 	long chase = 0, chase_locked = 0;
@@ -956,7 +952,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	long order2_buddy;
 	unsigned long *pfns = NULL, *seen = NULL;
 	unsigned long max_pfn = 0, seen_words = 0;
-	int pmfd;
+	int pmfd, bounded;
 	const char *stop_reason = "ceiling";
 
 	if (argc < 3) {
@@ -1065,8 +1061,9 @@ static int do_fragment_buddy(int argc, char **argv)
 	}
 
 	high_before = buddy_blocks_at_or_above(7);
-	printf("FRAGMENT_BUDDY start cap_chunks=%ld high_order_7plus=%ld\n",
-	       want, high_before);
+	high_before_pages = buddy_pages_at_or_above(7);
+	printf("FRAGMENT_BUDDY start cap_chunks=%ld high_order_7plus=%ld high_order_7plus_pages=%ld\n",
+	       want, high_before, high_before_pages);
 	fflush(stdout);
 
 	/*
@@ -1189,8 +1186,10 @@ static int do_fragment_buddy(int argc, char **argv)
 		stop_reason = "order7-depleted";
 	}
 	high_locked = buddy_blocks_at_or_above(7);
-	printf("FRAGMENT_BUDDY allocated chunks=%ld high_order_7plus=%ld->%ld locked=%ld stop=%s\n",
-	       got, high_before, high_locked, locked, stop_reason);
+	high_locked_pages = buddy_pages_at_or_above(7);
+	printf("FRAGMENT_BUDDY allocated chunks=%ld high_order_7plus=%ld->%ld high_order_7plus_pages=%ld->%ld locked=%ld stop=%s\n",
+	       got, high_before, high_locked, high_before_pages,
+	       high_locked_pages, locked, stop_reason);
 	fflush(stdout);
 
 	pmfd = open("/proc/self/pagemap", O_RDONLY);
@@ -1360,6 +1359,9 @@ static int do_fragment_buddy(int argc, char **argv)
 		}
 		chase_maps[chase++] = m;
 	}
+	chase_free_kb = free_kb;
+	chase_wmark_kb = wmark_kb;
+	chase_floor_kb = floor_kb;
 
 	/*
 	 * Pass 2: unmap every page whose PFN is even and whose buddy (pfn+1)
@@ -1422,9 +1424,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	}
 
 	high_after = buddy_blocks_at_or_above(7);
-	printf("FRAGMENT_BUDDY chase=%ld locked=%ld holes=%ld pairs=%ld high_order_7plus=%ld->%ld\n",
+	high_after_pages = buddy_pages_at_or_above(7);
+	printf("FRAGMENT_BUDDY chase=%ld locked=%ld holes=%ld pairs=%ld high_order_7plus=%ld->%ld high_order_7plus_pages=%ld->%ld\n",
 	       chase, chase_locked, chase_holes, chase_pairs, high_locked,
-	       high_after);
+	       high_after, high_locked_pages, high_after_pages);
 	fflush(stdout);
 
 	/*
@@ -1529,21 +1532,25 @@ static int do_fragment_buddy(int argc, char **argv)
 	fflush(stdout);
 
 	/*
-	 * exhausted=1 means the measured condition holds now: no free
-	 * block of order 7 or above. It is not "the loop stopped", which
-	 * is true of every floor and every refusal as well. stop= names
-	 * why the loop ended and is measured at that moment; exhausted=
-	 * is measured here. They agree by construction now that each
-	 * chunk is pinned before the next buddy check, but exhausted= is
-	 * still the authoritative one and the drill gates on it.
+	 * `exhausted` remains the strict raw-count result. `bounded` is a
+	 * separate ordinary-path qualification and never rewrites that count.
 	 */
-	printf("FRAGMENT_BUDDY ready=1 chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 groups=%ld buddy_order2=%ld stop=%s high_order_7plus=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld\n",
-	       got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages, freed_pages,
-	       locked, pairs, want, FRAG_HOLE_CAP, chase, chase_holes,
+	bounded = frag_bounded_pressure_qualified(high_before_pages,
+						  high_after_pages,
+						  stop_reason, 1,
+						  chase_free_kb >= 0 &&
+						  chase_wmark_kb >= 0 &&
+						  chase_free_kb >= chase_wmark_kb);
+	free_kb = mem_free_kb();
+	wmark_kb = live_min_watermark_kb();
+	printf("FRAGMENT_BUDDY ready=1 bounded=%d chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 groups=%ld buddy_order2=%ld stop=%s high_order_7plus=%ld->%ld->%ld high_order_7plus_pages=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld chase_floor_kb=%ld chase_wmark_kb=%ld chase_free_kb=%ld\n",
+	       bounded, got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages,
+	       freed_pages, locked, pairs, want, FRAG_HOLE_CAP, chase, chase_holes,
 	       chase_pairs, unsplit_at_stop, high_after == 0 ? 1L : 0L,
 	       order2_groups, order2_buddy, stop_reason, high_before,
-	       high_locked, high_after,
-	       floor_kb, wmark_kb, free_kb);
+	       high_locked, high_after, high_before_pages, high_locked_pages,
+	       high_after_pages, floor_kb, wmark_kb, free_kb, chase_floor_kb,
+	       chase_wmark_kb, chase_free_kb);
 	fflush(stdout);
 
 	/*

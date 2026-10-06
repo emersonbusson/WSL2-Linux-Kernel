@@ -6,23 +6,33 @@
 
 int main(void)
 {
-	/* MemFree omits per-CPU pages; these values come from the failing runner. */
-	assert(frag_total_free_kb(896, 532) == 3024);
-	assert(frag_total_free_kb(-1, 532) == -1);
-	assert(frag_total_free_kb(896, -1) == -1);
+	/* The safe stop qualifies only the bounded ordinary allocation scope. */
+	assert(frag_bounded_pressure_qualified(500000, 0,
+						       "order7-depleted", 1, 1));
+	assert(frag_bounded_pressure_qualified(500000, 128,
+						       "chase-memfree-margin", 1, 1));
+	assert(frag_bounded_pressure_qualified(12800, 128,
+						       "chase-memfree-margin", 1, 1));
+	assert(frag_bounded_pressure_qualified(12900, 128,
+						       "chase-memfree-margin", 1, 1));
 
-	assert(frag_chase_floor_kb(512) == 512);
-	assert(frag_chase_floor_kb(768) == 768);
-	assert(frag_chase_floor_kb(-1) == -1);
-
-	/* Use full chunks while safe, then page steps at the watermark boundary. */
-	assert(frag_chase_fault_pages(3024, 512) == FRAG_CHUNK / FRAG_PAGE);
-	assert(frag_chase_fault_pages(576, 512) == FRAG_CHUNK / FRAG_PAGE);
-	assert(frag_chase_fault_pages(572, 512) == 1);
-	assert(frag_chase_fault_pages(516, 512) == 1);
-	assert(frag_chase_fault_pages(512, 512) == 0);
-	assert(frag_chase_fault_pages(508, 512) == 0);
-	assert(frag_chase_fault_pages(-1, 512) == 0);
+	/* A larger residue, unsafe stop, or missing PFN proof stays unqualified. */
+	assert(!frag_bounded_pressure_qualified(500000, 256,
+							"chase-memfree-margin", 1, 1));
+	assert(!frag_bounded_pressure_qualified(12800, 129,
+							"chase-memfree-margin", 1, 1));
+	assert(!frag_bounded_pressure_qualified(12799, 128,
+							"chase-memfree-margin", 1, 1));
+	assert(!frag_bounded_pressure_qualified(500000, 128,
+							"chase-mmap-refused", 1, 1));
+	assert(!frag_bounded_pressure_qualified(500000, 128,
+							"chase-memfree-margin", 0, 1));
+	assert(!frag_bounded_pressure_qualified(500000, 128,
+							"chase-memfree-margin", 1, 0));
+	assert(!frag_bounded_pressure_qualified(0, 0,
+							"order7-depleted", 1, 1));
+	assert(!frag_bounded_pressure_qualified(500000, 0,
+							"chase-memfree-margin", 1, 1));
 
 	puts("fragmentation policy tests: PASS");
 	return 0;
