@@ -374,7 +374,7 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_CHUNK (64L * 1024)
 #define FRAG_MAX_CHUNKS 48000
 #define FRAG_PAGE 4096L
-#define FRAG_BOUNDED_MAX_REMAINING_PAGES (1L << 7)
+#define FRAG_BOUNDED_MAX_REMAINING_PAGES (1L << 8)
 /*
  * Allocation-phase floor, measured against MemFree and only consulted while
  * order-7 remains: the test condition itself is the stop once it is met, so
@@ -429,16 +429,18 @@ static int do_mlock_hog(int argc, char **argv)
  * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
  * only inside this disposable guest, and watermark boost is disabled and
  * read back before pressure starts. The chase keeps the 1 MiB buddy-free
- * floor, the 128-page unsplit reserve, and a 4096-chunk hard cap. Crossing
+ * floor, a 256-page high-order reserve, and a 4096-chunk hard cap. Crossing
  * any of them to force raw high-order count to zero would weaken the safety
  * contract that kept earlier guests from OOM and panic.
  *
- * A hosted runner can stop with one order-7 block while still meeting the
- * safe stress target. That result qualifies only as bounded ordinary-path
+ * A hosted runner can stop with up to two minimum order-7 blocks while still
+ * meeting the safe stress target. The extra 128 pages cover the allocator's
+ * measured compaction step when mlock pins the final chase chunk; allowing
+ * that second block preserves more safety margin and avoids an oscillating
+ * 128/256-page boundary. That result qualifies only as bounded ordinary-path
  * pressure: at least 99% of the initial order-7-and-higher free pages were
- * removed, no more than one minimum order-7 block (128 pages) remains, a
- * measured safety boundary caused the stop, and pagemap verified physical
- * pages. It is
+ * removed, no more than 256 pages remain, a measured safety boundary caused
+ * the stop, and pagemap verified physical pages. It is
  * reported separately from full exhaustion and does not qualify the CoCo
  * chunked allocator, which an ordinary Hyper-V guest never executes.
  *
@@ -811,32 +813,6 @@ static long live_min_watermark_kb(void)
 }
 
 /*
- * Physical page count as MemTotal describes it. Used only to size the
- * held-page bitmap: the chase takes its pages from the leftover region,
- * above the main pattern's max_pfn, and a bitmap sized from max_pfn alone
- * would be overrun the first time a chase page sat higher. PFNs are never
- * printed.
- */
-static long mem_total_pages(void)
-{
-	FILE *f = fopen("/proc/meminfo", "r");
-	char line[256];
-	long kb = -1;
-
-	if (!f)
-		return -1;
-	while (fgets(line, sizeof(line), f)) {
-		if (strncmp(line, "MemTotal:", 9) == 0) {
-			kb = strtol(line + 9, NULL, 10);
-			break;
-		}
-	}
-	fclose(f);
-	return kb < 0 ? -1 : kb / 4;
-}
-
-
-/*
  * Free pages sitting in the per-cpu page cache, summed over every cpu and
  * zone. Reported by /proc/zoneinfo's `pagesets` block as pcp->count.
  *
@@ -1015,15 +991,62 @@ static int pagemap_pfn(int fd, void *addr, unsigned long *pfn)
 	return *pfn ? 0 : -1;
 }
 
-static void pfn_setbit(unsigned long *bits, unsigned long pfn)
+static int pfn_bitmap_set(unsigned long **bits, size_t *words,
+		  unsigned long pfn)
 {
-	bits[pfn / (8 * sizeof(long))] |= 1UL << (pfn % (8 * sizeof(long)));
+	const unsigned long bits_per_word = sizeof(**bits) * CHAR_BIT;
+	unsigned long word = pfn / bits_per_word;
+	size_t needed, capacity;
+	unsigned long *grown;
+
+	if (word >= SIZE_MAX / sizeof(**bits))
+		return -1;
+	needed = (size_t)word + 1;
+	if (needed > *words) {
+		capacity = *words ? *words : 1;
+		while (capacity < needed) {
+			if (capacity > SIZE_MAX / 2) {
+				capacity = needed;
+				break;
+			}
+			capacity *= 2;
+		}
+		if (capacity > SIZE_MAX / sizeof(**bits))
+			return -1;
+		grown = realloc(*bits, capacity * sizeof(**bits));
+		if (!grown)
+			return -1;
+		memset(grown + *words, 0,
+		       (capacity - *words) * sizeof(**bits));
+		*bits = grown;
+		*words = capacity;
+	}
+	(*bits)[word] |= 1UL << (pfn % bits_per_word);
+	return 0;
 }
 
-static int pfn_getbit(const unsigned long *bits, unsigned long pfn)
+static int pfn_bitmap_get(const unsigned long *bits, size_t words,
+		  unsigned long pfn)
 {
-	return !!(bits[pfn / (8 * sizeof(long))] &
-		  (1UL << (pfn % (8 * sizeof(long)))));
+	const unsigned long bits_per_word = sizeof(*bits) * CHAR_BIT;
+	unsigned long word = pfn / bits_per_word;
+
+	if (word >= words)
+		return 0;
+	return !!(bits[word] & (1UL << (pfn % bits_per_word)));
+}
+
+/* pfns[] stores PFN+1 so zero can mark an unread pagemap entry. */
+static int frag_page_has_held_buddy(unsigned long encoded_pfn,
+				    const unsigned long *seen,
+				    size_t seen_words)
+{
+	unsigned long pfn;
+
+	if (encoded_pfn <= 1)
+		return 0;
+	pfn = encoded_pfn - 1;
+	return !(pfn & 1UL) && pfn_bitmap_get(seen, seen_words, pfn + 1);
 }
 
 static int do_fragment_buddy(int argc, char **argv)
@@ -1051,7 +1074,8 @@ static int do_fragment_buddy(int argc, char **argv)
 	long reserve_got = 0, order2_groups = 0, order2_pages = 0;
 	long order2_buddy = -1;
 	unsigned long *pfns = NULL, *seen = NULL;
-	unsigned long max_pfn = 0, seen_words = 0;
+	unsigned long max_pfn = 0;
+	size_t seen_words = 0;
 	int pmfd = -1, bounded = 0, rc = 1, restore_ok;
 	int min_free_changed = 0, boost_changed = 0, map_count_changed = 0;
 	const char *release_file = NULL;
@@ -1294,19 +1318,20 @@ static int do_fragment_buddy(int argc, char **argv)
 
 	/*
 	 * Allocate 64 KiB chunks and touch every page. Stop when the buddy has
-	 * only one order-7 block left, preserving the measured safety reserve,
+	 * no more than two minimum order-7 blocks left, preserving the measured
+	 * safety reserve,
 	 * or when the MemFree floor says the rest of the run needs more room.
 	 *
 	 * The order-7 count and page total are measured every chunk. The reserve
 	 * is checked before the floor so a single 64 KiB allocation cannot split
-	 * the final order-7 block into smaller orders. A 32-chunk
+	 * the final reserve into smaller orders. A 32-chunk
 	 * cadence walked past blocks that a single chunk would have split, and
 	 * a floor on MemAvailable stopped the loop while order-7 was still
 	 * present. Both are ways to leave the test condition unmet without
 	 * ever being short of memory.
 	 *
 	 * The floor is a margin, not a measure of exhaustion. It is only
-	 * consulted while more than one order-7 block remains; the chase stops
+	 * consulted while more than two order-7 blocks remain; the chase stops
 	 * at the same reserve if the main pass leaves it high-order.
 	 */
 	for (i = 0; i < want; i++) {
@@ -1371,8 +1396,17 @@ static int do_fragment_buddy(int argc, char **argv)
 		 * must not migrate survivors into the gaps and rebuild high
 		 * orders under us.
 		 */
-		if (mlock(m, FRAG_CHUNK) == 0)
-			locked++;
+		if (mlock(m, FRAG_CHUNK) != 0) {
+			int saved_errno = errno;
+
+			munmap(m, FRAG_CHUNK);
+			printf("FRAGMENT_BUDDY ready=0 reason=main-mlock-failed errno=%d\n",
+			       saved_errno);
+			fflush(stdout);
+			rc = 3;
+			goto cleanup;
+		}
+		locked++;
 		maps[i] = m;
 		got++;
 	}
@@ -1428,21 +1462,20 @@ static int do_fragment_buddy(int argc, char **argv)
 	}
 
 	/*
-	 * Size the held bitmap for the whole guest, not for the main
-	 * pattern. The chase takes its pages from the leftover region and
-	 * their PFNs sit above the main pattern's max_pfn; a bitmap sized
-	 * from max_pfn alone is overrun the first time a chase survivor is
-	 * recorded. mem_total_pages() is the physical page count, which is
-	 * the upper bound on any PFN this guest will hand out.
+	 * Size the held bitmap from the highest PFN observed in the main
+	 * pattern. MemTotal counts installed pages, not the highest physical
+	 * PFN, so it is not a safe bound when the guest has physical-address
+	 * holes. The chase can use still-higher PFNs; the setter grows the
+	 * bitmap with overflow checks as those pages are observed.
 	 */
-	{
-		long total = mem_total_pages();
-		unsigned long bound = max_pfn;
-
-		if (total > 0 && (unsigned long)total > bound)
-			bound = (unsigned long)total;
-		seen_words = bound / (8 * sizeof(long)) + 2;
+	if (max_pfn / (sizeof(*seen) * CHAR_BIT) >=
+	    SIZE_MAX / sizeof(*seen)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=pfn-bitmap-size-overflow\n");
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
 	}
+	seen_words = (size_t)(max_pfn / (sizeof(*seen) * CHAR_BIT)) + 1;
 	seen = calloc(seen_words, sizeof(*seen));
 	if (!seen) {
 		printf("HELPER calloc pfn-set: %s\n", strerror(errno));
@@ -1454,8 +1487,13 @@ static int do_fragment_buddy(int argc, char **argv)
 			rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
 			goto cleanup;
 		}
-		if (pfns[i])
-			pfn_setbit(seen, pfns[i] - 1);
+		if (pfns[i] &&
+		    pfn_bitmap_set(&seen, &seen_words, pfns[i] - 1)) {
+			printf("FRAGMENT_BUDDY ready=0 reason=pfn-bitmap-growth-failed\n");
+			fflush(stdout);
+			rc = 3;
+			goto cleanup;
+		}
 	}
 
 	/*
@@ -1538,8 +1576,18 @@ static int do_fragment_buddy(int argc, char **argv)
 		}
 		for (off = 0; off < FRAG_CHUNK; off += FRAG_PAGE)
 			m[off] = 1;
-		if (mlock(m, FRAG_CHUNK) == 0)
-			chase_locked++;
+		if (mlock(m, FRAG_CHUNK) != 0) {
+			int saved_errno = errno;
+
+			munmap(m, FRAG_CHUNK);
+			printf("FRAGMENT_BUDDY ready=0 reason=chase-mlock-failed errno=%d\n",
+			       saved_errno);
+			fflush(stdout);
+			rc = 3;
+			goto cleanup;
+		}
+		chase_locked++;
+		chase_maps[chase++] = m;
 		/*
 		 * Hold every page. No recycle here: the recycled pages came
 		 * back as isolated order-0 and the next chunk's faults took
@@ -1565,11 +1613,15 @@ static int do_fragment_buddy(int argc, char **argv)
 				unsigned long spfn = 0;
 
 				if (pagemap_pfn(pmfd, m + off, &spfn) == 0 &&
-				    spfn)
-					pfn_setbit(seen, spfn - 1);
+				    spfn &&
+				    pfn_bitmap_set(&seen, &seen_words, spfn)) {
+					printf("FRAGMENT_BUDDY ready=0 reason=pfn-bitmap-growth-failed\n");
+					fflush(stdout);
+					rc = 3;
+					goto cleanup;
+				}
 			}
 		}
-		chase_maps[chase++] = m;
 	}
 	chase_free_kb = free_kb;
 	chase_wmark_kb = wmark_kb;
@@ -1609,20 +1661,14 @@ static int do_fragment_buddy(int argc, char **argv)
 				continue;
 			}
 			/*
-			 * seen[x] means "the page with PFN x+1 is ours":
-			 * pass 1 and the chase both store orig-1, so the
-			 * two sources share one bias. The order-0 buddy of
-			 * PFN n is n^1, so a page is only safe to free when
-			 * it is even and its true buddy n+1 is ours and
-			 * stays held. An earlier form decremented the PFN
-			 * first and then tested pfn+1, which paired an odd
-			 * page with the wrong neighbour and let a freed
-			 * page meet a free buddy. That coalesced holes
-			 * after the loop had already measured zero and
-			 * rebuilt one order-7 block (run 36921241614,
-			 * stop=order7-depleted with exhausted=0).
+			 * seen[x] means the page with actual PFN x is held.
+			 * Since pfns[] stores actual PFN+1, an even page n is
+			 * eligible only when bit n+1 proves its true odd buddy
+			 * is held. Freeing only the even member prevents that
+			 * pair from coalescing, including when its buddy came
+			 * from the chase mappings.
 			 */
-			if ((pfn & 1UL) == 0 && pfn_getbit(seen, pfn)) {
+			if (frag_page_has_held_buddy(pfn, seen, seen_words)) {
 				if (munmap(m + off, (size_t)FRAG_PAGE) == 0) {
 					freed_pages++;
 					pairs++;

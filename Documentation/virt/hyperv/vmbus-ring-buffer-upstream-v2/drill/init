@@ -176,13 +176,21 @@ FRAG_STATUS=skipped
 if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	export NIC
 	phase_marker fragmentation begin
-	FRAG_ORIG_MAX_MAP_COUNT=unknown
-	FRAG_ORIG_MIN_FREE_KB=unknown
-	FRAG_ORIG_BOOST_FACTOR=unknown
+	FRAG_ORIG_MAX_MAP_COUNT=
+	FRAG_ORIG_MIN_FREE_KB=
+	FRAG_ORIG_BOOST_FACTOR=
 	FRAG_VM_STATE_VALID=yes
-	read -r FRAG_ORIG_MAX_MAP_COUNT </proc/sys/vm/max_map_count || FRAG_VM_STATE_VALID=no
-	read -r FRAG_ORIG_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || FRAG_VM_STATE_VALID=no
-	read -r FRAG_ORIG_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || FRAG_VM_STATE_VALID=no
+	# BusyBox ash returns nonzero when read reaches EOF without a trailing
+	# newline, even though it has assigned the complete proc-sysctl value.
+	# Accept that case only when a nonempty value was read, then validate all
+	# three values as unsigned decimal before allowing the fallback restore.
+	read -r FRAG_ORIG_MAX_MAP_COUNT </proc/sys/vm/max_map_count || [ -n "$FRAG_ORIG_MAX_MAP_COUNT" ] || FRAG_VM_STATE_VALID=no
+	read -r FRAG_ORIG_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || [ -n "$FRAG_ORIG_MIN_FREE_KB" ] || FRAG_VM_STATE_VALID=no
+	read -r FRAG_ORIG_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || [ -n "$FRAG_ORIG_BOOST_FACTOR" ] || FRAG_VM_STATE_VALID=no
+	case $FRAG_ORIG_MAX_MAP_COUNT in '' | *[!0-9]*) FRAG_VM_STATE_VALID=no ;; esac
+	case $FRAG_ORIG_MIN_FREE_KB in '' | *[!0-9]*) FRAG_VM_STATE_VALID=no ;; esac
+	case $FRAG_ORIG_BOOST_FACTOR in '' | *[!0-9]*) FRAG_VM_STATE_VALID=no ;; esac
+	echo "FRAGMENT_INIT_SNAPSHOT max_map_count=$FRAG_ORIG_MAX_MAP_COUNT min_free_kbytes=$FRAG_ORIG_MIN_FREE_KB watermark_boost_factor=$FRAG_ORIG_BOOST_FACTOR valid=$FRAG_VM_STATE_VALID"
 	# MemTotal, not a share of what looks free: the helper treats this as a
 	# ceiling the allocation loop must never reach. A 75% share stopped with
 	# untouched order-10 blocks before meeting the 99% pressure threshold.
