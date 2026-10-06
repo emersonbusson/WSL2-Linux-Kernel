@@ -9,8 +9,9 @@ CCA and TDX guests without a paravisor need direct-map page transitions.
 This revision uses the existing chunk allocator and keeps allocation,
 GPADL ownership and mapping references together.
 
-This is an unsent validation snapshot. Changed-byte architecture builds
-and the final review are pending; older build results do not qualify it.
+This is an unsent validation snapshot. The thirteen-stage architecture
+builds pass for these exact code mails. Changed-byte live mainline runtime
+and the final review remain pending.
 
 References:
   Initial proposal: https://lists.openwall.net/linux-kernel/2026/09/18/276
@@ -24,11 +25,12 @@ Base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4).
 Allocation and compatibility
 ----------------------------
 
-Every ring allocation uses the chunk allocator. Ordinary guests use
-vzalloc(); confidential host-visible buffers use contiguous chunks,
-transition each chunk through page_address(), then combine them with
-vmap(). Order descent includes order zero. Guest-memory encryption is
-selected independently of the Hyper-V isolation flag from patch 0001.
+Every ring allocation uses the chunk allocator. Ordinary guests and
+buffers kept private by their channel policy use vzalloc(). When a buffer
+requires host-shared pages in an encrypted or isolated guest, it uses
+contiguous chunks, transitions each through page_address(), then combines
+them with vmap(). Order descent includes order zero. Guest-memory
+encryption is selected independently of Hyper-V isolation from patch 0001.
 All eight isolation/encryption/confidentiality combinations execute in
 the final decision test; this does not qualify confidential hardware.
 
@@ -94,7 +96,10 @@ behavior, not confidential transitions or these mainline mail bytes.
 
 Native WSL run:
   https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37395696464
-Final thirteen-stage x86_64/arm64 compilation is pending for this snapshot.
+Build of all thirteen stages with W=1/C=2 on x86_64 and arm64:
+  https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37402766418
+The linked mainline run passes all 68 named cases; the WSL leg passes 25.
+The final applied source tree is independently pinned in both arch jobs.
 The six static CoCo conditions are necessary source checks, not runtime
 proof. SEV-SNP, TDX without a paravisor and Arm CCA remain unmeasured.
 No platform result is inferred or simulated.
