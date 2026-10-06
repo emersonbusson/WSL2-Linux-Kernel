@@ -389,10 +389,11 @@ fi
 
 # The live serial console can lose individual characters while the guest is
 # busy. Preserve the decision-bearing report and both drill logs in one
-# checksummed payload, then send three indexed copies. The host accepts this
-# report only after reconstructing every row and verifying the SHA-256 over
-# the compressed bytes; the raw console remains useful for progress/debugging
-# but is no longer the authority for a runtime verdict.
+# checksummed payload, then send seven indexed copies in short rows, rotating
+# row order between copies to decorrelate burst loss. A strict majority is
+# required for every row, and the host verifies the SHA-256 over the compressed
+# bytes; the raw console remains useful for progress/debugging but is no longer
+# the authority for a runtime verdict.
 HOST_TARGET_ABSENT=no
 if [ -z "$NIC" ] || [ ! -d "/sys/bus/vmbus/devices/$NIC" ]; then
 	HOST_TARGET_ABSENT=yes
@@ -428,17 +429,39 @@ if gzip -c "$DRILL_REPORT" >"$DRILL_REPORT.gz"; then
 $(sha256sum "$DRILL_REPORT.gz")
 EOF
 	base64 "$DRILL_REPORT.gz" >"$DRILL_REPORT.b64"
-	REPORT_ROWS=$(wc -l <"$DRILL_REPORT.b64")
-	for REPORT_COPY in 1 2 3; do
-		echo "HYPERV_DRILL_REPORT format=gzip-base64-indexed rows=$REPORT_ROWS sha256=$REPORT_DIGEST"
-		REPORT_INDEX=0
-		while IFS= read -r REPORT_ROW; do
-			printf 'HYPERV_DRILL_REPORT_DATA index=%s data=%s\n' "$REPORT_INDEX" "$REPORT_ROW"
-			REPORT_INDEX=$((REPORT_INDEX + 1))
-			sleep 0.02
-		done <"$DRILL_REPORT.b64"
-		echo 'HYPERV_DRILL_REPORT end=1'
-	done
+	REPORT_WIDTH=40
+	REPORT_COPIES=7
+	awk -v width="$REPORT_WIDTH" '
+		{ encoded = encoded $0 }
+		END {
+			row_index = 0
+			for (offset = 1; offset <= length(encoded); offset += width) {
+				print row_index, substr(encoded, offset, width)
+				row_index++
+			}
+		}' "$DRILL_REPORT.b64" >"$DRILL_REPORT.rows"
+	REPORT_ROWS=$(awk 'END { print NR + 0 }' "$DRILL_REPORT.rows")
+	if [ "$REPORT_ROWS" -gt 0 ]; then
+		REPORT_COPY=0
+		while [ "$REPORT_COPY" -lt "$REPORT_COPIES" ]; do
+			echo "HYPERV_DRILL_REPORT format=gzip-base64-indexed-v2 width=$REPORT_WIDTH copies=$REPORT_COPIES rows=$REPORT_ROWS sha256=$REPORT_DIGEST"
+			REPORT_START=$((REPORT_COPY * REPORT_ROWS / REPORT_COPIES))
+			awk -v start="$REPORT_START" -v count="$REPORT_ROWS" '
+				{ rows[NR] = $0 }
+				END {
+					for (offset = 0; offset < count; offset++)
+						print rows[((start + offset) % count) + 1]
+				}' "$DRILL_REPORT.rows" |
+			while IFS=' ' read -r REPORT_INDEX REPORT_ROW; do
+				printf 'HYPERV_DRILL_REPORT_DATA index=%s data=%s\n' "$REPORT_INDEX" "$REPORT_ROW"
+				sleep 0.02
+			done
+			echo 'HYPERV_DRILL_REPORT end=1'
+			REPORT_COPY=$((REPORT_COPY + 1))
+		done
+	else
+		echo 'HYPERV_DRILL_REPORT status=UNAVAILABLE reason=serialization_failed'
+	fi
 else
 	echo 'HYPERV_DRILL_REPORT status=UNAVAILABLE reason=serialization_failed'
 fi

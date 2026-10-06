@@ -7,12 +7,14 @@ function Get-HypervDrillEvidenceReport {
   $endMarkers = 0
   foreach ($rawLine in ($ConsoleText -split "`n")) {
     $line = $rawLine.TrimEnd("`r")
-    if ($line -match '^HYPERV_DRILL_REPORT format=gzip-base64-indexed rows=(?<rows>[1-9][0-9]{0,4}) sha256=(?<sha>[0-9a-f]{64})$') {
+    if ($line -match '^HYPERV_DRILL_REPORT format=gzip-base64-indexed-v2 width=(?<width>[1-9][0-9]{0,2}) copies=(?<copies>[1-9][0-9]?) rows=(?<rows>[1-9][0-9]{0,4}) sha256=(?<sha>[0-9a-f]{64})$') {
+      $width = [int]$Matches.width
+      $copyCount = [int]$Matches.copies
       $rowCount = [int]$Matches.rows
-      if ($rowCount -gt 50000) {
+      if ($width -gt 76 -or $copyCount -gt 9 -or $rowCount -gt 50000) {
         continue
       }
-      $key = '{0}:{1}' -f $rowCount, $Matches.sha
+      $key = '{0}:{1}:{2}:{3}' -f $width, $copyCount, $rowCount, $Matches.sha
       if (-not $headers.ContainsKey($key)) { $headers[$key] = 0 }
       $headers[$key]++
       continue
@@ -43,10 +45,21 @@ function Get-HypervDrillEvidenceReport {
   }
   $header = [string]$rankedHeaders[0].Key
   $parts = $header.Split(':')
-  $rowCount = [int]$parts[0]
-  $expectedHash = $parts[1]
+  $width = [int]$parts[0]
+  $declaredCopies = [int]$parts[1]
+  $rowCount = [int]$parts[2]
+  $expectedHash = $parts[3]
+  $observedCopies = [int]$rankedHeaders[0].Value
+  $quorum = [Math]::Floor($declaredCopies / 2) + 1
+  if ($width -lt 4 -or $width -gt 76 -or ($width % 4) -ne 0 -or
+      $declaredCopies -lt 3 -or $declaredCopies -gt 9 -or ($declaredCopies % 2) -eq 0) {
+    return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-header-invalid'; Sha256 = $expectedHash; Rows = $rowCount; Copies = $observedCopies; RecoveredRows = 0 }
+  }
   if ($rowCount -lt 1 -or $rowCount -gt 50000) {
-    return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-limit'; Sha256 = ''; Rows = $rowCount; Copies = [int]$rankedHeaders[0].Value; RecoveredRows = 0 }
+    return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-limit'; Sha256 = $expectedHash; Rows = $rowCount; Copies = $observedCopies; RecoveredRows = 0 }
+  }
+  if ($observedCopies -lt $quorum -or $endMarkers -lt $quorum) {
+    return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-frame-quorum'; Sha256 = $expectedHash; Rows = $rowCount; Copies = $observedCopies; RecoveredRows = 0 }
   }
 
   $fragments = [System.Collections.Generic.List[string]]::new()
@@ -60,10 +73,15 @@ function Get-HypervDrillEvidenceReport {
       return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-conflict'; Sha256 = $expectedHash; Rows = $rowCount; Copies = [int]$rankedHeaders[0].Value; RecoveredRows = $recoveredRows }
     }
     $fragment = [string]$choices[0].Key
-    if (($index -lt ($rowCount - 1) -and $fragment.Length -ne 76) -or $fragment.Length -gt 76) {
+    if ($choices[0].Value -lt $quorum) {
+      return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-quorum'; Sha256 = $expectedHash; Rows = $rowCount; Copies = $observedCopies; RecoveredRows = $recoveredRows }
+    }
+    $invalidLength = if ($index -lt ($rowCount - 1)) { $fragment.Length -ne $width } else { $fragment.Length -gt $width }
+    if ($invalidLength -or $fragment.Length -lt 4 -or
+        ($index -lt ($rowCount - 1) -and $fragment.Contains('='))) {
       return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-length'; Sha256 = $expectedHash; Rows = $rowCount; Copies = [int]$rankedHeaders[0].Value; RecoveredRows = $recoveredRows }
     }
-    if ($choices[0].Value -lt $rankedHeaders[0].Value) { $recoveredRows++ }
+    if ($choices[0].Value -lt $declaredCopies) { $recoveredRows++ }
     $fragments.Add($fragment)
   }
 

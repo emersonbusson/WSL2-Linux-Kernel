@@ -15,15 +15,18 @@ function New-TestReportFrames([string]$ReportText) {
   finally { $sha.Dispose() }
   $encoded = [Convert]::ToBase64String($packed)
   $chunks = @()
-  for ($offset = 0; $offset -lt $encoded.Length; $offset += 76) {
-    $length = [Math]::Min(76, $encoded.Length - $offset)
+  $chunkWidth = 40
+  for ($offset = 0; $offset -lt $encoded.Length; $offset += $chunkWidth) {
+    $length = [Math]::Min($chunkWidth, $encoded.Length - $offset)
     $chunks += $encoded.Substring($offset, $length)
   }
-  $header = 'HYPERV_DRILL_REPORT format=gzip-base64-indexed rows={0} sha256={1}' -f $chunks.Count, $digest
+  $header = 'HYPERV_DRILL_REPORT format=gzip-base64-indexed-v2 width={0} copies=7 rows={1} sha256={2}' -f $chunkWidth, $chunks.Count, $digest
   $frames = @()
-  for ($copy = 0; $copy -lt 3; $copy++) {
+  for ($copy = 0; $copy -lt 7; $copy++) {
     $frames += $header
-    for ($index = 0; $index -lt $chunks.Count; $index++) {
+    $start = [int][Math]::Floor($copy * $chunks.Count / 7.0)
+    for ($offset = 0; $offset -lt $chunks.Count; $offset++) {
+      $index = ($start + $offset) % $chunks.Count
       $frames += ('HYPERV_DRILL_REPORT_DATA index={0} data={1}' -f $index, $chunks[$index])
     }
     $frames += 'HYPERV_DRILL_REPORT end=1'
@@ -48,7 +51,7 @@ $payload = @(
 $fixture = New-TestReportFrames $payload
 
 # One damaged byte row and one independently lost row are recovered from the
-# two intact replicas, then the compressed payload digest validates the result.
+# remaining replicas, then the compressed payload digest validates the result.
 $recoverable = [Collections.Generic.List[string]]::new()
 foreach ($line in $fixture.Lines) { $recoverable.Add([string]$line) }
 $dataLines = @($recoverable | Where-Object { $_ -match '^HYPERV_DRILL_REPORT_DATA index=' })
@@ -73,6 +76,25 @@ if (-not $recovered.Verified -or $recovered.Text -cne $payload) {
   throw "replicated report recovery failed: $($recovered.Error)"
 }
 Write-Output 'PASS serial_report_recovers_corrupt_and_missing_rows'
+
+# Reproduce the observed serial failure shape: one replica loses the row and
+# two others lose one character. The four intact copies still reach quorum.
+$serialLoss = [Collections.Generic.List[string]]::new()
+foreach ($line in $fixture.Lines) { $serialLoss.Add([string]$line) }
+$rowOne = @($serialLoss | Where-Object { $_ -match '^HYPERV_DRILL_REPORT_DATA index=1 ' })
+for ($copy = 0; $copy -lt 2; $copy++) {
+  $line = $rowOne[$copy]
+  $dataOffset = $line.IndexOf('data=', [StringComparison]::Ordinal) + 5
+  $cutOffset = $dataOffset + 12
+  $serialLoss[$serialLoss.IndexOf($line)] = $line.Substring(0, $cutOffset) + $line.Substring($cutOffset + 1)
+}
+$serialLoss.Remove($rowOne[2]) | Out-Null
+$lossRecovered = Get-HypervDrillEvidenceReport -ConsoleText ($serialLoss -join "`n")
+if (-not $lossRecovered.Verified -or $lossRecovered.Text -cne $payload) {
+  throw "serial-loss regression was not recovered: $($lossRecovered.Error)"
+}
+Write-Output 'PASS serial_report_recovers_two_truncated_rows_and_one_lost_replica'
+
 $reportOutcome = Get-HypervDrillReportVerdict -ReportText $recovered.Text -RequireHostRescind
 if ($reportOutcome.Verdict -ne 'PASS') { throw "verified candidate report rejected: $($reportOutcome.Error)" }
 $passDecision = Get-HypervDrillDecision -Policy RequirePass -Verdict $reportOutcome.Verdict -ConsoleText $recovered.Text
@@ -117,8 +139,8 @@ $unexpectedWarning = Get-HypervDrillDecision -Policy ExpectedBaselineFailure -Ve
 if ($unexpectedWarning.ExitCode -eq 0) { throw 'unexpected warning was accepted in a negative control' }
 Write-Output 'PASS verified_report_accepts_only_planned_baseline_signature'
 
-# If the same row is corrupted in two replicas, the majority row fails the
-# end-to-end digest and is refused instead of being treated as proof.
+# Two corrupt and two missing replicas leave a checksum-correct fragment below
+# the strict four-of-seven quorum; the parser must refuse to call it proof.
 $unrecoverable = [Collections.Generic.List[string]]::new()
 foreach ($line in $fixture.Lines) { $unrecoverable.Add([string]$line) }
 $dataLines = @($unrecoverable | Where-Object { $_ -match '^HYPERV_DRILL_REPORT_DATA index=0 ' })
@@ -128,11 +150,13 @@ foreach ($line in $dataLines[0..1]) {
   $unrecoverable[$unrecoverable.IndexOf($line)] = $line.Substring(0, $dataOffset) +
     $replacement + $line.Substring($dataOffset + 1)
 }
+$unrecoverable.Remove($dataLines[2]) | Out-Null
+$unrecoverable.Remove($dataLines[3]) | Out-Null
 $rejected = Get-HypervDrillEvidenceReport -ConsoleText ($unrecoverable -join "`n")
-if ($rejected.Verified -or $rejected.Error -ne 'report-checksum-mismatch') {
-  throw "majority corruption was not rejected: verified=$($rejected.Verified) error=$($rejected.Error)"
+if ($rejected.Verified -or $rejected.Error -ne 'report-row-quorum') {
+  throw "below-quorum row was not rejected: verified=$($rejected.Verified) error=$($rejected.Error)"
 }
-Write-Output 'PASS serial_report_rejects_majority_corruption'
+Write-Output 'PASS serial_report_rejects_below_quorum_row'
 
 $missing = Get-HypervDrillEvidenceReport -ConsoleText 'HYPERV_DRILL_DONE'
 if ($missing.Verified -or $missing.Error -ne 'report-frame-missing') {
