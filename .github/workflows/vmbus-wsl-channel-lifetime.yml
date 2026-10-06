@@ -167,7 +167,7 @@ jobs:
 
   ordinary-turnover:
     needs: custom-module-pair
-    if: ${{ needs.custom-module-pair.result == 'success' }}
+    if: ${{ always() && needs.custom-module-pair.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -209,3 +209,17 @@ jobs:
           path: protocol-runtime/
           if-no-files-found: error
           retention-days: 90
+
+  qualification:
+    needs: [custom-module-pair, ordinary-turnover]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require executed pair and native runtime qualification
+        env:
+          PAIR_RESULT: ${{ needs.custom-module-pair.result }}
+          RUNTIME_RESULT: ${{ needs.ordinary-turnover.result }}
+        run: |
+          test "$PAIR_RESULT" = success
+          test "$RUNTIME_RESULT" = success
