@@ -8,8 +8,9 @@ The manifest pins every mail and the expected applied source tree.
 3. Keep the 25-case WSL backport and actual Windows results separate.
 4. Ordinary mainline lifecycle/rescind PASS on both disposable runners
    (37405207883); fragmentation PASS on windows-2025 and PARTIAL on
-   windows-latest at the safety cap. Sustained daily active-data integrity
-   remains unmeasured because fresh host-memory admission refuses pressure.
+   windows-latest at the safety cap. Bounded local active-data integrity
+   passes two 3,200 MiB rounds; guarded/stale control evidence still refuses
+   whole-host qualification. Full three-tier pressure remains unmeasured.
 5. Preserve explicit limits on full unload/destruction and confidential guests.
 6. Reaudit final source, cover, routing, DCO/Fixes and exact mail bytes.
 

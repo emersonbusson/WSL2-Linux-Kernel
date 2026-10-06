@@ -1,6 +1,6 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: NO_GO for sending; final review and active-data qualification pending.
+Status: NO_GO for sending; final review and host-control qualification pending.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
 Mainline reconstructed tip: 1c07a43a98c2c2c92efb73d40ab07404a6b639d9
 Expected applied source tree: 55eff83ccf8ef5fef028c5f1d612884cad6010d6
@@ -24,7 +24,7 @@ e0675addf91bc5783bfc0a43042ac6eca0132ea3674300191fe28bea9034e1f4  0012-rndis-req
 d5176dcdf2c2b49f8381cfef4d2d24fce9cb8df830ee6143666a10da60447170  0013-netvsc-empty-completion-null.patch
 
 COVER SHA-256
-632fc3adc733eba8d68d617f6bce43fca731e76d36de5a8178ee133e47e81629  0000-cover-letter.patch
+eb17160a4ebe80875c351803c0bfdb040b6aa90c0ead59101d761d947249b6a9  0000-cover-letter.patch
 
 MEASURED SCOPE
 Exact final mainline tree: linked x86_64 QEMU KUnit 68/68 locally.
@@ -40,5 +40,7 @@ Fragmentation: windows-2025 PASS; windows-latest PARTIAL, one order-7+ block.
 Owner ledgers: 681/682 created, 674/675 reclaimed, seven active each; no errors.
 Negative baselines fail lifecycle; aggregate workflow failure is preserved.
 Candidate image SHA-256: e245a6a1e30b37360f092992d1b1a3909418c3b95de8f427c7ce23bd52f8dd16
-Corrected ordinary local pair: installed and observed; active-data soak pending.
+Corrected ordinary local pair: installed; two 3,200 MiB integrity rounds PASS.
+Local host-control continuity PARTIAL: guarded phases and stale telemetry.
+See LOCAL-INTEGRITY.md; full capacity and prolonged qualification remain open.
 Confidential transitions and complete mainline unload/destruction: unqualified.

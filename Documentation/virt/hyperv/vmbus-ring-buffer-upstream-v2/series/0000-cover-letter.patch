@@ -94,6 +94,13 @@ pair is installed locally; current identity/log and short passive
 observations pass. This qualifies that backport's measured ordinary
 behavior, not confidential transitions or these mainline mail bytes.
 
+Two bounded local backport rounds each verify 3,200 MiB with matching
+checksums after actual ZRAM/NBD use, followed by swapoff-first cleanup.
+The boot and kernel/daemon identities remain unchanged. This qualifies
+bounded data integrity only: phase control is guarded and the monitor
+contains stale telemetry, so whole-host control continuity remains partial.
+Full three-tier saturation and prolonged daily operation remain unmeasured.
+
 Native WSL run:
   https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37395696464
 Build of all thirteen stages with W=1/C=2 on x86_64 and arm64:
