@@ -1,4 +1,6 @@
-> Current snapshot: corrected thirteen-mail source; architecture CI pending.
+> Current snapshot: all thirteen x86_64/arm64 architecture stages pass.
+> Exact-source ordinary Hyper-V lifecycle/rescind passes on both runners;
+> windows-latest fragmentation remains PARTIAL. See MANIFEST.txt for scope.
 > Ordinary WSL evidence qualifies its distinct backport. Sending is NO_GO.
 
 # BUILD — image for one CoCo attempt

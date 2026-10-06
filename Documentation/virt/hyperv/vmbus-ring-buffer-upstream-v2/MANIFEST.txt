@@ -1,10 +1,10 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: NO_GO for sending; final live runtime and complete review pending.
+Status: NO_GO for sending; final review and active-data qualification pending.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
 Mainline reconstructed tip: 1c07a43a98c2c2c92efb73d40ab07404a6b639d9
 Expected applied source tree: 55eff83ccf8ef5fef028c5f1d612884cad6010d6
-Shape: thirteen code mails plus one provisional cover. Nothing sent.
+Shape: thirteen code mails plus one scoped review cover. Nothing sent.
 The WSL backport and its native/local results are distinct from mainline.
 The original withdrawn mail package is not modified by this CI snapshot.
 
@@ -24,7 +24,7 @@ e0675addf91bc5783bfc0a43042ac6eca0132ea3674300191fe28bea9034e1f4  0012-rndis-req
 d5176dcdf2c2b49f8381cfef4d2d24fce9cb8df830ee6143666a10da60447170  0013-netvsc-empty-completion-null.patch
 
 COVER SHA-256
-6769276d1f97cc8f47c6a506a38ec7a97f5f801a071ea7330a3104f5d0cb6e47  0000-cover-letter.patch
+632fc3adc733eba8d68d617f6bce43fca731e76d36de5a8178ee133e47e81629  0000-cover-letter.patch
 
 MEASURED SCOPE
 Exact final mainline tree: linked x86_64 QEMU KUnit 68/68 locally.
@@ -35,5 +35,10 @@ Strict mail style: zero errors/checks; only FILE_PATH_CHANGES on 2/10/12/13.
 Per-stage x86_64/arm64 W=1/C=2 compilation: PASS, Actions 37402766418.
 WSL request/matcher KUnit: 25/25; native collector regressions: 34/34.
 Native ordinary WSL Actions 37395696464: executed PASS, 456 matching ACKs.
+Exact-source Hyper-V Actions 37405207883: both 100-cycle lifecycles/rescinds PASS.
+Fragmentation: windows-2025 PASS; windows-latest PARTIAL, one order-7+ block.
+Owner ledgers: 681/682 created, 674/675 reclaimed, seven active each; no errors.
+Negative baselines fail lifecycle; aggregate workflow failure is preserved.
+Candidate image SHA-256: e245a6a1e30b37360f092992d1b1a3909418c3b95de8f427c7ce23bd52f8dd16
 Corrected ordinary local pair: installed and observed; active-data soak pending.
 Confidential transitions and complete mainline unload/destruction: unqualified.
