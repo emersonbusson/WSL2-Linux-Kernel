@@ -32,3 +32,27 @@ Scope: bounded ordinary installed-backport ZRAM/NBD integrity PASS; host-
 control continuity PARTIAL. This is not a three-tier saturation, prolonged
 operation, mainline unload, confidential transition or performance result.
 No mail or send qualifier.
+
+## Continued control and custody observations
+
+A later ordinary run verifies 3,232 MiB in 101 chunks per round with equal
+checksums after ZRAM/NBD use. Its guardian stays fresh, but 36 critical and
+12 emergency samples include failed freeze/terminate actions because the
+standalone pressure worker is outside managed workload accounting. That run
+remains PARTIAL; integrity does not imply complete host-control qualification.
+
+The sealed host diagnostic payload is now installed with asynchronous,
+singleton collection independent from heartbeat publication. The pressure
+harness now binds the actual installed userspace pair and uses the product's
+managed batch scope. Two actual 16-MiB custody cases verify checksum and
+reservation release, including a controlled frozen scope cleaned by an
+external identity-bound owner. These small cases do not qualify tier growth
+or full pressure. The new full two-round attempt is refused before effects
+by the unchanged host physical-memory reserve. Current installed userspace
+and running daemon match; the kernel and guest boot remain unchanged.
+
+Consequently, ordinary integrity remains measured and control continuity
+under the new full-pressure harness remains environment-bound. No old result
+is reissued as new-harness proof, no pressure limit is lowered, and no mail
+or send qualifier is produced. Mainline/confidential/unload scopes above
+are unchanged.
