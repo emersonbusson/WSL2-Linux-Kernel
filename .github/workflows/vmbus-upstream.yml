@@ -29,6 +29,7 @@ on:
         type: choice
         options:
           - local-wsl
+          - bounded-wsl-pressure
           - coco
         default: local-wsl
       evidence_report:
@@ -656,6 +657,9 @@ jobs:
           if [ "$KIND" = coco ]; then
             python3 -m pip install 'jsonschema==4.25.1'
             python3 "$DOSSIER/coco-validate.py" operator-evidence/report.json
+          elif [ "$KIND" = bounded-wsl-pressure ]; then
+            python3 "$DOSSIER/test-local-pressure-summary.py"
+            python3 "$DOSSIER/validate-local-pressure.py" operator-evidence/report.json
           else
             python3 "$DOSSIER/test-kernel-pair-evidence.py"
             python3 "$DOSSIER/collect-kernel-pair-evidence.py" \
@@ -671,6 +675,12 @@ jobs:
               summary.write('Environment: ' + os.environ['KIND'] + '\n\n')
               summary.write('Reported verdict: ' + str(report.get('verdict', 'see per-row results')) + '\n\n')
               summary.write('Report SHA-256: `' + hashlib.sha256(p.read_bytes()).hexdigest() + '`\n')
+              if os.environ['KIND'] == 'bounded-wsl-pressure':
+                  summary.write('\n| Round | Verified MiB | Integrity |\n| --- | ---: | --- |\n')
+                  for index, row in enumerate(report['rounds'], 1):
+                      summary.write(f"| {index} | {row['allocated_mib']} | {row['status']} |\n")
+                  summary.write('\nControl samples: ' + str(report['action_window']['states']) + '\n')
+                  summary.write('\nNo saturation, prolonged operation, full unload or CoCo qualification.\n')
           PYTHON
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: success()

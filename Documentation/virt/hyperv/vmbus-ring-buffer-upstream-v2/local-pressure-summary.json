@@ -1,0 +1,52 @@
+{
+  "schema": "ramshared.bounded-wsl-pressure.v1",
+  "provenance": "operator execution; CI validation does not constitute hosted execution",
+  "verdict": "PASS_BOUNDED",
+  "captured_utc": "2026-10-06T19:39:38.241603+00:00",
+  "kernel_notes_sha256": "c20ab50c62d0c83f30f650aef7fcdf2ef27a2b785b5ebd1348badc50c4e05b2a",
+  "source_commit": "06c61fb37455c08dd229ec44c9ed508d62fae5cc",
+  "source_tree_state": "clean",
+  "release": "v0.14.1-620-g06c61fb3",
+  "cli_sha256": "445a5197a6d87b4868ff8e6c5f6668ccb5a7d8c69d9ec5aab8234ad8126df836",
+  "daemon_sha256": "42324b4ee29e397bc36df09337270b61bf349177e0a5a851afa5597afd639b83",
+  "boot_unchanged": true,
+  "action_window": {
+    "start_ms": 1791314767624,
+    "end_ms": 1791315218903,
+    "samples": 413,
+    "states": {
+      "HEALTHY": 185,
+      "GUARDED": 210,
+      "CRITICAL": 18
+    },
+    "measurement_errors": 0
+  },
+  "rounds": [
+    {
+      "allocated_mib": 3232,
+      "checksum_after": "4090dd7ac1940c0f4938e64bceb9663f3b26b1b0d0c945c718b3f6139d7d96d0",
+      "checksum_before": "4090dd7ac1940c0f4938e64bceb9663f3b26b1b0d0c945c718b3f6139d7d96d0",
+      "pattern": "repeated-sha256-v1",
+      "reason": "checksum_match",
+      "status": "PASS",
+      "verified_chunks": 101
+    },
+    {
+      "allocated_mib": 3200,
+      "checksum_after": "f60975be1379fe6d1112c6ad837366245478b4b289bc32a73fb506419f2c68eb",
+      "checksum_before": "f60975be1379fe6d1112c6ad837366245478b4b289bc32a73fb506419f2c68eb",
+      "pattern": "repeated-sha256-v1",
+      "reason": "checksum_match",
+      "status": "PASS",
+      "verified_chunks": 100
+    }
+  ],
+  "control_evidence_ok": true,
+  "final_clean": true,
+  "host_memory_gate_ok": true,
+  "host_disk_telemetry_ok": true,
+  "ghost": false,
+  "vm_termination": false,
+  "scope": "bounded ordinary WSL2 ZRAM/NBD integrity and protective control; no saturation, prolonged operation, full unload or CoCo qualification",
+  "private_envelope_sha256": "1c7b22263c9216bfcaa63c7fac5eacb750835311ace5510d0d854c07aebcb666"
+}

@@ -56,3 +56,32 @@ under the new full-pressure harness remains environment-bound. No old result
 is reissued as new-harness proof, no pressure limit is lowered, and no mail
 or send qualifier is produced. Mainline/confidential/unload scopes above
 are unchanged.
+
+## Corrected installed reader: two-round qualification
+
+The clean userspace source 06c61fb3 is installed as v0.14.1-620. Both binary
+hashes match its sealed bundle; the daemon hash remains
+42324b4ee29e397bc36df09337270b61bf349177e0a5a851afa5597afd639b83.
+The actual installed ordinary kernel and guest boot remain unchanged.
+The new managed campaign passes both integrity rounds: 3,232 MiB/101 chunks
+and 3,200 MiB/100 chunks, with equal per-round before/after SHA-256. ZRAM is
+observed at 37 seconds in each; NBD at 106 seconds in each. Peak logical NBD
+occupancy is 49,052 KiB. Fallback swap stays at its 1,840-KiB baseline; origin
+writes reach 71,320 KiB separately. These are occupancy/write observations,
+not throughput or saturation qualification.
+
+All four phase samples prove healthy control/guardian and ready origin.
+Within the 413-sample action window, 185 are healthy, 210 guarded and 18
+critical, with zero measurement errors or emergency. Closed admission,
+matching applied freeze/live systemd generation, and independently proved
+empty-ledger target absence account for protection without repeating effects
+or rewriting refusals. Both Windows memory and real disk telemetry pass.
+Final cleanup/diagnosis pass; no VM termination, restart or ghost state occurs.
+The prior active cascade is restored HEALTHY with cache ACTIVE and origin READY.
+
+The preceding managed attempt passes only its first checksum; emergency TERM
+interrupts the second. Those negative records remain unqualified. The fresh
+reader and native PowerShell executable corrections, not verdict editing,
+produce this new result. The public operator summary is archived by an
+explicit evidence-only Actions leg: schema validation does not constitute a
+hosted execution. No actual CoCo or full module destruction is inferred.

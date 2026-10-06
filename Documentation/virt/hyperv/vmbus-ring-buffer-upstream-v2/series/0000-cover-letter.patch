@@ -9,7 +9,7 @@ CCA and TDX guests without a paravisor need direct-map page transitions.
 This revision uses the existing chunk allocator and keeps allocation,
 GPADL ownership and mapping references together.
 
-This is an unsent review snapshot. The thirteen-stage architecture builds
+This is a review snapshot. The thirteen-stage architecture builds
 and ordinary Hyper-V lifecycle/rescind drills exercise these exact code
 mails. Final review and the explicitly unmeasured scopes below remain open.
 
@@ -94,12 +94,17 @@ pair is installed locally; current identity/log and short passive
 observations pass. This qualifies that backport's measured ordinary
 behavior, not confidential transitions or these mainline mail bytes.
 
-Two bounded local backport rounds each verify 3,200 MiB with matching
-checksums after actual ZRAM/NBD use, followed by swapoff-first cleanup.
-The boot and kernel/daemon identities remain unchanged. This qualifies
-bounded data integrity only: phase control is guarded and the monitor
-contains stale telemetry, so whole-host control continuity remains partial.
-Full three-tier saturation and prolonged daily operation remain unmeasured.
+Two updated bounded local backport rounds verify 3,232/3,200 MiB with
+matching checksums after actual ZRAM/NBD use and swapoff-first cleanup.
+The installed kernel and guest boot remain unchanged; the userspace pair
+is bound to its clean release. All four before/after checkpoints have
+healthy control/guardian and ready origin. The 413-sample action window
+has 185 healthy, 210 guarded and 18 critical samples, no measurement
+errors and no emergency. Closed admission and actual applied freeze or
+proved target absence qualify the protective states. No VM termination
+occurs. The preceding stale-reader and interrupted-checksum runs are
+preserved. This qualifies bounded data/control continuity; full three-tier
+saturation, prolonged operation and confidential transitions stay unmeasured.
 
 Native WSL run:
   https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37395696464
