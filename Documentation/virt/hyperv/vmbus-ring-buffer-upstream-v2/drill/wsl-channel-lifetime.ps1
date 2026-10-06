@@ -170,6 +170,9 @@ function Assert-ArtifactManifest([string]$Directory) {
     if (Test-Path (Join-Path $Directory 'modules.vhdx')) {
         $expected += @('modules.vhdx', 'modules.sha256')
     }
+    if (Test-Path (Join-Path $Directory 'modules-layout.json')) {
+        $expected += 'modules-layout.json'
+    }
     $seen = @{}
     foreach ($line in Get-Content (Join-Path $Directory 'SHA256SUMS')) {
         if ($line -cnotmatch '^([0-9a-f]{64})  ([a-z0-9.-]+)$') { throw 'invalid artifact inventory' }
@@ -305,6 +308,8 @@ echo 1 > "$t/tracing_on"
         }
         $report.complete_kernel_modules_pair = $true
         $report.module_inventory_entries = $expectedInventory.Split([char]10).Count
+        [void](Read-Guest 'set -eu; modprobe nbd; modprobe zram; test -d /sys/module/nbd; test -d /sys/module/zram')
+        $report.module_loading_verified = $true
     }
     $report.before = $before
     $report.phase = 'ordinary-turnover'

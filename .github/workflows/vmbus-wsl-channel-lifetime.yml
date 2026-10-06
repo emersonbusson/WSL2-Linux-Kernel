@@ -102,9 +102,72 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  ordinary-turnover:
+  custom-module-pair:
     needs: kernel
     if: ${{ always() && (needs.kernel.result == 'success' || (needs.kernel.result == 'skipped' && inputs.kernel_run_id != '' && inputs.candidate_source_commit != '')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        variant: ${{ inputs.variant_scope == 'ack-candidate' && fromJSON('["ack-candidate"]') || inputs.variant_scope == 'retention-baseline' && fromJSON('["retention-baseline"]') || fromJSON('["retention-baseline","ack-candidate"]') }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wsl-channel-kernel-${{ matrix.variant }}
+          path: protocol-kernel
+          run-id: ${{ inputs.kernel_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Package the exact modules for the custom kernelModules mount
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils
+          (cd protocol-kernel && sha256sum -c SHA256SUMS)
+          release=$(cat protocol-kernel/kernel-release.txt)
+          [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]]
+          parent_digest=$(sha256sum protocol-kernel/modules.vhdx | cut -d' ' -f1)
+          qemu-img convert -O raw protocol-kernel/modules.vhdx protocol-raw.img
+          mkdir protocol-artifacts protocol-module-layout
+          debugfs -R "rdump / protocol-artifacts" protocol-raw.img
+          test -f "protocol-artifacts/$release/modules/modules.dep"
+          cp -a "protocol-artifacts/$release/modules/." protocol-module-layout/
+          (cd protocol-module-layout && sha256sum -c ../protocol-kernel/modules.sha256)
+          (cd protocol-module-layout && find . -type f -print0 | \
+            LC_ALL=C sort -z | xargs -0 sha256sum) > protocol-module-inventory.sha256
+          cmp protocol-module-inventory.sha256 protocol-kernel/modules.sha256
+          # Custom kernelModules mounts the image root at /lib/modules/<release>.
+          # The bundled artifacts image has an additional release/modules prefix.
+          bytes=$(du -sb protocol-module-layout | cut -f1)
+          blocks=$(( (bytes + 256 * 1024 * 1024 + 1023) / 1024 ))
+          inodes=$(( $(find protocol-module-layout | wc -l) + 4096 ))
+          mke2fs -q -d protocol-module-layout -N "$inodes" -b 1024 \
+            -t ext4 protocol-custom-modules.img "$blocks"
+          qemu-img convert -O vhdx protocol-custom-modules.img protocol-custom-modules.vhdx
+          mv protocol-custom-modules.vhdx protocol-kernel/modules.vhdx
+          printf '{"schema":1,"layout":"custom-module-root","parent_artifacts_vhdx_sha256":"%s","module_inventory_unchanged":true}\n' \
+            "$parent_digest" > protocol-kernel/modules-layout.json
+          (cd protocol-kernel && sha256sum kernel config kernel-notes.bin \
+            source-sha.txt kernel-release.txt notes-sha256.txt \
+            modules.vhdx modules.sha256 modules-layout.json > SHA256SUMS)
+      - name: Preserve the exact custom module pair
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wsl-custom-module-pair-${{ matrix.variant }}
+          path: protocol-kernel/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Clean owned packaging intermediates
+        if: always()
+        run: |
+          rm -rf -- protocol-artifacts protocol-module-layout
+          rm -f -- protocol-raw.img protocol-custom-modules.img \
+            protocol-custom-modules.vhdx protocol-module-inventory.sha256
+
+  ordinary-turnover:
+    needs: custom-module-pair
+    if: ${{ needs.custom-module-pair.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -117,9 +180,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: wsl-channel-kernel-${{ matrix.variant }}
+          name: wsl-custom-module-pair-${{ matrix.variant }}
           path: protocol-kernel
-          run-id: ${{ inputs.kernel_run_id || github.run_id }}
+          run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
       - name: Verify observation and refusal gates
         shell: pwsh

@@ -98,6 +98,13 @@ try {
     }
     [IO.File]::WriteAllLines($inventory, $entries)
     Accept { Assert-ArtifactManifest $fixture }
+    [IO.File]::WriteAllText((Join-Path $fixture 'modules-layout.json'), '{"schema":1}')
+    $entries += (Get-FileHash (Join-Path $fixture 'modules-layout.json') -Algorithm SHA256).Hash.ToLowerInvariant() + '  modules-layout.json'
+    [IO.File]::WriteAllLines($inventory, $entries)
+    Accept { Assert-ArtifactManifest $fixture }
+    [IO.File]::WriteAllText((Join-Path $fixture 'modules-layout.json'), 'tampered')
+    Reject { Assert-ArtifactManifest $fixture }
+    [IO.File]::WriteAllText((Join-Path $fixture 'modules-layout.json'), '{"schema":1}')
     [IO.File]::WriteAllText((Join-Path $fixture 'modules.vhdx'), 'wrong-pair')
     Reject { Assert-ArtifactManifest $fixture }
     $OutputDirectory = $fixture; $script:sequence = 0
