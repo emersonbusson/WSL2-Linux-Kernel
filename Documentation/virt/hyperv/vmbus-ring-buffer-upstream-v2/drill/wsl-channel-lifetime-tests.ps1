@@ -6,7 +6,7 @@ $path = Join-Path $PSScriptRoot 'wsl-channel-lifetime.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-foreach ($name in 'ConvertFrom-WslSnapshot', 'Get-ProtocolEvidence', 'Assert-LifetimeEvidence', 'Assert-ArtifactManifest', 'Invoke-OwnedProcess') {
+foreach ($name in 'ConvertFrom-WslSnapshot', 'Get-ProtocolEvidence', 'Assert-LifetimeEvidence', 'Assert-ArtifactManifest', 'Invoke-OwnedProcess', 'ConvertTo-GuestShellCommand') {
     $functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true))
     if ($functions.Count -ne 1) { throw "expected one function $name" }
     . ([scriptblock]::Create($functions[0].Extent.Text))
@@ -19,6 +19,11 @@ function Reject([scriptblock]$Action) {
     $script:cases++
 }
 function Accept([scriptblock]$Action) { & $Action | Out-Null; $script:cases++ }
+Accept {
+    $actual = ConvertTo-GuestShellCommand "set -eu`r`necho data`r`n"
+    if ($actual -cne "set -eu`necho data`n") { throw 'guest shell received Windows line endings' }
+    if ((ConvertTo-GuestShellCommand "printf literal`rbyte") -cne "printf literal`rbyte") { throw 'literal carriage return changed' }
+}
 $valid = @'
 kernel=6.18.40.1-channel-ack-candidate
 notes=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef

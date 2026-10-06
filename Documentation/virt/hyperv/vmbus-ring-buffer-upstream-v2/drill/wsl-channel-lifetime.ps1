@@ -85,8 +85,13 @@ function Invoke-Wsl([string[]]$Arguments, [int]$TimeoutSec = 30) {
     Invoke-OwnedProcess 'wsl.exe' $Arguments $TimeoutSec
 }
 
+function ConvertTo-GuestShellCommand([string]$Command) {
+    return $Command.Replace("`r`n", "`n")
+}
+
 function Read-Guest([string]$Command) {
-    Invoke-Wsl @('-d', $distro, '-u', 'root', '--exec', '/bin/sh', '-c', $Command)
+    $linuxCommand = ConvertTo-GuestShellCommand $Command
+    Invoke-Wsl @('-d', $distro, '-u', 'root', '--exec', '/bin/sh', '-c', $linuxCommand)
 }
 
 function ConvertFrom-WslSnapshot([string]$Text) {
