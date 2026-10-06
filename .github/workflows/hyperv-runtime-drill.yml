@@ -28,10 +28,10 @@ name: Hyper-V runtime drill
 # is green for the job and recorded PARTIAL for the gate.
 #
 # EVIDENCE SCOPE (re-stated because it is easy to over-read a green job):
-# vmbus_alloc_buffer() only takes its chunked order-N -> order-0 path for
-# host-visible buffers in an isolated VM or on ARM64. A hosted x86_64 runner
-# is neither, so every ring here is vzalloc() and the CoCo chunked fallback is
-# not exercised no matter how green this job is. What this job does prove is
+# The allocator takes its chunked order-N -> order-0 path when guest-memory
+# encryption or isolation requires shared pages for this buffer policy.
+# This ordinary hosted guest has neither property, so its rings use vzalloc()
+# and this job does not execute confidential chunk transitions. It proves
 # the GPADL/UIO ring lifecycle and that ring allocation survives real buddy
 # fragmentation. The chunked fallback stays with KUnit fault injection plus
 # COCO-1..5.
@@ -58,8 +58,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: hyperv-runtime-drill
-  cancel-in-progress: true
+  group: vmbus-upstream-global
+  cancel-in-progress: false
 
 jobs:
   drill-kernel:
@@ -110,9 +110,8 @@ jobs:
             | tee drill-artifacts/series-byte-pin.log
           sha256sum "$PATCH_DIR"/*.patch > drill-artifacts/series-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > drill-artifacts/series-commit-sha.txt
-          # Count the patches applied, not the files they touch: the thirteen
-          # patches span fifteen source files, so a file-count assertion is a
-          # false negative on a perfectly good apply. The 0000- cover letter
+          # Count the patches applied and independently bind the final tree.
+          # The 0000- cover letter
           # ships in the same directory for git send-email, but it is mail
           # prose, not a diff, and git apply would reject it.
           stage=0
@@ -127,6 +126,9 @@ jobs:
           git -C linux diff --check
           printf 'applied_stages=%s\n' "$stage" | tee drill-artifacts/applied-stages.txt
           test "$stage" -eq 13
+          git -C linux add -- drivers/hv drivers/net/hyperv drivers/uio include/linux/hyperv.h
+          git -C linux write-tree > drill-artifacts/applied-source-tree.txt
+          test "$(cat drill-artifacts/applied-source-tree.txt)" = 55eff83ccf8ef5fef028c5f1d612884cad6010d6
 
       - name: Build the self-booting drill kernel
         env:
