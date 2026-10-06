@@ -21,6 +21,7 @@
 #   HYPERV_DRILL_FRAGMENT status=<...>
 #   HYPERV_DRILL_SPLATS count=<n>
 #   HYPERV_DRILL_RESULT status=<PASS|FAIL>
+#   HYPERV_DRILL_REPORT ... (replicated, indexed, SHA-256-bound evidence)
 #   HYPERV_DRILL_DONE
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -151,7 +152,7 @@ vmbus_maps() {
 
 splat_count() {
 	dmesg 2>/dev/null |
-		grep -cE 'BUG:|Oops:|panic:|WARNING:|hung task|Unable to handle|general protection'
+		grep -cE 'BUG:|Oops:|panic:|Kernel panic|WARNING:|hung task|Unable to handle|general protection|Out of memory|Memory cgroup out of memory|oom-kill:'
 }
 
 # A guest phase marker uses only shell builtins. In particular, it must
@@ -233,6 +234,7 @@ fi
 
 # Optional real host removal, after the independently scored lifecycle.
 HOST_RESCIND_STATUS=skipped
+HOST_EVENTS=0
 if grep -qw 'hyperv_drill_host_rescind=1' /proc/cmdline; then
 	HOST_RESCIND_STATUS=PARTIAL
 	if [ "$LIFECYCLE_STATUS" = 0 ] && [ -n "$NIC" ] &&
@@ -272,7 +274,7 @@ echo "HYPERV_DRILL_SPLATS count=${SPLATS:-0}"
 # scores them itself. Counting them here would FAIL a successful fallback.
 # What counts as damage is a splat or the channel-open regression signature.
 FAULTS=$(dmesg 2>/dev/null |
-	grep -cE 'BUG:|Oops:|panic:|accept4 failed|hung task|Unable to handle|general protection')
+	grep -cE 'BUG:|Oops:|panic:|Kernel panic|Out of memory|Memory cgroup out of memory|oom-kill:|accept4 failed|hung task|Unable to handle|general protection')
 echo "HYPERV_DRILL_FAULTS count=${FAULTS:-0}"
 
 # Print only opaque owner-event payloads. Capture starts from the boot
@@ -384,10 +386,69 @@ if [ "$HOST_RESCIND_STATUS" = PARTIAL ] && [ "$RESULT" = PASS ]; then
 	RESULT=PARTIAL
 	SCOPE=host-rescind-unobserved
 fi
+
+# The live serial console can lose individual characters while the guest is
+# busy. Preserve the decision-bearing report and both drill logs in one
+# checksummed payload, then send three indexed copies. The host accepts this
+# report only after reconstructing every row and verifying the SHA-256 over
+# the compressed bytes; the raw console remains useful for progress/debugging
+# but is no longer the authority for a runtime verdict.
+HOST_TARGET_ABSENT=no
+if [ -z "$NIC" ] || [ ! -d "/sys/bus/vmbus/devices/$NIC" ]; then
+	HOST_TARGET_ABSENT=yes
+fi
+DRILL_REPORT=/var/tmp/hyperv-drill-report.txt
+{
+	echo "HYPERV_DRILL_EVIDENCE schema=1"
+	echo "HYPERV_DRILL_BOOT kernel=$(uname -r)"
+	echo "HYPERV_DRILL_VMBUS present=$VMBUS_PRESENT devices=$VMBUS_DEVICES"
+	echo "HYPERV_DRILL_SYMBOLS alloc=${SYMS:-0}"
+	echo "HYPERV_DRILL_NIC present=$([ -n "$NIC" ] && echo yes || echo no)"
+	echo "HYPERV_DRILL_FRAGMENT status=$FRAG_STATUS"
+	echo "HYPERV_DRILL_LIFECYCLE status=$LIFECYCLE_STATUS"
+	echo "HYPERV_DRILL_HOST_RESCIND status=$HOST_RESCIND_STATUS target_absent=$HOST_TARGET_ABSENT matching_events=$HOST_EVENTS"
+	echo "HYPERV_DRILL_SPLATS count=${SPLATS:-0}"
+	echo "HYPERV_DRILL_FAULTS count=${FAULTS:-0}"
+	for REPORT_STATUS_COPY in 1 2 3; do
+		echo "HYPERV_DRILL_RESULT status=$RESULT"
+	done
+	echo "HYPERV_DRILL_RESULT lifecycle=$LIFECYCLE_STATUS fragment=$FRAG_STATUS splats=${SPLATS:-0} faults=${FAULTS:-0}"
+	echo "HYPERV_DRILL_RESULT scope=$SCOPE"
+	echo '--- FRAGMENTATION LOG BEGIN ---'
+	if [ -r /var/tmp/fragment.log ]; then cat /var/tmp/fragment.log; fi
+	echo '--- FRAGMENTATION LOG END ---'
+	echo '--- LIFECYCLE LOG BEGIN ---'
+	if [ -r /var/tmp/lifecycle.log ]; then cat /var/tmp/lifecycle.log; fi
+	echo '--- LIFECYCLE LOG END ---'
+	echo 'HYPERV_DRILL_EVIDENCE_END'
+} >"$DRILL_REPORT"
+
+if gzip -c "$DRILL_REPORT" >"$DRILL_REPORT.gz"; then
+	read -r REPORT_DIGEST REPORT_UNUSED <<EOF
+$(sha256sum "$DRILL_REPORT.gz")
+EOF
+	base64 "$DRILL_REPORT.gz" >"$DRILL_REPORT.b64"
+	REPORT_ROWS=$(wc -l <"$DRILL_REPORT.b64")
+	for REPORT_COPY in 1 2 3; do
+		echo "HYPERV_DRILL_REPORT format=gzip-base64-indexed rows=$REPORT_ROWS sha256=$REPORT_DIGEST"
+		REPORT_INDEX=0
+		while IFS= read -r REPORT_ROW; do
+			printf 'HYPERV_DRILL_REPORT_DATA index=%s data=%s\n' "$REPORT_INDEX" "$REPORT_ROW"
+			REPORT_INDEX=$((REPORT_INDEX + 1))
+			sleep 0.02
+		done <"$DRILL_REPORT.b64"
+		echo 'HYPERV_DRILL_REPORT end=1'
+	done
+else
+	echo 'HYPERV_DRILL_REPORT status=UNAVAILABLE reason=serialization_failed'
+fi
+
 emit_status "$RESULT"
 echo "HYPERV_DRILL_RESULT lifecycle=$LIFECYCLE_STATUS fragment=$FRAG_STATUS splats=${SPLATS:-0} faults=${FAULTS:-0}"
 echo "HYPERV_DRILL_RESULT scope=$SCOPE"
 echo "HYPERV_DRILL_SCOPE note=no-co-co-hardware; co-co-chunked-fallback-not-exercised"
-echo "HYPERV_DRILL_DONE"
+for DONE_COPY in 1 2 3; do
+	echo "HYPERV_DRILL_DONE"
+done
 
 drain_and_poweroff

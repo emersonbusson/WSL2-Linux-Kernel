@@ -156,7 +156,8 @@ jobs:
             "$DRILL"/vmbus-lifecycle-drill.sh "$DRILL"/vmbus-fragmentation-drill.sh \
             "$DRILL"/vmbus_drill_helper.c "$DRILL"/test-fragmentation-policy.c \
             "$DRILL"/new-drill-vm.ps1 "$DRILL"/runtime-verdict-policy.psm1 \
-            "$DRILL"/test-runtime-verdict-policy.ps1 "$DRILL"/test-serial-reader.ps1 \
+            "$DRILL"/serial-report.psm1 "$DRILL"/test-runtime-verdict-policy.ps1 \
+            "$DRILL"/test-serial-reader.ps1 "$DRILL"/test-serial-report.ps1 \
             "$DRILL"/test-reader-heartbeat.ps1 "$DRILL"/test-host-rescind.ps1 \
             "$DRILL"/host-rescind.ps1 "$DRILL"/owner-trace-accounting.py \
             "$DRILL"/uio-ring-exercise.sh > drill-artifacts/harness-sha256.txt
@@ -209,6 +210,7 @@ jobs:
           $DRILL = 'Documentation/virt/hyperv/vmbus-ring-buffer-upstream-v2/drill'
           & (Join-Path $DRILL 'test-runtime-verdict-policy.ps1')
           & (Join-Path $DRILL 'test-serial-reader.ps1')
+          & (Join-Path $DRILL 'test-serial-report.ps1')
           & (Join-Path $DRILL 'test-reader-heartbeat.ps1')
           & (Join-Path $DRILL 'test-host-rescind.ps1')
           $image = Join-Path 'drill-kernel' 'BOOTX64.EFI'

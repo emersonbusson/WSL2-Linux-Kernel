@@ -440,68 +440,44 @@ if (Test-Path $consoleLog) { $console = Get-Content $consoleLog -Raw }
 if (-not $console) { $console = '' }
 $console = $console -replace "`0", ''
 
-Write-Host '======== GUEST CONSOLE ========'
-Write-Host $console
-Write-Host '==============================='
+# The serial console is a progress/debug stream, not the authority for a
+# verdict: ordinary printk and a loaded guest have previously removed
+# individual characters from otherwise readable lines. The guest therefore
+# emits a replicated, indexed, gzip payload containing the decision fields
+# and both drill logs. Require full reconstruction and the guest-computed
+# SHA-256 before scoring either the candidate or its negative control.
+$serialReportModule = Join-Path $PSScriptRoot 'serial-report.psm1'
+$serialReport = [pscustomobject]@{
+  Verified = $false; Text = ''; Error = 'report-parser-unavailable'; Sha256 = ''; Rows = 0; Copies = 0; RecoveredRows = 0
+}
+try {
+  Import-Module $serialReportModule -Force
+  $serialReport = Get-HypervDrillEvidenceReport -ConsoleText $console
+}
+catch {
+  $serialReport.Error = 'report-parser-failed'
+}
+$verifiedReport = ''
+if ($serialReport.Verified) {
+  $verifiedReport = [string]$serialReport.Text
+}
 
-# Verdict parse. A serial write of the verdict can be split by printk on the
-# same port: run 36808657969 (windows-latest) captured
-#   HYPERV_DRILL_RESULT[17.508] sysrq: Power Off
-#    status=PARTIAL[17.512] ACPI: PM: Preparing to enter system sleep state S5
-# so no single line carried both tokens and a per-line match reported
-# NO_RESULT on a guest that had actually printed PARTIAL. The guest now emits
-# the status line three times and drains the UART before poweroff; this side
-# still prefers an intact line and only then rebuilds the verdict by stripping
-# printk insertions. The captured value is constrained to the verdict
-# vocabulary so a torn line can never be read as a status.
+# Parse only the checksum-verified guest report. A damaged or absent serial
+# frame is NO_RESULT and cannot turn into a green negative-control job.
 $verdict = 'NO_RESULT'
-$verdict_source = 'intact_line'
-$resultLine = ($console -split "`n" |
-  Where-Object { $_ -match 'HYPERV_DRILL_RESULT status=' } |
-  Select-Object -Last 1)
-if ($resultLine -match 'HYPERV_DRILL_RESULT status=(PASS|PARTIAL|FAIL)') {
-  $verdict = $Matches[1]
-}
-else {
-  # Rebuild a verdict that printk split on the wire. Two kinds of insertion
-  # land mid-line: a timestamped chunk (`[17.508] sysrq: Power Off` plus its
-  # message up to end of line) and a bare poweroff printk with no timestamp
-  # (`reboot: Power down` in run 36808657969). Strip both from the middle of
-  # the stream -- the whole printk text, not just its timestamp -- then rejoin
-  # a token printk tore in half (`HYPERV_DRIL` + `L_RESULT`) and collapse the
-  # remaining whitespace so a verdict torn across two writes matches again.
-  # The capture is anchored on HYPERV_DRILL_RESULT and constrained to the
-  # verdict vocabulary, so the status= on the FRAGMENT and LIFECYCLE lines
-  # can never be read as the result. No trailing boundary on the value: the
-  # token rejoin above can leave the verdict glued to the next token
-  # (`PARTIALHYPERV_DRILL_DONE`), and nothing in this output ever uses a
-  # longer word that starts with PASS, PARTIAL or FAIL.
-  $flat = $console -replace '\[\s*\d+\.\d+\][^\r\n]*', ''
-  $flat = $flat -replace '(?:sysrq: Power[^\r\n]*|reboot: Power down[^\r\n]*|ACPI: PM:[^\r\n]*)', ''
-  $flat = $flat -replace '(?<=[A-Z_])\s+(?=[A-Z_])', ''
-  $flat = $flat -replace '\s+', ' '
-  $flatMatches = [regex]::Matches(
-    $flat, 'HYPERV_DRILL_RESULT\s+status=\s*(PASS|PARTIAL|FAIL)')
-  if ($flatMatches.Count -gt 0) {
-    $verdict = $flatMatches[$flatMatches.Count - 1].Groups[1].Value
-    $verdict_source = 'printk_stripped'
-    Note verdict_reconstructed printk_interleave
+$verdict_source = 'verified_guest_report'
+$readerCompleted = ([string]$readerStatus -ceq 'DONE')
+$reportOutcome = [pscustomobject]@{ Verdict = 'NO_RESULT'; Error = 'reader-or-report-incomplete' }
+if ($serialReport.Verified -and $readerCompleted) {
+  try {
+    $requireHostRescind = ($VerdictPolicy -ceq 'RequirePass' -and $HostRescind.IsPresent)
+    $reportOutcome = Get-HypervDrillReportVerdict `
+      -ReportText $verifiedReport `
+      -RequireHostRescind:$requireHostRescind
+    $verdict = [string]$reportOutcome.Verdict
   }
-}
-if ($verdict -eq 'NO_RESULT') {
-  $idx = $console.LastIndexOf('HYPERV_DRILL_RESULT')
-  if ($idx -ge 0) {
-    $tail = $console.Substring($idx, [Math]::Min(400, $console.Length - $idx))
-    if ($tail -match 'status=(PASS|PARTIAL|FAIL)') {
-      $verdict = $Matches[1]
-      $verdict_source = 'status_token_window'
-      Note verdict_reconstructed status_token_window
-    }
-    elseif ($tail -match '\b(PASS|PARTIAL|FAIL)\b') {
-      $verdict = $Matches[1]
-      $verdict_source = 'bare_token_window'
-      Note verdict_reconstructed bare_token_window
-    }
+  catch {
+    $reportOutcome = [pscustomobject]@{ Verdict = 'NO_RESULT'; Error = 'report-verdict-parse-failed' }
   }
 }
 Note drill_result $verdict
@@ -585,6 +561,52 @@ else {
   Note harness_cleanup FAIL
 }
 
+# Artifacts and console display happen after VM, disk and owned-switch teardown
+# so workflow-log backpressure or an artifact write cannot extend guest lifetime.
+$evidenceArtifactOk = $false
+if ($serialReport.Verified) {
+  try {
+    $evidencePath = Join-Path $WorkDir 'drill-evidence.verified.txt'
+    [IO.File]::WriteAllText(
+      $evidencePath,
+      $verifiedReport,
+      [Text.UTF8Encoding]::new($false))
+    $evidenceArtifactOk = $true
+    Note evidence_transport PASS
+    Note evidence_transport_sha256 $serialReport.Sha256
+    Note evidence_transport_rows $serialReport.Rows
+    Note evidence_transport_recovered_rows $serialReport.RecoveredRows
+    Note evidence_transport_artifact 'drill-evidence.verified.txt'
+  }
+  catch {
+    Note evidence_transport_artifact 'FAIL write_failed'
+  }
+}
+else {
+  Note evidence_transport ("FAIL " + $serialReport.Error)
+}
+if ($readerCompleted) {
+  Note evidence_completion PASS
+}
+else {
+  Note evidence_completion ("FAIL reader_status=$readerStatus")
+}
+if ($reportOutcome.Verdict -eq 'NO_RESULT') {
+  Note evidence_verdict_validation ("FAIL " + $reportOutcome.Error)
+}
+else {
+  Note evidence_verdict_validation PASS
+}
+
+Write-Host '======== GUEST CONSOLE ========'
+Write-Host $console
+Write-Host '==============================='
+if ($evidenceArtifactOk) {
+  Write-Host '======== VERIFIED GUEST EVIDENCE ========'
+  Write-Host $verifiedReport
+  Write-Host '========================================='
+}
+
 # --- exit --------------------------------------------------------------------
 Write-Host '---- drill-vm report ----'
 Get-Content $script:report | Write-Host
@@ -596,7 +618,25 @@ Import-Module (Join-Path $PSScriptRoot 'runtime-verdict-policy.psm1') -Force
 $decision = Get-HypervDrillDecision `
   -Policy $VerdictPolicy `
   -Verdict $verdict `
-  -ConsoleText $console
+  -ConsoleText $verifiedReport
+if (-not $serialReport.Verified) {
+  $decision = [pscustomobject]@{
+    ExitCode = 1
+    Reason = 'checksum-verified guest evidence report was unavailable'
+  }
+}
+elseif (-not $readerCompleted) {
+  $decision = [pscustomobject]@{
+    ExitCode = 1
+    Reason = 'serial reader did not observe the guest completion marker'
+  }
+}
+elseif (-not $evidenceArtifactOk) {
+  $decision = [pscustomobject]@{
+    ExitCode = 1
+    Reason = 'checksum-verified guest evidence artifact could not be written'
+  }
+}
 if (-not $cleanupOk) {
   Note runtime_policy_reason 'harness teardown did not prove resource removal'
   Note exit_code 1

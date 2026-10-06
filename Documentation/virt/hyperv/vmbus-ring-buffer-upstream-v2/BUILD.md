@@ -116,9 +116,13 @@ Attach a serial console before boot:
 console=ttyS0,115200
 ```
 
-Capture it to a file from the first byte. The drill output is what the
-result is made of, and a console that was not captured from the start cannot
-be reconstructed later.
+Capture it to a file from the first byte. The raw console is a progress and
+diagnostic stream; it is not the authority for a verdict because printk can
+interleave with guest output. The guest also sends a replicated, indexed,
+SHA-256-bound report containing both drill logs and the decision fields. The
+host reconstructs that report as `drill-evidence.verified.txt`; a missing or
+invalid report, or a missing guest-completion marker, is `NO_RESULT` and must
+not pass either the candidate or baseline policy.
 
 ## 3. Getting the candidate bytes
 
@@ -177,7 +181,11 @@ Not one of these is optional.
 - `coco-capability-preflight.sh` after boot shows the **same** isolation mode
   as before boot. A mode that changed between probe and boot invalidates the
   attempt.
-- Serial console capture is complete from the first byte.
+- The serial pipe is attached before boot and its capture begins with the
+  first byte.
+- The indexed guest report reconstructs fully and its SHA-256 verifies;
+  `drill-evidence.verified.txt` is retained with the job artifacts.
+- The host reader observes the guest-completion marker before shutdown.
 
 If any of these cannot be established, the attempt is `NO_RESULT` or
 `ENVIRONMENT_UNAVAILABLE` as `SEQUENCE.md` and `coco-result.schema.json`
