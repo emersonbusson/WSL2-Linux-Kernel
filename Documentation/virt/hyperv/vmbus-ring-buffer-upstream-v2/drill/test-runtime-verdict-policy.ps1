@@ -26,7 +26,7 @@ NIC_QUIESCE verified=no reason=owner-trace-unavailable previous_maps=0 remaining
 VERDICT=FAIL target channel owner was not proven live after fragmented open
 HYPERV_DRILL_FRAGMENT status=1
 OWNER_TRACE_POST_OPEN verified=no reason=owner-trace-unavailable
-HYPERV_DRILL_LIFECYCLE status=skipped reason=fragmentation-status-1
+HYPERV_DRILL_LIFECYCLE status=skipped
 HYPERV_DRILL_SPLATS count=0
 HYPERV_DRILL_FAULTS count=0
 HYPERV_DRILL_RESULT status=FAIL
@@ -51,9 +51,10 @@ Assert-Decision ExpectedBaselineFailure PASS $expectedBaseline 1 'baseline rejec
 Assert-Decision ExpectedBaselineFailure PARTIAL $expectedBaseline 1 'baseline rejects partial'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'target channel owner was not proven live', 'unexpected allocator result') 1 'baseline rejects unrelated failure'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_SPLATS count=0', 'HYPERV_DRILL_SPLATS count=1') 1 'baseline rejects kernel splat'
-Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'reason=fragmentation-status-1', 'reason=runner-timeout') 1 'baseline rejects an unrelated lifecycle skip'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_LIFECYCLE status=skipped', 'HYPERV_DRILL_LIFECYCLE status=skipped reason=runner-timeout') 1 'baseline rejects an unrelated lifecycle skip'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_LIFECYCLE status=skipped', 'HYPERV_DRILL_LIFECYCLE status=skipped reason=fragmentation-status-1') 0 'baseline accepts explicit matching lifecycle skip reason'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'fragment=1', 'fragment=3') 1 'baseline rejects partial fragmentation result'
-Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'status=skipped reason=fragmentation-status-1', 'status=0') 1 'baseline rejects lifecycle after failed fragmentation precondition'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_LIFECYCLE status=skipped', 'HYPERV_DRILL_LIFECYCLE status=0') 1 'baseline rejects lifecycle after failed fragmentation precondition'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'OWNER_TRACE_QUIESCE verified=no reason=event-unavailable', '') 1 'baseline requires explicit missing-owner-trace evidence'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'NIC_QUIESCE verified=no', 'NIC_QUIESCE verified=yes') 1 'baseline rejects unexpected NIC quiescence claim'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline + "`nHYPERV_DRILL_RESULT status=PASS") 1 'baseline rejects conflicting aggregate result'

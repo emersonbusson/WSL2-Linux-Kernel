@@ -7,7 +7,7 @@ function Test-HypervExpectedBaselineFailure {
     'VERDICT=FAIL target channel owner was not proven live after fragmented open',
     'HYPERV_DRILL_FRAGMENT status=1',
     'OWNER_TRACE_POST_OPEN verified=no reason=owner-trace-unavailable',
-    'HYPERV_DRILL_LIFECYCLE status=skipped reason=fragmentation-status-1',
+    'HYPERV_DRILL_LIFECYCLE status=skipped',
     'HYPERV_DRILL_RESULT scope=drill-failed'
   )
 
@@ -26,6 +26,17 @@ function Test-HypervExpectedBaselineFailure {
     if ($status.Groups[1].Value -ne 'FAIL') {
       return $false
     }
+  }
+
+  $lifecycleMatches = [regex]::Matches(
+    $ConsoleText,
+    '(?m)^HYPERV_DRILL_LIFECYCLE status=skipped(?: reason=(?<reason>[a-z0-9-]+))?\s*$')
+  if ($lifecycleMatches.Count -ne 1) {
+    return $false
+  }
+  if ($lifecycleMatches[0].Groups['reason'].Success -and
+      $lifecycleMatches[0].Groups['reason'].Value -cne 'fragmentation-status-1') {
+    return $false
   }
 
   $summaryMatches = [regex]::Matches(
