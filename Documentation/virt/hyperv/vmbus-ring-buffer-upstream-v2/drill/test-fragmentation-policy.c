@@ -140,6 +140,10 @@ int main(void)
 	/* Keep the channel-open hole budget large enough for netvsc buffers. */
 	assert(hole_cap * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES);
 	assert(hole_cap <= FRAG_HOLE_MAX_CAP);
+	/* The measured order-2 minimum must fit in the reserved PFN runs. */
+	assert(FRAG_ORDER2_GROUPS <=
+	       FRAG_RESERVE_CHUNKS * FRAG_RESERVE_CHUNK / (8 * FRAG_PAGE));
+	assert(FRAG_RUNTIME_MIN_ORDER2_BLOCKS <= FRAG_ORDER2_GROUPS);
 	assert(frag_runtime_reserve_qualified(hole_cap, min_holes, usable_kb,
 					      min_order2));
 	assert(!frag_runtime_reserve_qualified(min_holes, min_holes, usable_kb,

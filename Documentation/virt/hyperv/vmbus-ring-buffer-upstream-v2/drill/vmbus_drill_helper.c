@@ -830,7 +830,7 @@ static int do_mlock_hog(int argc, char **argv)
  * backing without splitting the VMA; the cap still bounds the memory reserve
  * and preserves the physical buddy invariant.
  */
-#define FRAG_HOLE_MIN_BYTES (96L * 1024 * 1024)
+#define FRAG_HOLE_MIN_BYTES (128L * 1024 * 1024)
 #define FRAG_HOLE_MAX_BYTES (128L * 1024 * 1024)
 #define FRAG_HOLE_CAP (FRAG_HOLE_MIN_BYTES / FRAG_PAGE)
 #define FRAG_HOLE_MAX_CAP (FRAG_HOLE_MAX_BYTES / FRAG_PAGE)
@@ -838,7 +838,7 @@ static int do_mlock_hog(int argc, char **argv)
  * hv_netvsc may allocate a 16 MiB receive buffer and a 15 MiB send buffer
  * while this pattern is held. Require 64 MiB of real MemFree above the live
  * watermark before opening the channel so those buffers retain 33 MiB of
- * guest headroom. The 96 MiB hole cap funds that reserve without creating
+ * guest headroom. The 128 MiB hole cap funds that reserve without creating
  * VMA splits. A temporary small PCP high limit makes
  * the released pages visible in buddy accounting before the reserve check.
  */
@@ -847,7 +847,7 @@ static int do_mlock_hog(int argc, char **argv)
 	((FRAG_RUNTIME_MIN_FREE_KB * 1024L) / FRAG_PAGE)
 /* Recovery never frees more than the reserve we are trying to establish. */
 #define FRAG_RUNTIME_RECOVERY_MAX_PAGES FRAG_RUNTIME_MIN_HOLE_PAGES
-#define FRAG_RUNTIME_MIN_ORDER2_BLOCKS 64L
+#define FRAG_RUNTIME_MIN_ORDER2_BLOCKS 1792L
 /* Drive page frees from PCP into buddy lists during the held drill window. */
 #define FRAG_PCP_HIGH_FRACTION_MIN 8L
 #define FRAG_PCP_HIGH_FRACTION 65536L
@@ -934,8 +934,8 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_PCP_SOAK_CHUNK (2L * 1024 * 1024)
 #define FRAG_PCP_SOAK_CHUNKS 4
 #define FRAG_RESERVE_CHUNK (2L * 1024 * 1024)
-#define FRAG_RESERVE_CHUNKS 8
-#define FRAG_ORDER2_GROUPS 512
+#define FRAG_RESERVE_CHUNKS 32
+#define FRAG_ORDER2_GROUPS 2048
 
 /*
  * Punching one hole per freed page needs one VMA per surviving run. Save the
@@ -2354,7 +2354,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	 *
 	 * The property is what matters, not the density. Discarding the resident
 	 * backing keeps each VMA intact and avoids allocating VMA metadata from
-	 * the same compound-page reserve the channel-open test needs. The 96 MiB
+	 * the same compound-page reserve the channel-open test needs. The 128 MiB
 	 * cap funds hv_netvsc buffers plus guest headroom; held buddies keep
 	 * order-7 from reforming. If the cap cannot produce the measured reserve,
 	 * fail closed. The discarded virtual pages are never touched again before
