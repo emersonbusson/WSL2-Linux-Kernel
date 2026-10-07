@@ -204,6 +204,13 @@ enable PRINTK
 enable PRINTK_TIME
 enable BUG
 enable MAGIC_SYSRQ
+# The runtime drill deliberately exercises a synchronous driver rebind under
+# memory pressure. Keep a stack trace available if that path blocks; the
+# detector reports the task but never panics or changes the drill verdict.
+enable DEBUG_KERNEL
+enable DETECT_HUNG_TASK
+setval DEFAULT_HUNG_TASK_TIMEOUT 30
+setval BOOTPARAM_HUNG_TASK_PANIC 0
 enable PROC_PAGE_MONITOR
 enable SYSCTL
 enable MULTIUSER
