@@ -6,7 +6,7 @@ $path = Join-Path $PSScriptRoot 'wsl-channel-lifetime.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-foreach ($name in 'ConvertFrom-WslSnapshot', 'Get-ProtocolEvidence', 'Assert-LifetimeEvidence', 'Assert-ArtifactManifest', 'Invoke-OwnedProcess', 'ConvertTo-GuestShellCommand') {
+foreach ($name in 'ConvertFrom-WslSnapshot', 'Get-ProtocolEvidence', 'Assert-LifetimeEvidence', 'Assert-ArtifactManifest', 'Invoke-OwnedProcess', 'ConvertTo-GuestShellCommand', 'Test-WslShutdownQuiescent', 'Wait-WslShutdownQuiescence') {
     $functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true))
     if ($functions.Count -ne 1) { throw "expected one function $name" }
     . ([scriptblock]::Create($functions[0].Extent.Text))
@@ -23,6 +23,41 @@ Accept {
     $actual = ConvertTo-GuestShellCommand "set -eu`r`necho data`r`n"
     if ($actual -cne "set -eu`necho data`n") { throw 'guest shell received Windows line endings' }
     if ((ConvertTo-GuestShellCommand "printf literal`rbyte") -cne "printf literal`rbyte") { throw 'literal carriage return changed' }
+}
+Accept {
+    if (-not (Test-WslShutdownQuiescent '' 0)) { throw 'an exited utility VM was not accepted' }
+    if (Test-WslShutdownQuiescent 'Ubuntu-24.04' 0) { throw 'a running distro was accepted as stopped' }
+    if (Test-WslShutdownQuiescent '' 1) { throw 'a live VmmemWSL process was accepted as stopped' }
+}
+$shutdownStates = [System.Collections.Queue]::new()
+$shutdownStates.Enqueue(@{ running_distros = 'Ubuntu-24.04'; vmmem_pids = @(42) })
+$shutdownStates.Enqueue(@{ running_distros = ''; vmmem_pids = @() })
+$script:shutdownProbeCalls = 0
+$script:shutdownDelayCalls = 0
+$shutdownProbe = {
+    $script:shutdownProbeCalls++
+    $shutdownStates.Dequeue()
+}
+$shutdownDelay = { $script:shutdownDelayCalls++ }
+Accept {
+    $state = Wait-WslShutdownQuiescence -Probe $shutdownProbe -Delay $shutdownDelay -TimeoutSeconds 5
+    if ($script:shutdownProbeCalls -ne 2 -or $script:shutdownDelayCalls -ne 1 -or
+        $state.running_distros -or $state.vmmem_pids.Count -ne 0) {
+        throw 'shutdown quiescence was not awaited and recorded'
+    }
+}
+Accept {
+    $timedOut = $false
+    try {
+        Wait-WslShutdownQuiescence -Probe { @{ running_distros = ''; vmmem_pids = @(42) } } `
+            -Delay {} -TimeoutSeconds 0 | Out-Null
+    } catch {
+        $timedOut = $_.Exception.Message -match 'vmmem_pids=42'
+    }
+    if (-not $timedOut) { throw 'a persistent VmmemWSL process did not fail with evidence' }
+}
+Reject {
+    Wait-WslShutdownQuiescence -Probe { @{ running_distros = '' } } -Delay {} -TimeoutSeconds 0
 }
 $valid = @'
 kernel=6.18.40.1-channel-ack-candidate
