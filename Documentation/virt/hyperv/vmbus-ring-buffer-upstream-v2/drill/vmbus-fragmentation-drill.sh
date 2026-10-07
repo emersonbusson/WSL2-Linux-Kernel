@@ -66,6 +66,12 @@ if [ "${1:-}" = --self-test ]; then
 		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1 exhausted=1' &&
 		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1' &&
 		! fragment_pattern_ready yes '' &&
+		fragment_order7_reserve_qualified 2 256 &&
+		fragment_order7_reserve_qualified 4 512 &&
+		! fragment_order7_reserve_qualified 0 128 &&
+		! fragment_order7_reserve_qualified 4 127 &&
+		! fragment_order7_reserve_qualified 4 513 &&
+		! fragment_order7_reserve_qualified 5 512 &&
 		fragment_restore_values_valid 65530 5696 15000 0 &&
 		! fragment_restore_values_valid 65530 5696 invalid 0 &&
 		! fragment_restore_values_valid 65530 5696 15000 invalid &&
