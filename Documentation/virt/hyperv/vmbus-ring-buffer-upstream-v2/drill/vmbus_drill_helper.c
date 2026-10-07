@@ -37,14 +37,16 @@
  * until at least 99% of initially free order-7-and-higher pages are gone,
  * while retaining at least one order-7 block as a safety reserve. The
  * condition is measured from /proc/buddyinfo, not inferred. It then punches
- * a bounded set of physical buddy holes: one
- * member of every (pfn, pfn^1) pair whose buddy is also ours is unmapped.
+ * a bounded set of physical buddy holes: one member of every (pfn, pfn^1)
+ * pair whose buddy is also ours has its resident backing discarded without
+ * splitting the VMA.
  * A freed page's buddy is always held, so nothing above order-0 can
  * coalesce, order-7 cannot reappear, and the survivors still satisfy
- * order-0 fallback. Hole count is capped: the property is what matters,
- * not the density, and an uncapped punch drains the Unmovable slab through
- * vm_area_dup() until out_of_memory() panics an unkillable guest. It
- * also has to fund reopening hv_netvsc: its default receive buffer is
+ * order-0 fallback. The discarded-page count is capped: the property is
+ * what matters, not the density. Earlier munmap-based punches split VMAs
+ * and drained the Unmovable slab through vm_area_dup() until out_of_memory()
+ * panicked an unkillable guest. The reserve also has to fund reopening
+ * hv_netvsc: its default receive buffer is
  * 16 MiB and its send buffer can be 15 MiB. If refine consumes pages from
  * the initial hole reserve, the helper recovers verified order-0 pages from
  * still-mapped locked ranges with MADV_DONTNEED_LOCKED. This does not split
@@ -819,14 +821,14 @@ static int do_mlock_hog(int argc, char **argv)
  */
 #define FRAG_HARD_KB 98304L
 /*
- * Hole-phase caps. Punching one hole per eligible page needs one
+ * Hole-phase caps. Earlier munmap-based punches allocated one
  * vm_area_struct per surviving run. On a 2 GiB guest that is ~250k slab
  * objects; once the Unmovable free pool is exhausted, vm_area_dup() fails
  * into out_of_memory() and -- with this process unkillable -- the kernel
  * panics with "System is deadlocked on memory". That is exactly what run
- * 36794687025 did on windows-2025. The property that matters is "no two
- * free pages are buddies", not how dense the holes are, so cap them and
- * stop punching before slab starves.
+ * 36794687025 did on windows-2025. MADV_DONTNEED_LOCKED now drops page
+ * backing without splitting the VMA; the cap still bounds the memory reserve
+ * and preserves the physical buddy invariant.
  */
 #define FRAG_HOLE_MIN_BYTES (96L * 1024 * 1024)
 #define FRAG_HOLE_MAX_BYTES (128L * 1024 * 1024)
@@ -836,8 +838,8 @@ static int do_mlock_hog(int argc, char **argv)
  * hv_netvsc may allocate a 16 MiB receive buffer and a 15 MiB send buffer
  * while this pattern is held. Require 64 MiB of real MemFree above the live
  * watermark before opening the channel so those buffers retain 33 MiB of
- * guest headroom. The 96 MiB hole cap leaves room for the VMA metadata
- * created by each isolated munmap. A temporary small PCP high limit makes
+ * guest headroom. The 96 MiB hole cap funds that reserve without creating
+ * VMA splits. A temporary small PCP high limit makes
  * the released pages visible in buddy accounting before the reserve check.
  */
 #define FRAG_RUNTIME_MIN_FREE_KB (64L * 1024)
@@ -896,25 +898,26 @@ static int do_mlock_hog(int argc, char **argv)
  * order-2 blocks does not weaken it and does not help the ring path:
  * on ordinary x86_64 vmbus_alloc_buffer() takes vzalloc() anyway.
  *
- * IMPORTANT -- these groups are NOT forkable stacks. A single munmap of
- * 16 KiB frees four order-0 folios into the per-cpu page cache; it does
- * not hand the buddy one order-2 block. /proc/buddyinfo does not count
- * the PCP, and the alloc slowpath will not drain it: drain_all_pages()
- * runs only after direct reclaim reports progress, and against this
- * fully mlocked pattern it never does. Run 36940519876 reported
- * stacks=504 while buddyinfo held 1459*4kB 0*8kB 0*16kB and the next
- * shell fork was OOM-killed. The shell is therefore fork-free from
- * ready=1 until this process is torn down, and the ready=1 line reports
- * buddy_order2= measured from buddyinfo, not the munmap group count.
+ * IMPORTANT -- these groups are NOT forkable stacks. A single
+ * MADV_DONTNEED_LOCKED of 16 KiB frees four order-0 folios into the per-cpu
+ * page cache; it does not guarantee an order-2 buddy block. /proc/buddyinfo
+ * does not count the PCP, and the alloc slowpath will not drain it:
+ * drain_all_pages() runs only after direct reclaim reports progress, and
+ * against this fully mlocked pattern it never does. Run 36940519876 reported
+ * stacks=504 while buddyinfo held 1459*4kB 0*8kB 0*16kB and the next shell
+ * fork was OOM-killed. Keep the shell fork-free from ready=1 until teardown;
+ * buddy_order2 is the measured buddyinfo count, not the discarded-group
+ * count, and remains only a conservative reserve for compound allocations.
  *
  * mmap faults order-0, so held pages are physically scattered and an
  * order-2 candidate run is found by PFN, not assumed from a virtual
  * run. Each released group is eight consecutive PFNs on a 4-page
- * alignment: the first four are unmapped, the last four are kept. The
+ * alignment: the first four pages lose their resident backing, and the last
+ * four stay held. The
  * kept half is the freed half's order-2 buddy, so the freed half cannot
  * coalesce past order-2 even if the PCP does drain -- the order-7
- * safety reserve just measured is not undone. Cap the groups like the holes:
- * each munmap splits a VMA.
+ * safety reserve just measured is not undone. Cap the groups like the holes;
+ * discarded pages are not touched again before cleanup.
  *
  * Two properties make the runs findable. The per-cpu page cache is
  * drained first: it serves recycled, physically scattered order-0 pages
@@ -1083,10 +1086,10 @@ static void pcp_high_fraction_write(long v)
  * Free blocks at or above `min_order`, across all zones. min_order 7 is the
  * condition the fragmentation drill is actually about: while any remain, the
  * buddy can still satisfy an order-7 request outright and the fallback is not
- * under test. min_order 2 is the forkability probe: copy_process() wants
- * THREAD_SIZE_ORDER, an order-2 page, so this is what a shell clone actually
- * needs -- not a munmap of four order-0 pages, which lands in the per-cpu page
- * cache and never appears here until the PCP drains.
+ * under test. min_order 2 measures the compound-page reserve available to
+ * task stacks and slab allocations. It is a conservative proxy, not a clone
+ * guarantee; discarding four order-0 pages does not make one order-2 buddy
+ * block until the PCP drains.
  *
  * buddyinfo layout is `Node <n>, zone <name>` followed by one count per
  * order, so order-0 is field 5 and order-k is field 5+k.
@@ -1465,6 +1468,27 @@ static int pagemap_pfn(int fd, void *addr, unsigned long *pfn)
 		return -1;
 	*pfn = (unsigned long)(ent & ((1ULL << 55) - 1));
 	return *pfn ? 0 : -1;
+}
+
+/*
+ * Drop backing from already-locked anonymous pages without splitting the VMA.
+ * Return -1 for a failed madvise and -2 if any page is still resident.
+ */
+static int frag_discard_locked_pages(int pmfd, void *addr, size_t bytes)
+{
+	size_t off;
+
+	if (!bytes || bytes % FRAG_PAGE ||
+	    madvise(addr, bytes, MADV_DONTNEED_LOCKED) != 0)
+		return -1;
+
+	for (off = 0; off < bytes; off += FRAG_PAGE) {
+		unsigned long pfn;
+
+		if (pagemap_pfn(pmfd, (char *)addr + off, &pfn) == 0)
+			return -2;
+	}
+	return 0;
 }
 
 static int pfn_bitmap_set(unsigned long **bits, size_t *words,
@@ -2328,15 +2352,13 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * freeing them could pair with leftover free memory and rebuild the
 	 * high orders we just drained.
 	 *
-	 * The property is what matters, not the density. Each munmap splits a
-	 * VMA and allocates a vm_area_struct from the Unmovable slab; a quarter
-	 * million of them drained that pool on a 2 GiB guest and the resulting
-	 * out_of_memory() panicked the machine because this process was
-	 * unkillable. Cap the holes at FRAG_HOLE_CAP (24,576 VMA splits), and
-	 * require the measured free-memory reserve before opening the channel.
-	 * This frees up to 96 MiB of order-0 pages for hv_netvsc buffers plus
-	 * guest headroom; held buddies keep order-7 from reforming. If the cap
-	 * cannot produce the minimum reserve, fail closed.
+	 * The property is what matters, not the density. Discarding the resident
+	 * backing keeps each VMA intact and avoids allocating VMA metadata from
+	 * the same compound-page reserve the channel-open test needs. The 96 MiB
+	 * cap funds hv_netvsc buffers plus guest headroom; held buddies keep
+	 * order-7 from reforming. If the cap cannot produce the measured reserve,
+	 * fail closed. The discarded virtual pages are never touched again before
+	 * the whole mappings are released during cleanup.
 	 */
 	for (i = 0; i < got && freed_pages < FRAG_HOLE_CAP; i++) {
 		char *m = maps[i];
@@ -2363,12 +2385,18 @@ static int do_fragment_buddy(int argc, char **argv)
 			 * from the chase mappings.
 			 */
 			if (frag_page_has_held_buddy(pfn, seen, seen_words)) {
-				if (munmap(m + off, (size_t)FRAG_PAGE) == 0) {
-					freed_pages++;
-					pairs++;
-				} else {
-					held_pages++;
+				int discard = frag_discard_locked_pages(pmfd, m + off,
+								(size_t)FRAG_PAGE);
+
+				if (discard) {
+					printf("FRAGMENT_BUDDY hole-discard-failed status=%d errno=%d\n",
+					       discard, errno);
+					fflush(stdout);
+					rc = 3;
+					goto cleanup;
 				}
+				freed_pages++;
+				pairs++;
 			} else {
 				held_pages++;
 			}
@@ -2538,12 +2566,12 @@ static int do_fragment_buddy(int argc, char **argv)
 				continue;
 			}
 			/*
-			 * One munmap of the whole 16 KiB run, not four of one
-			 * page. The intent is that the four pages are freed
-			 * together and, once the PCP drains, coalesce as an
+			 * One backing discard of the whole 16 KiB run, not four
+			 * separate operations. The intent is that the four pages
+			 * are freed together and, once the PCP drains, coalesce as an
 			 * order-2 block whose buddy (the held half) prevents
 			 * further growth. That drain is NOT guaranteed here: a
-			 * 16 KiB munmap still frees four order-0 folios into the
+			 * 16 KiB discard still frees four order-0 folios into the
 			 * per-cpu page cache, and run 36934739215 (and 36940519876
 			 * with stacks=504) showed the shell's next fork --
 			 * copy_process wants THREAD_SIZE_ORDER, an order-2 page --
@@ -2553,8 +2581,19 @@ static int do_fragment_buddy(int argc, char **argv)
 			 * that reason; this loop is belt and braces for anything
 			 * that must clone anyway.
 			 */
-			if (munmap(m + off, (size_t)(4 * FRAG_PAGE)) == 0)
+			{
+				int discard = frag_discard_locked_pages(
+					pmfd, m + off, (size_t)(4 * FRAG_PAGE));
+
+				if (discard) {
+					printf("FRAGMENT_BUDDY order2-discard-failed status=%d errno=%d\n",
+					       discard, errno);
+					fflush(stdout);
+					rc = 3;
+					goto cleanup;
+				}
 				order2_pages += 4;
+			}
 			order2_groups++;
 			off += 8 * FRAG_PAGE;
 		}
@@ -2565,9 +2604,9 @@ static int do_fragment_buddy(int argc, char **argv)
 	}
 	/*
 	 * What the buddy actually holds of order-2 now. If the PCP
-	 * swallowed the munmaps this reads 0 and the shell must not
+	 * swallowed the discarded pages this reads 0 and the shell must not
 	 * fork; if it drained, this is the true forkable count. The
-	 * munmap group count is reported separately and is never a
+	 * discarded group count is reported separately and is never a
 	 * forkability claim.
 	 */
 	order2_buddy = buddy_blocks_at_or_above(2);
@@ -2601,7 +2640,31 @@ static int do_fragment_buddy(int argc, char **argv)
 		goto cleanup;
 	}
 
-	/* Pin only after the pressure pattern and channel-open reserve qualify. */
+	/*
+	 * `exhausted` remains the strict raw-count result. `bounded` is a
+	 * separate ordinary-path qualification and never rewrites that count.
+	 * Do not pin or admit a pattern that lost its measured order-7 safety
+	 * reserve during the hole phase.
+	 */
+	bounded = frag_bounded_pressure_qualified(high_before_pages,
+						  high_after_pages,
+						  stop_reason, 1,
+							  chase_free_kb >= 0 &&
+							  chase_wmark_kb >= 0 &&
+							  chase_free_kb >= chase_wmark_kb);
+	if (!bounded) {
+		printf("FRAGMENT_BUDDY ready=0 reason=bounded-pressure-unqualified exhausted=%ld stop=%s ",
+		       high_after == 0 ? 1L : 0L, stop_reason);
+		printf("high_order_7plus=%ld->%ld->%ld ",
+		       high_before, high_locked, high_after);
+		printf("high_order_7plus_pages=%ld->%ld->%ld\n",
+		       high_before_pages, high_locked_pages, high_after_pages);
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
+
+	/* Pin only after both measured reserve contracts qualify. */
 	if (set_oom_adj(-1000) || oom_score_adj_read() != -1000) {
 		printf("FRAGMENT_BUDDY ready=0 reason=oom-score-pin-failed\n");
 		fflush(stdout);
@@ -2609,16 +2672,6 @@ static int do_fragment_buddy(int argc, char **argv)
 		goto cleanup;
 	}
 
-	/*
-	 * `exhausted` remains the strict raw-count result. `bounded` is a
-	 * separate ordinary-path qualification and never rewrites that count.
-	 */
-	bounded = frag_bounded_pressure_qualified(high_before_pages,
-						  high_after_pages,
-						  stop_reason, 1,
-						  chase_free_kb >= 0 &&
-						  chase_wmark_kb >= 0 &&
-						  chase_free_kb >= chase_wmark_kb);
 	printf("FRAGMENT_BUDDY ready=1 bounded=%d chunks=%ld pages=%ld ",
 	       bounded, got, got * (FRAG_CHUNK / FRAG_PAGE));
 	printf("held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 ",

@@ -27,7 +27,7 @@
 # usage: vmbus-fragmentation-drill.sh [hog_mib] [logfile]
 #   hog_mib  ceiling in MiB; default MemTotal. The helper allocates and pins
 #            64 KiB chunks, leaving at most 256 measured high-order pages as
-#            a safety reserve, then unmaps proven physical buddy pairs.
+#            a safety reserve, then discards pages with proven held buddies.
 #
 # Depends on vmbus_drill_helper (static, see hyperv-drill-initramfs/) for the
 # fragment-buddy primitive. The guest has no CPython and this is a Day-0
@@ -37,7 +37,12 @@ set -euo pipefail
 fragment_pattern_ready() {
 	[ "$1" = yes ] || return 1
 	case "$2" in
-	*"FRAGMENT_BUDDY ready=1 "*) return 0 ;;
+	*"FRAGMENT_BUDDY ready=1 bounded=1 "*) ;;
+	*) return 1 ;;
+	esac
+	case "$2" in
+	*" exhausted=0 "*) return 0 ;;
+	*) ;;
 	esac
 	return 1
 }
@@ -53,10 +58,13 @@ fragment_restore_values_valid() {
 }
 
 if [ "${1:-}" = --self-test ]; then
-	if fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1' &&
-		! fragment_pattern_ready no 'FRAGMENT_BUDDY ready=1 bounded=1' &&
+	if fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1 exhausted=0 pagemap=1' &&
+		! fragment_pattern_ready no 'FRAGMENT_BUDDY ready=1 bounded=1 exhausted=0 pagemap=1' &&
 		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=0 reason=reserve' &&
-		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=10 bounded=1' &&
+		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=10 bounded=1 exhausted=0 pagemap=1' &&
+		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=0 exhausted=1' &&
+		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1 exhausted=1' &&
+		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1' &&
 		! fragment_pattern_ready yes '' &&
 		fragment_restore_values_valid 65530 5696 15000 0 &&
 		! fragment_restore_values_valid 65530 5696 invalid 0 &&
@@ -467,7 +475,7 @@ else
 fi
 
 if ! fragment_pattern_ready "$FRAG_READY" "$FRAG_LINE"; then
-	say "VERDICT=INCONCLUSIVE_NO_PATTERN (runtime reserve did not qualify)"
+	say "VERDICT=INCONCLUSIVE_NO_PATTERN (bounded pressure reserve did not qualify)"
 	release_fragment_helper
 	exit 3
 fi
@@ -477,18 +485,12 @@ buddy
 
 # --- post-ready: builtins only, no fork ---------------------------------
 # From here until the helper teardown below there must be zero forks.
-# copy_process() wants THREAD_SIZE_ORDER (order-2) for a shell stack, and
-# the buddy at this moment has none: every freed page of the pattern is an
-# order-0 whose partner is pinned, and the order-2 reserve the helper
-# munmap'd landed in the per-cpu page cache -- /proc/buddyinfo does not
-# count it and the alloc slowpath will not drain it, because
-# drain_all_pages() runs only after direct reclaim makes progress and the
-# pattern is all mlocked so it never does. Run 36940519876 read ready=1
-# stacks=504 while buddyinfo held 1459*4kB 0*8kB 0*16kB, the first $(sed)
-# died with "Killed", init's next clone panicked the guest and both the
-# RESULT and VERDICT lines were lost. $(...), pipelines, sed, awk, grep,
-# readlink, dmesg and sleep are all forks; parameters, case, read, set --
-# and redirections are not.
+# Process creation and channel setup can need compound slab or stack pages.
+# The failed runs showed order-1 allocation failures in copy_process() and
+# hv_ringbuffer_init() while free memory remained only as order-0 pages. Avoid
+# those extra shell allocations even when the measured reserve qualifies.
+# $(...), pipelines, sed, awk, grep, readlink, dmesg and sleep are forks;
+# parameters, case, read, set -- and redirections are not.
 
 # Parse `key=value` out of the helper's ready=1 line into $1 (the caller's
 # variable name). Values are single tokens; `stop=` carries hyphens and
