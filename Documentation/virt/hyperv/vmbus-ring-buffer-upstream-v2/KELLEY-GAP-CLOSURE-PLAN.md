@@ -38,6 +38,12 @@ not delivery of the current one. Full recipient delivery is therefore
 unconfirmed, and the K. Y. route is known to have failed for at least two
 messages.
 
+Lore's linux-hyperv archive now resolves the cover and all fourteen patch
+Message-IDs with HTTP `200`, beginning at
+https://lore.kernel.org/linux-hyperv/20261007190752.336426-1-emersonbusson@gmail.com/.
+An unused `-16` ID returned `300` through the `/r/` resolver. Public list
+archiving is confirmed; individual delivery to Michael remains unconfirmed.
+
 The package is ready for maintainer review with these explicit limits:
 confidential hardware transitions, full saturation, and complete VMBus
 module unload/retained-owner destruction remain unqualified. The exact
