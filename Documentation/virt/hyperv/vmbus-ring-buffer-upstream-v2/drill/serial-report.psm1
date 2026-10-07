@@ -140,8 +140,10 @@ function Get-HypervDrillReportVerdict {
   $statuses = [regex]::Matches($ReportText, '(?m)^HYPERV_DRILL_RESULT status=(PASS|PARTIAL|FAIL)\s*$')
   $summaries = [regex]::Matches(
     $ReportText,
-    '(?m)^HYPERV_DRILL_RESULT lifecycle=(?<life>0|[1-9][0-9]{0,2}) fragment=(?<fragment>0|[1-9][0-9]{0,2}) splats=(?<splats>0|[1-9][0-9]{0,8}) faults=(?<faults>0|[1-9][0-9]{0,8})\s*$')
-  $lifecycle = [regex]::Matches($ReportText, '(?m)^HYPERV_DRILL_LIFECYCLE status=(?<value>0|[1-9][0-9]{0,2})\s*$')
+    '(?m)^HYPERV_DRILL_RESULT lifecycle=(?<life>skipped|0|[1-9][0-9]{0,2}) fragment=(?<fragment>0|[1-9][0-9]{0,2}) splats=(?<splats>0|[1-9][0-9]{0,8}) faults=(?<faults>0|[1-9][0-9]{0,8})\s*$')
+  $lifecycle = [regex]::Matches(
+    $ReportText,
+    '(?m)^HYPERV_DRILL_LIFECYCLE status=(?<value>skipped|0|[1-9][0-9]{0,2})(?: reason=(?<reason>[a-z0-9-]+))?\s*$')
   $fragment = [regex]::Matches($ReportText, '(?m)^HYPERV_DRILL_FRAGMENT status=(?<value>0|[1-9][0-9]{0,2})\s*$')
   $splats = [regex]::Matches($ReportText, '(?m)^HYPERV_DRILL_SPLATS count=(?<value>0|[1-9][0-9]{0,8})\s*$')
   $faults = [regex]::Matches($ReportText, '(?m)^HYPERV_DRILL_FAULTS count=(?<value>0|[1-9][0-9]{0,8})\s*$')
@@ -164,7 +166,7 @@ function Get-HypervDrillReportVerdict {
   }
 
   $summary = $summaries[0]
-  if ([int]$summary.Groups['life'].Value -ne [int]$lifecycle[0].Groups['value'].Value -or
+  if ($summary.Groups['life'].Value -cne $lifecycle[0].Groups['value'].Value -or
       [int]$summary.Groups['fragment'].Value -ne [int]$fragment[0].Groups['value'].Value -or
       [int]$summary.Groups['splats'].Value -ne [int]$splats[0].Groups['value'].Value -or
       [int]$summary.Groups['faults'].Value -ne [int]$faults[0].Groups['value'].Value) {
@@ -172,7 +174,7 @@ function Get-HypervDrillReportVerdict {
   }
 
   if ($status -ceq 'PASS') {
-    if ([int]$summary.Groups['life'].Value -ne 0 -or
+    if ($summary.Groups['life'].Value -cne '0' -or
         [int]$summary.Groups['fragment'].Value -ne 0 -or
         [int]$summary.Groups['splats'].Value -ne 0 -or
         [int]$summary.Groups['faults'].Value -ne 0 -or
