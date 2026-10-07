@@ -122,6 +122,12 @@ int main(void)
 	assert(frag_should_refine_order7(1, 384));
 	assert(!frag_should_refine_order7(1, 256));
 	assert(!frag_should_refine_order7(0, 384));
+	assert(frag_pcp_high_fraction_qualified(FRAG_PCP_HIGH_FRACTION,
+						FRAG_PCP_HIGH_FRACTION));
+	assert(!frag_pcp_high_fraction_qualified(FRAG_PCP_HIGH_FRACTION,
+						 FRAG_PCP_HIGH_FRACTION - 1));
+	assert(!frag_pcp_high_fraction_qualified(7, 7));
+	assert(!frag_pcp_high_fraction_qualified(-1, -1));
 	/* Keep the channel-open hole budget large enough for netvsc buffers. */
 	assert(hole_cap * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES);
 	assert(hole_cap <= FRAG_HOLE_MAX_CAP);

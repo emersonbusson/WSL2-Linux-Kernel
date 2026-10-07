@@ -829,12 +829,16 @@ static int do_mlock_hog(int argc, char **argv)
  * while this pattern is held. Require 64 MiB of real MemFree above the live
  * watermark before opening the channel so those buffers retain 33 MiB of
  * guest headroom. The 96 MiB hole cap leaves room for the VMA metadata
- * created by each isolated munmap.
+ * created by each isolated munmap. A temporary small PCP high limit makes
+ * the released pages visible in buddy accounting before the reserve check.
  */
 #define FRAG_RUNTIME_MIN_FREE_KB (64L * 1024)
 #define FRAG_RUNTIME_MIN_HOLE_PAGES \
 	((FRAG_RUNTIME_MIN_FREE_KB * 1024L) / FRAG_PAGE)
 #define FRAG_RUNTIME_MIN_ORDER2_BLOCKS 64L
+/* Drive page frees from PCP into buddy lists during the held drill window. */
+#define FRAG_PCP_HIGH_FRACTION_MIN 8L
+#define FRAG_PCP_HIGH_FRACTION 65536L
 /*
  * The chase spends the remaining safe headroom after the main fragmentation
  * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
@@ -1035,6 +1039,36 @@ static void boost_factor_write(long v)
 	close(fd);
 }
 
+static long pcp_high_fraction_read(void)
+{
+	FILE *f = fopen("/proc/sys/vm/percpu_pagelist_high_fraction", "r");
+	char buf[64];
+	long v = -1;
+
+	if (!f)
+		return -1;
+	if (fgets(buf, sizeof(buf), f))
+		v = strtol(buf, NULL, 10);
+	fclose(f);
+	return v;
+}
+
+static void pcp_high_fraction_write(long v)
+{
+	char buf[32];
+	int fd, n;
+
+	fd = open("/proc/sys/vm/percpu_pagelist_high_fraction", O_WRONLY);
+	if (fd < 0)
+		return;
+	n = snprintf(buf, sizeof(buf), "%ld\n", v);
+	if (n <= 0 || write(fd, buf, (size_t)n) != n) {
+		close(fd);
+		return;
+	}
+	close(fd);
+}
+
 /*
  * Free blocks at or above `min_order`, across all zones. min_order 7 is the
  * condition the fragmentation drill is actually about: while any remain, the
@@ -1144,6 +1178,11 @@ static int frag_should_preserve_order7(long blocks, long pages)
 static int frag_should_refine_order7(long blocks, long pages)
 {
 	return blocks > 0 && pages > FRAG_BOUNDED_MAX_REMAINING_PAGES;
+}
+
+static int frag_pcp_high_fraction_qualified(long requested, long current)
+{
+	return requested >= FRAG_PCP_HIGH_FRACTION_MIN && current == requested;
 }
 
 static int frag_runtime_reserve_qualified(long hole_cap, long freed_pages,
@@ -1488,6 +1527,8 @@ static int do_fragment_buddy(int argc, char **argv)
 	long chase_free_kb = -1, chase_wmark_kb = -1, chase_floor_kb = -1;
 	long min_free_saved = -1, min_free_set = 512, min_free_now = -1;
 	long boost_saved = -1, boost_now = -1;
+	long pcp_high_fraction_saved = -1, pcp_high_fraction_now = -1;
+	long pcp_high_set = FRAG_PCP_HIGH_FRACTION;
 	long map_count_saved = -1, map_count_set = 1048576;
 	long map_count_now = -1, oom_score_adj_saved = LONG_MIN;
 	long oom_score_adj_now = LONG_MIN;
@@ -1505,6 +1546,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	size_t seen_words = 0;
 	int pmfd = -1, bounded = 0, rc = 1, restore_ok;
 	int min_free_changed = 0, boost_changed = 0, map_count_changed = 0;
+	int pcp_high_fraction_changed = 0;
 	const char *release_file = NULL;
 	const char *pid_file = NULL;
 	const char *stop_reason = "ceiling";
@@ -1563,25 +1605,46 @@ static int do_fragment_buddy(int argc, char **argv)
 	map_count_saved = max_map_count_read();
 	min_free_saved = min_free_kb_read();
 	boost_saved = boost_factor_read();
+	pcp_high_fraction_saved = pcp_high_fraction_read();
 	oom_score_adj_saved = oom_score_adj_read();
 	if (map_count_saved < 0 || min_free_saved < 0 || boost_saved < 0 ||
-	    oom_score_adj_saved == LONG_MIN) {
-		printf("FRAGMENT_BUDDY ready=0 reason=state-read-failed max_map_count=%ld min_free_kbytes=%ld watermark_boost_factor=%ld oom_score_adj=%ld\n",
-		       map_count_saved, min_free_saved, boost_saved,
-		       oom_score_adj_saved);
+	    pcp_high_fraction_saved < 0 || oom_score_adj_saved == LONG_MIN) {
+		printf("FRAGMENT_BUDDY ready=0 reason=state-read-failed ");
+		printf("max_map_count=%ld min_free_kbytes=%ld ",
+		       map_count_saved, min_free_saved);
+		printf("watermark_boost_factor=%ld pcp_high_fraction=%ld ",
+		       boost_saved, pcp_high_fraction_saved);
+		printf("oom_score_adj=%ld\n", oom_score_adj_saved);
 		fflush(stdout);
 		return 3;
 	}
 	if (map_count_set < map_count_saved)
 		map_count_set = map_count_saved;
-	printf("FRAGMENT_BUDDY saved_state max_map_count=%ld min_free_kbytes=%ld watermark_boost_factor=%ld oom_score_adj=%ld\n",
-	       map_count_saved, min_free_saved, boost_saved,
-	       oom_score_adj_saved);
+	printf("FRAGMENT_BUDDY saved_state max_map_count=%ld min_free_kbytes=%ld ",
+	       map_count_saved, min_free_saved);
+	printf("watermark_boost_factor=%ld pcp_high_fraction=%ld ",
+	       boost_saved, pcp_high_fraction_saved);
+	printf("oom_score_adj=%ld\n", oom_score_adj_saved);
 	fflush(stdout);
 	if (frag_release_requested(release_file)) {
 		printf("FRAGMENT_BUDDY ready=0 reason=release-before-setup\n");
 		fflush(stdout);
 		rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+		goto cleanup;
+	}
+	pcp_high_fraction_changed = pcp_high_set != pcp_high_fraction_saved;
+	if (pcp_high_fraction_changed)
+		pcp_high_fraction_write(pcp_high_set);
+	pcp_high_fraction_now = pcp_high_fraction_read();
+	printf("FRAGMENT_BUDDY pcp_high_fraction saved=%ld set=%ld now=%ld\n",
+	       pcp_high_fraction_saved, pcp_high_set,
+	       pcp_high_fraction_now);
+	fflush(stdout);
+	if (!frag_pcp_high_fraction_qualified(pcp_high_set,
+					      pcp_high_fraction_now)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=pcp-high-fraction-not-set\n");
+		fflush(stdout);
+		rc = 3;
 		goto cleanup;
 	}
 	if (oom_score_adj_saved != 0 &&
@@ -2346,14 +2409,24 @@ static int do_fragment_buddy(int argc, char **argv)
 						  chase_free_kb >= 0 &&
 						  chase_wmark_kb >= 0 &&
 						  chase_free_kb >= chase_wmark_kb);
-	printf("FRAGMENT_BUDDY ready=1 bounded=%d chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 groups=%ld buddy_order2=%ld stop=%s high_order_7plus=%ld->%ld->%ld high_order_7plus_pages=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld chase_floor_kb=%ld chase_wmark_kb=%ld chase_free_kb=%ld\n",
-	       bounded, got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages,
-	       freed_pages, locked, pairs, want, FRAG_HOLE_CAP, chase, chase_holes,
-	       chase_pairs, unsplit_at_stop, high_after == 0 ? 1L : 0L,
-	       order2_groups, order2_buddy, stop_reason, high_before,
-	       high_locked, high_after, high_before_pages, high_locked_pages,
-	       high_after_pages, floor_kb, wmark_kb, free_kb, chase_floor_kb,
-	       chase_wmark_kb, chase_free_kb);
+	printf("FRAGMENT_BUDDY ready=1 bounded=%d chunks=%ld pages=%ld ",
+	       bounded, got, got * (FRAG_CHUNK / FRAG_PAGE));
+	printf("held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 ",
+	       held_pages, freed_pages, locked, pairs);
+	printf("cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld ",
+	       want, FRAG_HOLE_CAP, chase, chase_holes);
+	printf("chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 ",
+	       chase_pairs, unsplit_at_stop, high_after == 0 ? 1L : 0L);
+	printf("groups=%ld buddy_order2=%ld pcp_high_fraction=%ld stop=%s ",
+	       order2_groups, order2_buddy, pcp_high_fraction_now, stop_reason);
+	printf("high_order_7plus=%ld->%ld->%ld ",
+	       high_before, high_locked, high_after);
+	printf("high_order_7plus_pages=%ld->%ld->%ld ",
+	       high_before_pages, high_locked_pages, high_after_pages);
+	printf("floor_kb=%ld wmark_kb=%ld free_kb=%ld ",
+	       floor_kb, wmark_kb, free_kb);
+	printf("chase_floor_kb=%ld chase_wmark_kb=%ld chase_free_kb=%ld\n",
+	       chase_floor_kb, chase_wmark_kb, chase_free_kb);
 	fflush(stdout);
 
 	/*
@@ -2405,28 +2478,45 @@ cleanup:
 		min_free_kb_write(min_free_saved);
 	if (boost_changed)
 		boost_factor_write(boost_saved);
+	if (pcp_high_fraction_changed)
+		pcp_high_fraction_write(pcp_high_fraction_saved);
 	if (oom_score_adj_saved != LONG_MIN &&
 	    oom_score_adj_read() != oom_score_adj_saved)
 		set_oom_adj(oom_score_adj_saved);
 	map_count_now = max_map_count_read();
 	min_free_now = min_free_kb_read();
 	boost_now = boost_factor_read();
+	pcp_high_fraction_now = pcp_high_fraction_read();
 	oom_score_adj_now = oom_score_adj_read();
 	restore_ok = map_count_saved >= 0 && min_free_saved >= 0 &&
-		     boost_saved >= 0 && oom_score_adj_saved != LONG_MIN &&
+		     boost_saved >= 0 && pcp_high_fraction_saved >= 0 &&
+		     oom_score_adj_saved != LONG_MIN &&
 		     map_count_now == map_count_saved &&
 		     min_free_now == min_free_saved &&
 		     boost_now == boost_saved &&
+		     pcp_high_fraction_now == pcp_high_fraction_saved &&
 		     oom_score_adj_now == oom_score_adj_saved;
 	if (restore_ok) {
-		printf("FRAGMENT_BUDDY teardown max_map_count_saved=%ld max_map_count_now=%ld min_free_kbytes_saved=%ld min_free_kbytes_now=%ld watermark_boost_factor_saved=%ld watermark_boost_factor_now=%ld oom_score_adj_saved=%ld oom_score_adj_now=%ld restored=yes\n",
-		       map_count_saved, map_count_now, min_free_saved,
-		       min_free_now, boost_saved, boost_now,
+		printf("FRAGMENT_BUDDY teardown max_map_count_saved=%ld max_map_count_now=%ld ",
+		       map_count_saved, map_count_now);
+		printf("min_free_kbytes_saved=%ld min_free_kbytes_now=%ld ",
+		       min_free_saved, min_free_now);
+		printf("watermark_boost_factor_saved=%ld watermark_boost_factor_now=%ld ",
+		       boost_saved, boost_now);
+		printf("pcp_high_fraction_saved=%ld pcp_high_fraction_now=%ld ",
+		       pcp_high_fraction_saved, pcp_high_fraction_now);
+		printf("oom_score_adj_saved=%ld oom_score_adj_now=%ld restored=yes\n",
 		       oom_score_adj_saved, oom_score_adj_now);
 	} else {
-		printf("FRAGMENT_BUDDY teardown max_map_count_saved=%ld max_map_count_now=%ld min_free_kbytes_saved=%ld min_free_kbytes_now=%ld watermark_boost_factor_saved=%ld watermark_boost_factor_now=%ld oom_score_adj_saved=%ld oom_score_adj_now=%ld restored=no\n",
-		       map_count_saved, map_count_now, min_free_saved,
-		       min_free_now, boost_saved, boost_now,
+		printf("FRAGMENT_BUDDY teardown max_map_count_saved=%ld max_map_count_now=%ld ",
+		       map_count_saved, map_count_now);
+		printf("min_free_kbytes_saved=%ld min_free_kbytes_now=%ld ",
+		       min_free_saved, min_free_now);
+		printf("watermark_boost_factor_saved=%ld watermark_boost_factor_now=%ld ",
+		       boost_saved, boost_now);
+		printf("pcp_high_fraction_saved=%ld pcp_high_fraction_now=%ld ",
+		       pcp_high_fraction_saved, pcp_high_fraction_now);
+		printf("oom_score_adj_saved=%ld oom_score_adj_now=%ld restored=no\n",
 		       oom_score_adj_saved, oom_score_adj_now);
 		rc = 1;
 	}

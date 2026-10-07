@@ -42,12 +42,26 @@ fragment_pattern_ready() {
 	return 1
 }
 
+fragment_restore_values_valid() {
+	[ "$#" -eq 4 ] || return 1
+	for _value in "$@"; do
+		case "$_value" in
+		'' | *[!0-9]*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
 if [ "${1:-}" = --self-test ]; then
 	if fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1' &&
 		! fragment_pattern_ready no 'FRAGMENT_BUDDY ready=1 bounded=1' &&
 		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=0 reason=reserve' &&
 		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=10 bounded=1' &&
-		! fragment_pattern_ready yes ''; then
+		! fragment_pattern_ready yes '' &&
+		fragment_restore_values_valid 65530 5696 15000 0 &&
+		! fragment_restore_values_valid 65530 5696 invalid 0 &&
+		! fragment_restore_values_valid 65530 5696 15000 invalid &&
+		! fragment_restore_values_valid 65530 5696 15000 ''; then
 		printf '%s\n' 'fragmentation admission fixtures: PASS'
 		exit 0
 	fi
@@ -66,6 +80,7 @@ FRAG_RESTORE_SOURCE=unknown
 FRAG_SAVED_MAX_MAP_COUNT=
 FRAG_SAVED_MIN_FREE_KB=
 FRAG_SAVED_BOOST_FACTOR=
+FRAG_SAVED_PCP_HIGH_FRACTION=
 NIC=${NIC:-}
 TRACE_DIR=/sys/kernel/tracing
 OWNER_CHANNEL_IDS_FILE="${LOG}.channels.$$"
@@ -682,6 +697,7 @@ while read -r _line; do
 			max_map_count=*) FRAG_SAVED_MAX_MAP_COUNT="${_field#*=}" ;;
 			min_free_kbytes=*) FRAG_SAVED_MIN_FREE_KB="${_field#*=}" ;;
 			watermark_boost_factor=*) FRAG_SAVED_BOOST_FACTOR="${_field#*=}" ;;
+			pcp_high_fraction=*) FRAG_SAVED_PCP_HIGH_FRACTION="${_field#*=}" ;;
 			esac
 		done
 		;;
@@ -696,31 +712,40 @@ done < "$LOG"
 # If the helper was killed before its cleanup path, its pre-mutation snapshot
 # lets this parent restore the global sysctls after wait proves the helper is
 # gone. Keep this recovery visible in the evidence and verify every write.
-if [ "$FRAG_RESTORE_OK" != yes ] &&
-	[ -n "$FRAG_SAVED_MAX_MAP_COUNT" ] &&
-	[ -n "$FRAG_SAVED_MIN_FREE_KB" ] &&
-	[ -n "$FRAG_SAVED_BOOST_FACTOR" ]; then
-	case "$FRAG_SAVED_MAX_MAP_COUNT$FRAG_SAVED_MIN_FREE_KB$FRAG_SAVED_BOOST_FACTOR" in
-	'' | *[!0-9]*) ;;
-	*)
+if [ "$FRAG_RESTORE_OK" != yes ]; then
+	if fragment_restore_values_valid \
+		"$FRAG_SAVED_MAX_MAP_COUNT" "$FRAG_SAVED_MIN_FREE_KB" \
+		"$FRAG_SAVED_BOOST_FACTOR" "$FRAG_SAVED_PCP_HIGH_FRACTION"; then
 		printf '%s\n' "$FRAG_SAVED_MAX_MAP_COUNT" >/proc/sys/vm/max_map_count 2>>"$LOG" || true
 		printf '%s\n' "$FRAG_SAVED_MIN_FREE_KB" >/proc/sys/vm/min_free_kbytes 2>>"$LOG" || true
 		printf '%s\n' "$FRAG_SAVED_BOOST_FACTOR" >/proc/sys/vm/watermark_boost_factor 2>>"$LOG" || true
+		printf '%s\n' "$FRAG_SAVED_PCP_HIGH_FRACTION" \
+			>/proc/sys/vm/percpu_pagelist_high_fraction 2>>"$LOG" || true
 		FRAG_CURRENT_MAX_MAP_COUNT=unknown
 		FRAG_CURRENT_MIN_FREE_KB=unknown
 		FRAG_CURRENT_BOOST_FACTOR=unknown
+		FRAG_CURRENT_PCP_HIGH_FRACTION=unknown
 		FRAG_CURRENT_MAX_MAP_COUNT=$(cat /proc/sys/vm/max_map_count 2>/dev/null) || FRAG_CURRENT_MAX_MAP_COUNT=unknown
 		FRAG_CURRENT_MIN_FREE_KB=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null) || FRAG_CURRENT_MIN_FREE_KB=unknown
 		FRAG_CURRENT_BOOST_FACTOR=$(cat /proc/sys/vm/watermark_boost_factor 2>/dev/null) || FRAG_CURRENT_BOOST_FACTOR=unknown
+		FRAG_CURRENT_PCP_HIGH_FRACTION=$(cat \
+			/proc/sys/vm/percpu_pagelist_high_fraction 2>/dev/null) || \
+			FRAG_CURRENT_PCP_HIGH_FRACTION=unknown
 		if [ "$FRAG_CURRENT_MAX_MAP_COUNT" = "$FRAG_SAVED_MAX_MAP_COUNT" ] &&
 			[ "$FRAG_CURRENT_MIN_FREE_KB" = "$FRAG_SAVED_MIN_FREE_KB" ] &&
 			[ "$FRAG_CURRENT_BOOST_FACTOR" = "$FRAG_SAVED_BOOST_FACTOR" ]; then
-			FRAG_RESTORE_OK=yes
-			FRAG_RESTORE_SOURCE=parent-fallback
-			say "FRAGMENT_BUDDY parent_restore max_map_count=$FRAG_CURRENT_MAX_MAP_COUNT min_free_kbytes=$FRAG_CURRENT_MIN_FREE_KB watermark_boost_factor=$FRAG_CURRENT_BOOST_FACTOR verified=yes"
+			if [ "$FRAG_CURRENT_PCP_HIGH_FRACTION" = \
+				"$FRAG_SAVED_PCP_HIGH_FRACTION" ]; then
+				FRAG_RESTORE_OK=yes
+				FRAG_RESTORE_SOURCE=parent-fallback
+				say "FRAGMENT_BUDDY parent_restore verified=yes"
+				say "FRAGMENT_BUDDY parent_restore map=$FRAG_CURRENT_MAX_MAP_COUNT"
+				say "FRAGMENT_BUDDY restore min_free_kb=$FRAG_CURRENT_MIN_FREE_KB"
+				say "FRAGMENT_BUDDY parent_restore boost=$FRAG_CURRENT_BOOST_FACTOR"
+				say "FRAGMENT_BUDDY restore pcp=$FRAG_CURRENT_PCP_HIGH_FRACTION"
+			fi
 		fi
-		;;
-	esac
+	fi
 fi
 
 # The parser runs after the pressure helper has exited and restored memory.
