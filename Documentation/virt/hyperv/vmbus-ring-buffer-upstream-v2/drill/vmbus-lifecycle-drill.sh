@@ -568,6 +568,15 @@ st_rebind_no_is_not_device_restore_pass() {
 	return 0
 }
 
+st_restore_rejects_channel_topology_change() {
+	derive_restore_verdict yes no
+	if [ "$RESTORE_VERDICT" != FAIL ]; then
+		echo "  rebound NIC with changed channel topology was scored $RESTORE_VERDICT"
+		return 1
+	fi
+	return 0
+}
+
 # Point 2. Set membership would accept a second map of a size that was
 # already known. A multiset must not.
 st_duplicate_known_size_is_not_owner_identity() {
@@ -947,10 +956,37 @@ st_boot_baseline_requires_stable_maps() {
 	return 0
 }
 
+st_nic_channel_count_uses_numeric_channel_directories() {
+	local device count
+	device="$(mktemp -d /tmp/vmbus-channel-fixture.XXXXXX)"
+	mkdir -p "$device/channels/14" "$device/channels/15" \
+		"$device/channels/uevent"
+	: >"$device/channels/readme"
+	count="$(vmbus_nic_channel_count "$device" || true)"
+	if [ "$count" != 2 ]; then
+		echo "  expected two numeric channel directories, got '${count:-none}'"
+		rm -rf "$device"
+		return 1
+	fi
+	if ! settle_vmbus_nic_channels CHANNEL_FIXTURE "$device" 2 3 3; then
+		echo "  stable expected channel topology was not accepted"
+		rm -rf "$device"
+		return 1
+	fi
+	if settle_vmbus_nic_channels CHANNEL_FIXTURE "$device" 3 3 3; then
+		echo "  changed channel topology was accepted"
+		rm -rf "$device"
+		return 1
+	fi
+	rm -rf "$device"
+	return 0
+}
+
 run_self_test() {
 	echo "scope: synthetic validator fixtures, not reproduced kernel leaks."
 	for _f in \
 		st_rebind_no_is_not_device_restore_pass \
+		st_restore_rejects_channel_topology_change \
 		st_duplicate_known_size_is_not_owner_identity \
 		st_known_size_with_unexpected_multiplicity_is_not_complete_pass \
 		st_replacement_owner_same_size_is_not_complete_pass \
@@ -965,7 +1001,8 @@ run_self_test() {
 		st_touch_scrapers_separate_ready_from_after \
 		st_aggregate_is_an_explicit_conjunction \
 		st_band_refuses_growth_and_overfree \
-		st_boot_baseline_requires_stable_maps; do
+		st_boot_baseline_requires_stable_maps \
+		st_nic_channel_count_uses_numeric_channel_directories; do
 		if "$_f"; then
 			st_ok "$_f"
 		else
