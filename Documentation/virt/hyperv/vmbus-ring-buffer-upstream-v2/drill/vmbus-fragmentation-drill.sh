@@ -137,7 +137,16 @@ EOF
 		rm -f "$fixture"
 		return 1
 	fi
-	printf '%s\n' 'Node 0, zone DMA32 malformed' >"$fixture"
+	printf '%s\n' 'Node 0, zone DMA32 5976 2 1309 3 0 0 0 0 0 0 0' >"$fixture"
+	if ! fragment_parse_buddyinfo "$fixture" ||
+		[ "$FRAG_BUDDY_FREE_PAGES" -ne 11240 ] ||
+		[ "$FRAG_HIGH_ORDER_BLOCKS" -ne 0 ] ||
+		[ "$FRAG_HIGH_ORDER_PAGES" -ne 0 ] ||
+		! fragment_post_open_reserve_qualified 0 0 "$FRAG_BUDDY_FREE_PAGES"; then
+		rm -f "$fixture"
+		return 1
+	fi
+	printf '%s\n' 'Node 0, zone DMA32 1 2 3 4 5 6 7 invalid 9 10 11' >"$fixture"
 	if fragment_parse_buddyinfo "$fixture"; then
 		rm -f "$fixture"
 		return 1

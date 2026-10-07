@@ -23,20 +23,16 @@ $expectedBaseline = @'
 [    0.731452] Warning: unable to open an initial console.
 OWNER_TRACE_QUIESCE verified=no reason=event-unavailable
 NIC_QUIESCE verified=no reason=owner-trace-unavailable previous_maps=0 remaining_maps=0
-VERDICT=FAIL channel did not rebind after fragmentation
+VERDICT=FAIL target channel owner was not proven live after fragmented open
 HYPERV_DRILL_FRAGMENT status=1
-OWNER_TRACE_POST_OPEN verified=no reason=NIC-not-rebound-or-channels-missing
-HYPERV_DRILL_LIFECYCLE status=1
-CLEANUP_VERDICT=FAIL teardown released nothing
-MAP_ACCOUNTING_VERDICT=FAIL outside the expected band: tuple unreadable
-RESTORE_VERDICT=PARTIAL rebind=no (hv_netvsc did not rebind; open channel is the known hv_uio_remove gap); device restoration not proven
-LIFECYCLE_VERDICT=FAIL cleanup=FAIL map_uio=PASS map_sysfs=PASS map_accounting=FAIL restore=PARTIAL cycles=100 maps=(0 0 0) gap_retained=(0/0/0)
+OWNER_TRACE_POST_OPEN verified=no reason=owner-trace-unavailable
+HYPERV_DRILL_LIFECYCLE status=skipped reason=fragmentation-status-1
 HYPERV_DRILL_SPLATS count=0
 HYPERV_DRILL_FAULTS count=0
 HYPERV_DRILL_RESULT status=FAIL
 HYPERV_DRILL_RESULT status=FAIL
 HYPERV_DRILL_RESULT status=FAIL
-HYPERV_DRILL_RESULT lifecycle=1 fragment=1 splats=0 faults=0
+HYPERV_DRILL_RESULT lifecycle=skipped fragment=1 splats=0 faults=0
 HYPERV_DRILL_RESULT scope=drill-failed
 '@
 
@@ -53,10 +49,11 @@ Assert-Decision RequirePass NO_RESULT '' 1 'strict candidate rejects missing ver
 Assert-Decision ExpectedBaselineFailure FAIL $expectedBaseline 0 'baseline recognizes exact negative control'
 Assert-Decision ExpectedBaselineFailure PASS $expectedBaseline 1 'baseline rejects unexpected pass'
 Assert-Decision ExpectedBaselineFailure PARTIAL $expectedBaseline 1 'baseline rejects partial'
-Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'tuple unreadable', 'unexpected allocator result') 1 'baseline rejects unrelated failure'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'target channel owner was not proven live', 'unexpected allocator result') 1 'baseline rejects unrelated failure'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'HYPERV_DRILL_SPLATS count=0', 'HYPERV_DRILL_SPLATS count=1') 1 'baseline rejects kernel splat'
-Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'cycles=100', 'cycles=99') 1 'baseline rejects incomplete lifecycle run'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'reason=fragmentation-status-1', 'reason=runner-timeout') 1 'baseline rejects an unrelated lifecycle skip'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'fragment=1', 'fragment=3') 1 'baseline rejects partial fragmentation result'
+Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'status=skipped reason=fragmentation-status-1', 'status=0') 1 'baseline rejects lifecycle after failed fragmentation precondition'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'OWNER_TRACE_QUIESCE verified=no reason=event-unavailable', '') 1 'baseline requires explicit missing-owner-trace evidence'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline -replace 'NIC_QUIESCE verified=no', 'NIC_QUIESCE verified=yes') 1 'baseline rejects unexpected NIC quiescence claim'
 Assert-Decision ExpectedBaselineFailure FAIL ($expectedBaseline + "`nHYPERV_DRILL_RESULT status=PASS") 1 'baseline rejects conflicting aggregate result'

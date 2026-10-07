@@ -4,14 +4,10 @@ function Test-HypervExpectedBaselineFailure {
   $required = @(
     'OWNER_TRACE_QUIESCE verified=no reason=event-unavailable',
     'NIC_QUIESCE verified=no reason=owner-trace-unavailable',
-    'VERDICT=FAIL channel did not rebind after fragmentation',
+    'VERDICT=FAIL target channel owner was not proven live after fragmented open',
     'HYPERV_DRILL_FRAGMENT status=1',
-    'OWNER_TRACE_POST_OPEN verified=no reason=NIC-not-rebound-or-channels-missing',
-    'HYPERV_DRILL_LIFECYCLE status=1',
-    'CLEANUP_VERDICT=FAIL teardown released nothing',
-    'MAP_ACCOUNTING_VERDICT=FAIL outside the expected band: tuple unreadable',
-    'RESTORE_VERDICT=PARTIAL rebind=no (hv_netvsc did not rebind; open channel is the known hv_uio_remove gap); device restoration not proven',
-    'LIFECYCLE_VERDICT=FAIL cleanup=FAIL map_uio=PASS map_sysfs=PASS map_accounting=FAIL restore=PARTIAL cycles=100 maps=(0 0 0) gap_retained=(0/0/0)',
+    'OWNER_TRACE_POST_OPEN verified=no reason=owner-trace-unavailable',
+    'HYPERV_DRILL_LIFECYCLE status=skipped reason=fragmentation-status-1',
     'HYPERV_DRILL_RESULT scope=drill-failed'
   )
 
@@ -33,7 +29,7 @@ function Test-HypervExpectedBaselineFailure {
   }
 
   $summaryMatches = [regex]::Matches(
-    $ConsoleText, '(?m)^HYPERV_DRILL_RESULT lifecycle=1 fragment=1 splats=0 faults=0\s*$')
+    $ConsoleText, '(?m)^HYPERV_DRILL_RESULT lifecycle=skipped fragment=1 splats=0 faults=0\s*$')
   if ($summaryMatches.Count -ne 1) {
     return $false
   }

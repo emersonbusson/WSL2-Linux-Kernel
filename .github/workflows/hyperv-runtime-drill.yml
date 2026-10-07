@@ -24,6 +24,10 @@ name: Hyper-V runtime drill
 # FAIL SEMANTICS: the baseline is green only when it reproduces the exact,
 # fault-free negative-control signature. The candidate requires full PASS;
 # PARTIAL, FAIL, no console, or incomplete pressure evidence reddens it.
+# The baseline's missing owner trace is a failed fragmentation precondition.
+# The guest now skips its second NIC-unbind lifecycle phase in that case: the
+# prior run blocked in the baseline unbind worker and lost the serial report.
+# Candidate lifecycle still runs only after fragmentation returns PASS.
 #
 # EVIDENCE SCOPE (re-stated because it is easy to over-read a green job):
 # The allocator takes its chunked order-N -> order-0 path when guest-memory
