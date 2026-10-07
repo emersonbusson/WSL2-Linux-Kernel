@@ -28,7 +28,15 @@ The live submission on 2026-10-07 at 16:07 -03 was accepted by smtp.gmail.com
 with an SMTP 250 response for each message. The cover Message-ID is
 <20261007190752.336426-1-emersonbusson@gmail.com>; the live log SHA-256 is
 1399111a07263cf88ea1b5efe1e81b65f03cf2dedb9438d1c2c16a868a05fc06. This
-confirms relay acceptance, not recipient-side delivery or reading.
+confirms relay acceptance, not recipient-side delivery or reading. Later Gmail
+delivery notices for patches 01/14 and 05/14 report `550 5.4.1 Recipient
+address rejected: Access denied` for `kys@microsoft.com`, the Cc address of
+K. Y. Srinivasan. Michael Kelley was the direct recipient at
+`mhklinux@outlook.com`; these notices do not establish his delivery outcome.
+His saved 2026-09-22 reply confirms this address worked for an earlier series,
+not delivery of the current one. Full recipient delivery is therefore
+unconfirmed, and the K. Y. route is known to have failed for at least two
+messages.
 
 The package is ready for maintainer review with these explicit limits:
 confidential hardware transitions, full saturation, and complete VMBus
