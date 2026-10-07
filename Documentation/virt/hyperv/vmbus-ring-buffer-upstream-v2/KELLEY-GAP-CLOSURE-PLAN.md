@@ -66,5 +66,6 @@ The manifest pins every mail and the expected applied source tree.
 5. Preserve explicit limits on full unload/destruction and confidential guests.
 6. Reaudit final source, cover, routing, DCO/Fixes and exact mail bytes.
 
-The original send qualifier remains withdrawn. A green build does not permit
-unqualified claims or substitute for the final review. No email has been sent.
+The original send qualifier was withdrawn before the current live submission.
+A green build does not permit unqualified claims or substitute for the final
+review. The current relay and recipient-delivery status is recorded above.
