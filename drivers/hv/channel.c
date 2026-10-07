@@ -901,10 +901,12 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
 /**
  * __vmbus_free_buffer_mem - free the backing memory of a vmbus_buffer
  *
+ * @owner: backing allocation owner and retained-list state
  * @addr: buffer address (virtually contiguous)
  * @chunks: chunks array from vmbus_alloc_buffer(), or NULL
  * @chunk_cnt: number of entries in @chunks
  * @unknown_page: chunk whose encryption transition failed and is unknown
+ * @reencrypt: callback that restores shared chunks to guest-private state
  *
  * Caller must hold vmbus_retained_buffers_lock.
  *
@@ -1219,7 +1221,7 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
  * array is guest-private request bookkeeping -- the host never sees the
  * slot values -- so a vmalloc-backed mapping carries no Confidential
  * Computing implication and needs no set_memory_decrypted().
- * @size The size of the array
+ * @size: number of requestor slots
  */
 u64 *request_arr_init(u32 size)
 {
