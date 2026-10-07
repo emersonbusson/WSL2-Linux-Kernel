@@ -96,11 +96,16 @@ function Wait-WslShutdownQuiescence {
     param(
         [Parameter(Mandatory)][scriptblock]$Probe,
         [Parameter(Mandatory)][scriptblock]$Delay,
-        [Parameter(Mandatory)][ValidateRange(0, 3600)][int]$TimeoutSeconds
+        [Parameter(Mandatory)][ValidateRange(0, 3600)][int]$TimeoutSeconds,
+        [scriptblock]$RetryShutdown,
+        [ValidateRange(0, 3600)][int]$RetryIntervalSeconds = 15,
+        [ValidateRange(0, 10)][int]$MaxRetries = 0
     )
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $observations = 0
     $clearSamples = 0
+    $retryCount = 0
+    $nextRetryAt = $RetryIntervalSeconds
     $running = ''
     $vmmemPids = @()
     while ($true) {
@@ -121,18 +126,28 @@ function Wait-WslShutdownQuiescence {
                 return [ordered]@{
                     running_distros = $running; vmmem_pids = $vmmemPids
                     observations = $observations; elapsed_ms = [int]$watch.ElapsedMilliseconds
+                    retry_count = $retryCount
                 }
             }
         } else { $clearSamples = 0 }
         if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
             $distroText = if ($running) { $running } else { 'none' }
             $pidText = if ($vmmemPids.Count) { $vmmemPids -join ',' } else { 'none' }
-            throw "WSL utility VM did not quiesce within $TimeoutSeconds seconds (running_distros=$distroText; vmmem_pids=$pidText)"
+            throw "WSL utility VM did not quiesce within $TimeoutSeconds seconds (retry_count=$retryCount; running_distros=$distroText; vmmem_pids=$pidText)"
+        }
+        if ($RetryShutdown -and $retryCount -lt $MaxRetries -and
+            $watch.Elapsed.TotalSeconds -ge $nextRetryAt -and
+            -not (Test-WslShutdownQuiescent $running $vmmemPids.Count)) {
+            & $RetryShutdown
+            $retryCount++
+            $nextRetryAt = $watch.Elapsed.TotalSeconds + $RetryIntervalSeconds
         }
         & $Delay
     }
 }
 
+# Reissue only the documented graceful shutdown command while the distro list or
+# utility VM process remains live. Never kill VmmemWSL or switch config early.
 function Invoke-WslShutdownVerified {
     [void](Invoke-Wsl @('--shutdown'))
     try {
@@ -140,10 +155,12 @@ function Invoke-WslShutdownVerified {
             $running = ([string](Invoke-Wsl @('--list', '--running', '--quiet') 10)).Trim()
             $processes = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -ieq 'VmmemWSL' })
             @{ running_distros = $running; vmmem_pids = @($processes | ForEach-Object { $_.Id }) }
-        } -Delay { Start-Sleep -Seconds 1 } -TimeoutSeconds 30
+        } -Delay { Start-Sleep -Seconds 1 } -RetryShutdown { [void](Invoke-Wsl @('--shutdown')) } `
+            -TimeoutSeconds 60 -RetryIntervalSeconds 15 -MaxRetries 3
         $script:report.vm_shutdown_checks += [ordered]@{
             verdict = 'PASS'; observations = $state.observations
-            elapsed_ms = $state.elapsed_ms; vmmem_pids = $state.vmmem_pids
+            elapsed_ms = $state.elapsed_ms; retries = $state.retry_count
+            vmmem_pids = $state.vmmem_pids
         }
     } catch {
         $script:report.vm_shutdown_checks += [ordered]@{
