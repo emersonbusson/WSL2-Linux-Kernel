@@ -52,6 +52,7 @@ OWNER_CHANNEL_COUNT=0
 OWNER_TRACE_FROZEN=no
 OWNER_TRACE_AVAILABLE=no
 OWNER_TRACE_WAS_ENABLED=no
+OWNER_TRACE_STATE_CAPTURED=no
 OWNER_TRACE_RESTORED=yes
 OWNER_CHANNEL_CAPTURE_OK=no
 OWNER_QUIESCE_RESULT=
@@ -195,6 +196,24 @@ owner_trace_stats_clean() {
 		}' "$TRACE_DIR"/per_cpu/cpu*/stats 2>/dev/null) || return 1
 }
 
+restore_owner_trace_state() {
+	[ "$OWNER_TRACE_STATE_CAPTURED" = yes ] || return 0
+	if [ "$OWNER_TRACE_WAS_ENABLED" = yes ]; then
+		_restore_trace_on=1
+	else
+		_restore_trace_on=0
+	fi
+	if printf '%s\n' "$_restore_trace_on" >"$TRACE_DIR/tracing_on" 2>>"$LOG"; then
+		OWNER_TRACE_RESTORED=yes
+		printf 'OWNER_TRACE_CLEANUP restored=%s verified=yes\n' \
+			"$_restore_trace_on" >>"$LOG"
+	else
+		OWNER_TRACE_RESTORED=no
+		printf 'OWNER_TRACE_CLEANUP restored=%s verified=no\n' \
+			"$_restore_trace_on" >>"$LOG"
+	fi
+}
+
 restore_nic_binding() {
 	if [ -z "$NIC" ] || [ ! -d /sys/bus/vmbus ]; then
 		return 0
@@ -214,9 +233,14 @@ restore_nic_binding() {
 
 fragmentation_exit_cleanup() {
 	release_fragment_helper
+	restore_owner_trace_state
 	rm -f "$OWNER_CHANNEL_IDS_FILE" 2>/dev/null || true
 	if ! restore_nic_binding; then
 		printf '%s\n' 'FRAGMENT_NIC_RESTORE verified=no' >>"$LOG"
+	fi
+	if [ "$OWNER_TRACE_RESTORED" != yes ] && [ "${RC:-1}" -eq 0 ]; then
+		trap - EXIT
+		exit 1
 	fi
 }
 trap fragmentation_exit_cleanup EXIT
@@ -239,6 +263,12 @@ quiesce_nic_before_pressure() {
 	_owner_trace_on=$(cat "$TRACE_DIR/tracing_on" 2>/dev/null || true)
 	if [ "$_owner_trace_on" = 1 ]; then
 		OWNER_TRACE_WAS_ENABLED=yes
+		OWNER_TRACE_STATE_CAPTURED=yes
+	elif [ "$_owner_trace_on" = 0 ]; then
+		OWNER_TRACE_STATE_CAPTURED=yes
+	else
+		say "FAIL: tracing state is unavailable"
+		return 1
 	fi
 	if [ "$_owner_event_enable" = 1 ] && [ "$_owner_trace_on" = 1 ]; then
 		if ! capture_owner_channels; then
