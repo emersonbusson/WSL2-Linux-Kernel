@@ -51,6 +51,8 @@ OWNER_CHANNEL_IDS_FILE="${LOG}.channels.$$"
 OWNER_CHANNEL_COUNT=0
 OWNER_TRACE_FROZEN=no
 OWNER_TRACE_AVAILABLE=no
+OWNER_TRACE_WAS_ENABLED=no
+OWNER_TRACE_RESTORED=yes
 OWNER_CHANNEL_CAPTURE_OK=no
 OWNER_QUIESCE_RESULT=
 OWNER_QUIESCE_STATS=
@@ -235,6 +237,9 @@ quiesce_nic_before_pressure() {
 	fi
 	_owner_event_enable=$(cat "$TRACE_DIR/events/hyperv/vmbus_buffer_owner/enable" 2>/dev/null || true)
 	_owner_trace_on=$(cat "$TRACE_DIR/tracing_on" 2>/dev/null || true)
+	if [ "$_owner_trace_on" = 1 ]; then
+		OWNER_TRACE_WAS_ENABLED=yes
+	fi
 	if [ "$_owner_event_enable" = 1 ] && [ "$_owner_trace_on" = 1 ]; then
 		if ! capture_owner_channels; then
 			say "FAIL: no channel IDs captured for NIC owner accounting"
@@ -690,6 +695,21 @@ else
 	say "OWNER_TRACE_POST_OPEN verified=no reason=trace-not-frozen"
 fi
 
+# The lifecycle drill runs after fragmentation and also needs boot-to-end owner
+# capture. Restore tracefs to its original state after taking the stable check.
+if [ "$OWNER_TRACE_WAS_ENABLED" = yes ]; then
+	if printf '1\n' >"$TRACE_DIR/tracing_on" 2>>"$LOG"; then
+		OWNER_TRACE_FROZEN=no
+		say "OWNER_TRACE_RESUME verified=yes for=lifecycle"
+	else
+		OWNER_TRACE_RESTORED=no
+		say "OWNER_TRACE_RESUME verified=no for=lifecycle"
+	fi
+else
+	OWNER_TRACE_FROZEN=yes
+	say "OWNER_TRACE_RESUME verified=yes prior_state=off"
+fi
+
 # --- dmesg scan -------------------------------------------------------------
 # After the teardown the buddy is whole again and forks are safe. The scan
 # needs dmesg, tail and grep, all binaries. init's HYPERV_DRILL_SPLATS and
@@ -749,6 +769,9 @@ elif [ "$REBOUND" != yes ]; then
 	RC=1
 elif [ "$OWNER_POST_OPEN_VERIFIED" != yes ]; then
 	say "VERDICT=FAIL target channel owner was not proven live after fragmented open"
+	RC=1
+elif [ "$OWNER_TRACE_RESTORED" != yes ]; then
+	say "VERDICT=FAIL tracing state could not be restored for lifecycle evidence"
 	RC=1
 elif [ "$POST_OPEN_MAP_COUNT" -le "$PRE_OPEN_MAP_COUNT" ]; then
 	say "VERDICT=FAIL fresh channel open produced no VMBus ring mappings"
