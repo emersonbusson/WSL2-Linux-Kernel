@@ -85,13 +85,17 @@ int main(void)
 	assert(frag_order2_group_alignment_skip(8) == 0);
 	assert(frag_order2_group_alignment_skip(15) == 1);
 
-	/* The pre-open stop retains up to four measured minimum order-7 blocks. */
+	/* The pre-open stop retains up to eight measured minimum order-7 blocks. */
 	assert(frag_bounded_pressure_qualified(500000, 128,
 						       "chase-memfree-margin", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 256,
 						       "chase-memfree-margin", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 512,
 						       "chase-memfree-margin", 1, 1));
+	assert(frag_bounded_pressure_qualified(500000, 640,
+						       "chase-order7-reserve", 1, 1));
+	assert(frag_bounded_pressure_qualified(500000, 1024,
+						       "chase-order7-reserve", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 128,
 						       "order7-reserve", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 128,
@@ -106,8 +110,10 @@ int main(void)
 							"order7-depleted", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 257,
 						       "chase-memfree-margin", 1, 1));
-	assert(!frag_bounded_pressure_qualified(500000, 513,
+	assert(!frag_bounded_pressure_qualified(500000, 1025,
 							"chase-memfree-margin", 1, 1));
+	assert(!frag_bounded_pressure_qualified(500000, 1025,
+							"chase-order7-reserve", 1, 1));
 	assert(!frag_bounded_pressure_qualified(25600, 257,
 							"chase-memfree-margin", 1, 1));
 	assert(!frag_bounded_pressure_qualified(25599, 256,
@@ -128,12 +134,15 @@ int main(void)
 	assert(frag_should_preserve_order7(1, 128));
 	assert(frag_should_preserve_order7(1, 256));
 	assert(frag_should_preserve_order7(1, 512));
+	assert(frag_should_preserve_order7(1, 640));
+	assert(frag_should_preserve_order7(8, 1024));
 	assert(!frag_should_preserve_order7(0, 128));
-	assert(!frag_should_preserve_order7(1, 513));
+	assert(!frag_should_preserve_order7(8, 1025));
 	assert(!frag_should_preserve_order7(1, 0));
 	assert(!frag_should_refine_order7(1, 384));
 	assert(!frag_should_refine_order7(1, 512));
-	assert(frag_should_refine_order7(1, 513));
+	assert(!frag_should_refine_order7(8, 1024));
+	assert(frag_should_refine_order7(8, 1025));
 	assert(!frag_should_refine_order7(0, 384));
 	assert(frag_pcp_high_fraction_qualified(FRAG_PCP_HIGH_FRACTION,
 						FRAG_PCP_HIGH_FRACTION));

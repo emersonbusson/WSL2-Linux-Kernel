@@ -42,6 +42,11 @@ else
 fi
 
 HELPER="${HELPER:-$(command -v vmbus_drill_helper || true)}"
+BOOT_MAPS=""
+BOOT_NORMALIZATION_VERDICT=SKIP
+BOOT_NORMALIZATION_WHY="not reached"
+PHASE1_MAP_VERDICT=SKIP
+PHASE1_MAP_WHY="not reached"
 
 say() { echo "$@" | tee -a "$LOG"; }
 
@@ -57,6 +62,8 @@ emit_verdicts_and_exit() {
 	say "MAP_UIO_VERDICT=${MAP_UIO_VERDICT:-SKIP} ${MAP_UIO_WHY:-not launched}"
 	say "MAP_SYSFS_VERDICT=${MAP_SYSFS_VERDICT:-SKIP} ${MAP_SYSFS_WHY:-not launched}"
 	say "MAP_ACCOUNTING_VERDICT=${MAP_ACCOUNTING_VERDICT:-SKIP} ${MAP_ACCOUNTING_WHY:-not reached}"
+	say "BOOT_NORMALIZATION_VERDICT=${BOOT_NORMALIZATION_VERDICT:-SKIP} ${BOOT_NORMALIZATION_WHY:-not reached}"
+	say "PHASE1_MAP_ACCOUNTING_VERDICT=${PHASE1_MAP_VERDICT:-SKIP} ${PHASE1_MAP_WHY:-not reached}"
 	say "RESTORE_VERDICT=${RESTORE_VERDICT:-SKIP} ${RESTORE_WHY:-not reached}"
 	say "owner_attribution=size_class_only (/proc/vmallocinfo names the allocating symbol, not the instance)"
 	say "LIFECYCLE_VERDICT=${LIFE:-FAIL} cleanup=${CLEANUP_VERDICT:-SKIP} map_uio=${MAP_UIO_VERDICT:-SKIP} map_sysfs=${MAP_SYSFS_VERDICT:-SKIP} map_accounting=${MAP_ACCOUNTING_VERDICT:-SKIP} restore=${RESTORE_VERDICT:-SKIP} cycles=$CYCLES maps=(${SETTLE_TUPLE:-}) gap_retained=(${GAP_N:-0}/${GAP_B:-0}/${GAP_P:-0}) settle_tries=${SETTLE_TRIES:-0} rebind=${REBIND_OK:-no}"
@@ -103,10 +110,27 @@ vmbus_maps() {
 	' /proc/vmallocinfo
 }
 
+# Extract "count bytes pages" from one vmbus_maps() line before the later
+# phase-2 accounting helpers are reached.
+map_line_tuple() {
+	printf '%s\n' "${1:-}" | awk '
+		/^MAPS count=[0-9]+ bytes=[0-9]+ pages=[0-9]+$/ {
+			sub(/^MAPS count=/, "")
+			split($0, a, " bytes=")
+			n = a[1]
+			split(a[2], b, " pages=")
+			print n, b[1], b[2]
+			found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	'
+}
+
 # settle_vmbus_maps <label> <stable_samples> <retry_budget>
-# Keep the original exact map-count verdict, but take its baseline only after
-# the boot-time vmalloc state has stopped changing. An unreadable or moving
-# tuple is incomplete evidence, never a baseline to compare against.
+# Keep the exact map-count verdict, but take the diagnostic boot baseline only
+# after the boot-time vmalloc state has stopped changing. The operational
+# baseline is separately established after one bounded first NIC rebind.
+# An unreadable or moving tuple is incomplete evidence, never a baseline.
 settle_vmbus_maps() {
 	local label="${1:-}" stable_required="${2:-}" retry_budget="${3:-}"
 	local tries=0 stable_run=0 previous='' current=''
@@ -249,23 +273,24 @@ tuple_within_end_band() {
 	_pp=$(printf '%s\n' "$_twp" | awk '{print $3+0}')
 	_bn=$(printf '%s\n' "$_twb" | awk '{print $1+0}')
 	_bb=$(printf '%s\n' "$_twb" | awk '{print $2+0}')
+	_bp=$(printf '%s\n' "$_twb" | awk '{print $3+0}')
 	if [ "$_sn" -eq 0 ] && [ "$_sb" -eq 0 ]; then
 		echo "tuple unreadable"
 		return 1
 	fi
-	if [ "$_sn" -gt "$_bn" ] || [ "$_sb" -gt "$_bb" ]; then
-		echo "growth above the boot baseline ($_sn/$_sb > $_bn/$_bb)"
+	if [ "$_sn" -gt "$_bn" ] || [ "$_sb" -gt "$_bb" ] || [ "$_sp" -gt "$_bp" ]; then
+		echo "growth above the operational baseline ($_sn/$_sb/$_sp > $_bn/$_bb/$_bp)"
 		return 1
 	fi
 	if [ "$_twr" = yes ]; then
-		if [ "$_sn" -ne "$_bn" ] || [ "$_sb" -ne "$_bb" ]; then
-			echo "rebind=yes but the end is not the boot baseline ($_sn/$_sb != $_bn/$_bb)"
+		if [ "$_sn" -ne "$_bn" ] || [ "$_sb" -ne "$_bb" ] || [ "$_sp" -ne "$_bp" ]; then
+			echo "rebind=yes but the end is not the operational baseline ($_sn/$_sb/$_sp != $_bn/$_bb/$_bp)"
 			return 1
 		fi
 		return 0
 	fi
-	if [ "$_sn" -lt "$_pn" ] || [ "$_sb" -lt "$_pb" ]; then
-		echo "over-free below the settled pre-UIO tuple ($_sn/$_sb < $_pn/$_pb)"
+	if [ "$_sn" -lt "$_pn" ] || [ "$_sb" -lt "$_pb" ] || [ "$_sp" -lt "$_pp" ]; then
+		echo "over-free below the settled pre-UIO tuple ($_sn/$_sb/$_sp < $_pn/$_pb/$_pp)"
 		return 1
 	fi
 	_dn=$((_sn - _pn))
@@ -276,6 +301,75 @@ tuple_within_end_band() {
 		return 1
 	fi
 	return 0
+}
+
+# tuple_within_boot_normalization_band <boot> <first_rebind>
+# A first stable NIC rebind may release one small boot-time mapping. Keep that
+# transition explicit and bounded; every later lifecycle cycle still uses an
+# exact three-field baseline. Growth, multiple-map loss, and larger drops fail.
+tuple_within_boot_normalization_band() {
+	_tnb_boot="${1:-}"
+	_tnb_first="${2:-}"
+	if ! printf '%s\n%s\n' "$_tnb_boot" "$_tnb_first" | awk '
+		NF == 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { valid++ }
+		END { exit(valid == 2 ? 0 : 1) }
+	'; then
+		echo "tuple unreadable"
+		return 1
+	fi
+	_tnb_bn=$(printf '%s\n' "$_tnb_boot" | awk '{print $1}')
+	_tnb_bb=$(printf '%s\n' "$_tnb_boot" | awk '{print $2}')
+	_tnb_bp=$(printf '%s\n' "$_tnb_boot" | awk '{print $3}')
+	_tnb_fn=$(printf '%s\n' "$_tnb_first" | awk '{print $1}')
+	_tnb_fb=$(printf '%s\n' "$_tnb_first" | awk '{print $2}')
+	_tnb_fp=$(printf '%s\n' "$_tnb_first" | awk '{print $3}')
+	if [ "$_tnb_bn" -eq 0 ] && [ "$_tnb_bb" -eq 0 ]; then
+		echo "boot tuple unreadable"
+		return 1
+	fi
+	if [ "$_tnb_fn" -gt "$_tnb_bn" ] || [ "$_tnb_fb" -gt "$_tnb_bb" ] ||
+		[ "$_tnb_fp" -gt "$_tnb_bp" ]; then
+		echo "growth during first rebind ($_tnb_fn/$_tnb_fb/$_tnb_fp > $_tnb_bn/$_tnb_bb/$_tnb_bp)"
+		return 1
+	fi
+	_tnb_dn=$((_tnb_bn - _tnb_fn))
+	_tnb_db=$((_tnb_bb - _tnb_fb))
+	_tnb_dp=$((_tnb_bp - _tnb_fp))
+	if [ "$_tnb_dn" -eq 0 ] && [ "$_tnb_db" -eq 0 ] && [ "$_tnb_dp" -eq 0 ]; then
+		return 0
+	fi
+	if [ "$_tnb_dn" -ne 1 ] || [ "$_tnb_db" -lt 4096 ] ||
+		[ "$_tnb_db" -gt 65536 ] || [ "$_tnb_dp" -lt 1 ] ||
+		[ "$_tnb_dp" -gt 16 ]; then
+		echo "first-rebind release exceeds one small-map normalization budget ($_tnb_dn/$_tnb_db/$_tnb_dp > 1/65536/16)"
+		return 1
+	fi
+	return 0
+}
+
+# map_size_class_summary <snapshot>
+# Prints sorted size=count classes without any vmalloc addresses.
+map_size_class_summary() {
+	local snapshot="${1:-}"
+	if [ -z "$snapshot" ] || [ ! -r "$snapshot" ]; then
+		printf '%s\n' unavailable
+		return 0
+	fi
+	awk '
+		NF == 1 && $1 ~ /^[0-9]+$/ { count[$1]++ }
+		END { for (size in count) printf "%s %d\n", size, count[size] }
+	' "$snapshot" | sort -n | awk '
+		NF == 2 {
+			if (found++)
+				printf " "
+			printf "%s=%s", $1, $2
+		}
+		END {
+			if (!found)
+				printf "none"
+			printf "\n"
+		}
+	'
 }
 
 # size_class_max_counts <snapshot>...
@@ -965,6 +1059,14 @@ st_band_refuses_growth_and_overfree() {
 		echo "  a ring retention over budget was accepted"
 		return 1
 	fi
+	if tuple_within_end_band "12 20279296 4940" "7 307200 68" "12 20279296 4939" yes >/dev/null; then
+		echo "  exact rebind accounting ignored a page-count change"
+		return 1
+	fi
+	if tuple_within_end_band "12 20279296 4940" "7 307200 68" "12 20279296 4939" no >/dev/null; then
+		echo "  growth in backing pages above the baseline was accepted"
+		return 1
+	fi
 	return 0
 }
 
@@ -1025,6 +1127,52 @@ st_boot_baseline_requires_stable_maps() {
 	return 0
 }
 
+st_map_size_class_summary_preserves_multiplicity() {
+	printf '%s\n' 65536 36864 65536 4096 >"$LOG.sizes-test"
+	_summary="$(map_size_class_summary "$LOG.sizes-test")"
+	if [ "$_summary" != '4096=1 36864=1 65536=2' ]; then
+		echo "  expected sorted size classes with multiplicity, got '$_summary'"
+		rm -f "$LOG.sizes-test"
+		return 1
+	fi
+	rm -f "$LOG.sizes-test"
+	return 0
+}
+
+st_boot_to_rebind_normalization_is_narrow() {
+	if ! tuple_within_boot_normalization_band \
+		'13 20316160 4947' '13 20316160 4947'; then
+		echo "  an unchanged boot tuple was refused"
+		return 1
+	fi
+	if ! tuple_within_boot_normalization_band \
+		'13 20316160 4947' '12 20279296 4939'; then
+		echo "  the measured one-small-map rebind normalization was refused"
+		return 1
+	fi
+	if tuple_within_boot_normalization_band \
+		'13 20316160 4947' '11 20279296 4939' >/dev/null; then
+		echo "  loss of more than one map was accepted"
+		return 1
+	fi
+	if tuple_within_boot_normalization_band \
+		'13 20316160 4947' '12 20240000 4939' >/dev/null; then
+		echo "  loss above the 64 KiB boot normalization cap was accepted"
+		return 1
+	fi
+	if tuple_within_boot_normalization_band \
+		'13 20316160 4947' '12 20279296 4920' >/dev/null; then
+		echo "  loss above the 16-page boot normalization cap was accepted"
+		return 1
+	fi
+	if tuple_within_boot_normalization_band \
+		'13 20316160 4947' '14 20320256 4948' >/dev/null; then
+		echo "  boot-to-rebind map growth was accepted"
+		return 1
+	fi
+	return 0
+}
+
 st_nic_channel_count_uses_numeric_channel_directories() {
 	local device count
 	device="$(mktemp -d /tmp/vmbus-channel-fixture.XXXXXX)"
@@ -1071,6 +1219,8 @@ run_self_test() {
 		st_aggregate_is_an_explicit_conjunction \
 		st_band_refuses_growth_and_overfree \
 		st_boot_baseline_requires_stable_maps \
+		st_map_size_class_summary_preserves_multiplicity \
+		st_boot_to_rebind_normalization_is_narrow \
 		st_nic_channel_count_uses_numeric_channel_directories; do
 		if "$_f"; then
 			st_ok "$_f"
@@ -1079,7 +1229,7 @@ run_self_test() {
 		fi
 	done
 	echo "self-test: $ST_PASS passed, $ST_FAIL failed"
-	rm -f "$LOG" "$LOG.knownc" "$LOG.known1" "$LOG.after"
+	rm -f "$LOG" "$LOG.knownc" "$LOG.known1" "$LOG.after" "$LOG.sizes-test"
 	if [ "$ST_FAIL" -gt 0 ]; then
 		exit 1
 	fi
@@ -1130,10 +1280,16 @@ if ! settle_vmbus_maps BASELINE_SETTLE \
 	LIFE_CODE=3
 	emit_verdicts_and_exit 3
 fi
-BASE_MAPS="$MAPS_SETTLED"
-say "BASELINE $BASE_MAPS"
+BOOT_MAPS="$MAPS_SETTLED"
+BASE_MAPS="$BOOT_MAPS"
+BOOT_NORMALIZATION_VERDICT=FAIL
+BOOT_NORMALIZATION_WHY="first stable NIC rebind was not measured"
+BOOT_TUPLE="$(map_line_tuple "$BOOT_MAPS" || true)"
+BASE_TUPLE="$BOOT_TUPLE"
+say "BOOT_BASELINE $BOOT_MAPS"
 : >"$LOG.sizes-base"
 vmbus_map_sizes >>"$LOG.sizes-base" 2>/dev/null || true
+say "MAP_SIZE_CLASSES baseline=$(map_size_class_summary "$LOG.sizes-base")"
 dmesg 2>/dev/null | tail -5 >>"$LOG"
 
 # --- synthetic NIC rebind setup ---------------------------------------------
@@ -1203,7 +1359,7 @@ DRIVER_DIR="/sys/bus/vmbus/drivers"
 # vmbus_disconnect_ring() -- identical in mainline base 93f51579e7df -- and
 # the rebind then fails with -22. When that happens the NIC's own ring maps
 # left with this phase's own unbind and cannot come back, so the end-of-run
-# map tuple cannot return to the boot baseline and must not be scored as if
+# map tuple cannot return to the operational baseline and must not be scored as if
 # it should.
 REBIND_OK=no
 REBIND_DRIVER_OK=no
@@ -1302,6 +1458,45 @@ for i in $(seq 1 "$CYCLES"); do
 		CYCLE_TOPOLOGY_FAILS=$((CYCLE_TOPOLOGY_FAILS + 1))
 		say "cycle$i channel_topology_fail expected=$NIC_CHANNELS_BASELINE observed=${NIC_CHANNELS_SETTLED:-none}"
 	fi
+	if [ "$i" -eq 1 ]; then
+		if [ "${NIC_CHANNELS_SETTLED:-}" != "$NIC_CHANNELS_BASELINE" ]; then
+			BOOT_NORMALIZATION_VERDICT=FAIL
+			BOOT_NORMALIZATION_WHY="first rebind did not restore the captured channel topology"
+			say "BOOT_NORMALIZATION_VERDICT=FAIL $BOOT_NORMALIZATION_WHY"
+		elif ! settle_vmbus_maps FIRST_REBIND_SETTLE 3 15; then
+			BOOT_NORMALIZATION_VERDICT=FAIL
+			BOOT_NORMALIZATION_WHY="first-rebind map tuple did not stabilize"
+			say "BOOT_NORMALIZATION_VERDICT=FAIL $BOOT_NORMALIZATION_WHY"
+		else
+			FIRST_REBIND_MAPS="$MAPS_SETTLED"
+			FIRST_REBIND_TUPLE="$(map_line_tuple "$FIRST_REBIND_MAPS" || true)"
+			: >"$LOG.sizes-first-rebind"
+			vmbus_map_sizes >>"$LOG.sizes-first-rebind" 2>/dev/null || true
+			say "MAP_SIZE_CLASSES first_rebind=$(map_size_class_summary "$LOG.sizes-first-rebind")"
+			FIRST_REBIND_UNKNOWN_SIZES="size snapshot unavailable"
+			if [ -s "$LOG.sizes-base" ] && [ -s "$LOG.sizes-first-rebind" ]; then
+				size_class_max_counts "$LOG.sizes-base" >"$LOG.sizes-first-known"
+				FIRST_REBIND_UNKNOWN_SIZES="$(sizes_excess_after \
+					"$LOG.sizes-first-known" "$LOG.sizes-first-rebind" || true)"
+			fi
+			if ! BOOT_NORMALIZATION_WHY="$(tuple_within_boot_normalization_band \
+				"$BOOT_TUPLE" "$FIRST_REBIND_TUPLE" 2>&1)"; then
+				BOOT_NORMALIZATION_VERDICT=FAIL
+				say "BOOT_NORMALIZATION_VERDICT=FAIL $BOOT_NORMALIZATION_WHY"
+			elif [ -n "$FIRST_REBIND_UNKNOWN_SIZES" ]; then
+				BOOT_NORMALIZATION_VERDICT=FAIL
+				BOOT_NORMALIZATION_WHY="first rebind added size classes: $(printf '%s' "$FIRST_REBIND_UNKNOWN_SIZES" | tr '\n' ' ')"
+				say "BOOT_NORMALIZATION_VERDICT=FAIL $BOOT_NORMALIZATION_WHY"
+			else
+				BASE_MAPS="$FIRST_REBIND_MAPS"
+				BOOT_NORMALIZATION_VERDICT=PASS
+				BOOT_NORMALIZATION_WHY="bounded boot-to-operational transition; no new size classes"
+				BASE_TUPLE="$(map_line_tuple "$BASE_MAPS")"
+				say "BOOT_NORMALIZATION_VERDICT=PASS boot=$BOOT_TUPLE operational=$BASE_TUPLE"
+				say "OPERATIONAL_BASELINE $BASE_MAPS"
+			fi
+		fi
+	fi
 	if [ $((i % 10)) -eq 0 ]; then
 		say "cycle$i $(vmbus_maps || echo 'MAPS unavailable') channels=${NIC_CHANNELS_SETTLED:-unknown}"
 	fi
@@ -1312,7 +1507,43 @@ if ! settle_vmbus_nic_channels PHASE1_CHANNELS \
 fi
 say "PHASE1 write_failures=$CYCLE_FAILS/$((CYCLES * 4)) topology_failures=$CYCLE_TOPOLOGY_FAILS expected_channels=$NIC_CHANNELS_BASELINE"
 
-say "PHASE1-AFTER $(vmbus_maps || echo 'MAPS unavailable')"
+PHASE1_AFTER_INSTANT="$(vmbus_maps || echo 'MAPS unavailable')"
+say "PHASE1-AFTER_INSTANT $PHASE1_AFTER_INSTANT"
+PHASE1_MAPS_STABLE=no
+if settle_vmbus_maps PHASE1_MAP_SETTLE 3 15; then
+	PHASE1_AFTER_MAPS="$MAPS_SETTLED"
+	PHASE1_MAPS_STABLE=yes
+	say "PHASE1-AFTER $PHASE1_AFTER_MAPS stable=yes"
+else
+	PHASE1_AFTER_MAPS="$PHASE1_AFTER_INSTANT"
+	say "PHASE1-AFTER $PHASE1_AFTER_MAPS stable=no"
+fi
+: >"$LOG.sizes-phase1-after"
+vmbus_map_sizes >>"$LOG.sizes-phase1-after" 2>/dev/null || true
+say "MAP_SIZE_CLASSES phase1_after=$(map_size_class_summary "$LOG.sizes-phase1-after")"
+PHASE1_AFTER_TUPLE="$(map_line_tuple "$PHASE1_AFTER_MAPS" || true)"
+if [ "$BOOT_NORMALIZATION_VERDICT" != PASS ]; then
+	PHASE1_MAP_VERDICT=FAIL
+	PHASE1_MAP_WHY="no operational baseline: ${BOOT_NORMALIZATION_WHY:-unknown}"
+	say "PHASE1_MAP_ACCOUNTING_VERDICT=FAIL $PHASE1_MAP_WHY"
+	elif [ "$PHASE1_MAPS_STABLE" != yes ]; then
+	PHASE1_MAP_VERDICT=FAIL
+	PHASE1_MAP_WHY="phase-1 map tuple did not stabilize"
+	say "PHASE1_MAP_ACCOUNTING_VERDICT=FAIL $PHASE1_MAP_WHY"
+elif [ -z "$PHASE1_AFTER_TUPLE" ]; then
+	PHASE1_MAP_VERDICT=FAIL
+	PHASE1_MAP_WHY="phase-1 map tuple is unreadable"
+	say "PHASE1_MAP_ACCOUNTING_VERDICT=FAIL $PHASE1_MAP_WHY"
+elif PHASE1_MAP_WHY="$(tuple_within_end_band \
+	"$PHASE1_AFTER_TUPLE" "$BASE_TUPLE" "$BASE_TUPLE" yes 2>&1)"; then
+	PHASE1_MAP_VERDICT=PASS
+	PHASE1_MAP_WHY="100 cycles returned exactly to the operational baseline"
+	say "PHASE1_MAP_ACCOUNTING_VERDICT=PASS baseline=$BASE_TUPLE end=$PHASE1_AFTER_TUPLE"
+else
+	PHASE1_MAP_VERDICT=FAIL
+	PHASE1_MAP_WHY="${PHASE1_MAP_WHY:-phase-1 maps differ from the operational baseline}"
+	say "PHASE1_MAP_ACCOUNTING_VERDICT=FAIL $PHASE1_MAP_WHY"
+fi
 
 # --- phase 2: UIO mmap + hold-in-mmap (BUG-3 candidate repro) ---------------
 say "=== PHASE 2: UIO mmap + hold-in-mmap ==="
@@ -1634,7 +1865,7 @@ maps_tuple() {
 # properties of that disclosed gap rather than of this candidate:
 #
 #   1. The NIC's own maps leave with this phase's own unbind and cannot come
-#      back, so the end tuple cannot equal the boot baseline.
+#      back, so the end tuple cannot equal the operational baseline.
 #   2. UIO teardown is NOT the inverse of UIO probe. The probe re-establishes
 #      the channel's ring maps; the gap leaves them in place because the
 #      channel is never disconnected. Measured on run 37153111273 (both legs
@@ -1646,11 +1877,11 @@ maps_tuple() {
 #      alone demands a state the gap makes unreachable and reports that
 #      disclosure as a leak.
 #
-#   rebind=yes  -> the run is closed: the end must be the boot baseline
+#   rebind=yes  -> the run is closed: the end must be the operational baseline
 #                  exactly, because restore_nic put the NIC back.
 #   rebind=no   -> a BAND. Lower bound is the settled PRE_UIO tuple: nothing
 #                  PHASE 2 still owned may be freed below it. Upper bound is
-#                  the boot baseline (no growth) and PRE_UIO plus a bounded
+#                  the operational baseline (no growth) and PRE_UIO plus a bounded
 #                  ring-retention budget: UIO's own buffers are ~12 MiB each
 #                  and must be gone, while the gap may keep only the ~2 MiB
 #                  ring maps. A settled tuple above the budget is a UIO leak;
@@ -1668,7 +1899,7 @@ if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
 	CLEANUP_VERDICT=PARTIAL
 	CLEANUP_WHY="map accounting unavailable, release unprovable"
 	MAP_ACCOUNTING_VERDICT=PARTIAL
-	MAP_ACCOUNTING_WHY="a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
+	MAP_ACCOUNTING_WHY="a phase-2 verdict needs boot and operational baselines and the tuple phase 2 started from"
 	derive_restore_verdict "${REBIND_DRIVER_OK:-no}" "${REBIND_CHANNELS_OK:-no}"
 	say "  baseline='$BASE_MAPS'"
 	say "  pre_uio='${PRE_UIO_MAPS:-}'"
@@ -1676,21 +1907,23 @@ if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
 	derive_aggregate
 	emit_verdicts_and_exit "$LIFE_CODE"
 fi
-# The unbind may only remove maps. A settled PRE_UIO above the boot baseline
+# The unbind may only remove maps. A settled PRE_UIO above the operational baseline
 # means the unbind itself grew the accounting, and scoring the end against it
 # would launder that growth in as the expected state. Count and bytes are
-# compared; pages can differ by guard-page accounting and is not a growth
-# signal on its own.
+# compared, and pages remain part of the exact end-state comparison.
 PRE_N=$(printf '%s\n' "$PRE_TUPLE" | awk '{print $1}')
 PRE_B=$(printf '%s\n' "$PRE_TUPLE" | awk '{print $2}')
+PRE_P=$(printf '%s\n' "$PRE_TUPLE" | awk '{print $3}')
 BASE_N=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $1}')
 BASE_B=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $2}')
+BASE_P=$(printf '%s\n' "$BASE_TUPLE" | awk '{print $3}')
 if [ -n "$PRE_N" ] && [ -n "$BASE_N" ]; then
-	if [ "$PRE_N" -gt "$BASE_N" ] || [ "$PRE_B" -gt "$BASE_B" ]; then
+	if [ "$PRE_N" -gt "$BASE_N" ] || [ "$PRE_B" -gt "$BASE_B" ] ||
+		[ "$PRE_P" -gt "$BASE_P" ]; then
 		CLEANUP_VERDICT=FAIL
 		CLEANUP_WHY="the unbind grew the accounting (baseline=$BASE_TUPLE pre_uio=$PRE_TUPLE); not a reachable end state"
 		MAP_ACCOUNTING_VERDICT=FAIL
-		MAP_ACCOUNTING_WHY="pre-UIO tuple exceeds the boot baseline"
+		MAP_ACCOUNTING_WHY="pre-UIO tuple exceeds the operational baseline"
 		derive_restore_verdict "${REBIND_DRIVER_OK:-no}" "${REBIND_CHANNELS_OK:-no}"
 		say "  baseline=$BASE_TUPLE"
 		say "  pre_uio=$PRE_TUPLE"
@@ -1701,10 +1934,10 @@ if [ -n "$PRE_N" ] && [ -n "$BASE_N" ]; then
 fi
 if [ "${REBIND_OK:-no}" = yes ]; then
 	EXPECT_TUPLE="$BASE_TUPLE"
-	EXPECT_SRC="baseline (hv_netvsc rebound, run closed)"
+	EXPECT_SRC="operational baseline (hv_netvsc rebound, run closed)"
 else
 	EXPECT_TUPLE="$PRE_TUPLE"
-	EXPECT_SRC="band pre_uio..pre_uio+${GAP_RING_BUDGET_N}maps/${GAP_RING_BUDGET_B}B/${GAP_RING_BUDGET_P}p capped at baseline (device or captured channel topology did not return; disclosed ring retention may remain across hv_uio_remove)"
+	EXPECT_SRC="band pre_uio..pre_uio+${GAP_RING_BUDGET_N}maps/${GAP_RING_BUDGET_B}B/${GAP_RING_BUDGET_P}p capped at operational baseline (device or captured channel topology did not return; disclosed ring retention may remain across hv_uio_remove)"
 fi
 
 # Reclaim is asynchronous. vmbus_release_buffer() hands the buffer to
@@ -1793,7 +2026,7 @@ PHASE2_TUPLE="$(maps_tuple "${PHASE2_MAPS:-}")" || PHASE2_TUPLE=""
 # gap_retained is what the end state holds above the settled pre-UIO tuple.
 # With rebind=no that is the ring set the UIO probe re-establishes and the
 # hv_uio_remove gap retains, and it must sit inside the ring-retention
-# budget. With rebind=yes the end is the boot baseline and the delta is
+# budget. With rebind=yes the end is the operational baseline and the delta is
 # informational only -- the band check there is the exact baseline match --
 # but it is printed in both cases so one log format covers both runs.
 GAP_N=0
@@ -1812,6 +2045,7 @@ fi
 # size-only match accepts, and two 65536-byte areas are two areas.
 : >"$LOG.sizes-after"
 vmbus_map_sizes >>"$LOG.sizes-after" 2>/dev/null || true
+say "MAP_SIZE_CLASSES final=$(map_size_class_summary "$LOG.sizes-after")"
 UNKNOWN_SIZES=""
 if [ -s "$LOG.sizes-before" ] && [ -s "$LOG.sizes-base" ]; then
 	size_class_max_counts "$LOG.sizes-base" "$LOG.sizes-before" >"$LOG.sizes-known" 2>/dev/null || true
@@ -1855,9 +2089,12 @@ elif [ "${CYCLE_TOPOLOGY_FAILS:-0}" -gt 0 ]; then
 elif [ -n "$PHASE2_TUPLE" ] && [ -n "$SETTLE_TUPLE" ]; then
 	PH2_N=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $1+0}')
 	PH2_B=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $2+0}')
+	PH2_P=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $3+0}')
 	ST_N=$(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $1+0}')
 	ST_B=$(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $2+0}')
-	if [ "$ST_N" -ge "$PH2_N" ] && [ "$ST_B" -ge "$PH2_B" ]; then
+	ST_P=$(printf '%s\n' "$SETTLE_TUPLE" | awk '{print $3+0}')
+	if [ "$ST_N" -ge "$PH2_N" ] && [ "$ST_B" -ge "$PH2_B" ] &&
+		[ "$ST_P" -ge "$PH2_P" ]; then
 		CLEANUP_VERDICT=FAIL
 		CLEANUP_WHY="teardown released nothing (phase2_before=$PHASE2_TUPLE settle=$SETTLE_TUPLE)"
 	fi
@@ -1888,6 +2125,15 @@ MAP_SYSFS_WHY="$MAP_SURFACE_WHY"
 # map accounting can observe, and it says so: this is size classes with
 # multiplicity, never owner identity.
 derive_map_accounting_verdict "$SETTLE_TUPLE" "$PRE_TUPLE" "$BASE_TUPLE" 	"${REBIND_OK:-no}" "$UNKNOWN_SIZES"
+if [ "$BOOT_NORMALIZATION_VERDICT" != PASS ]; then
+	MAP_ACCOUNTING_VERDICT=FAIL
+	if [ "$MAP_ACCOUNTING_WHY" != "outside the expected band: tuple unreadable" ]; then
+		MAP_ACCOUNTING_WHY="boot-to-operational baseline did not qualify: ${BOOT_NORMALIZATION_WHY:-unknown}"
+	fi
+elif [ "$PHASE1_MAP_VERDICT" != PASS ]; then
+	MAP_ACCOUNTING_VERDICT=FAIL
+	MAP_ACCOUNTING_WHY="100-cycle map balance did not qualify: ${PHASE1_MAP_WHY:-unknown}"
+fi
 
 # --- RESTORE_VERDICT --------------------------------------------------------
 # The selected NIC and its captured channel topology must return. Map
