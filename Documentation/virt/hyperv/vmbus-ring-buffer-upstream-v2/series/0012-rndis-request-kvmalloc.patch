@@ -1,4 +1,4 @@
-From b9c7185833c2e346241804e813874a4a08c62e78 Mon Sep 17 00:00:00 2001
+From 8aaa299711cfe8d225bc4da64a1bbd7bcb0fb7b6 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Sun, 4 Oct 2026 17:20:17 -0300
 Subject: [PATCH v2 12/14] hv: netvsc: allocate RNDIS request descriptors with
@@ -544,3 +544,6 @@ index 000000000000..6affa916e74e
 +};
 +
 +kunit_test_suite(rndis_request_test_suite);
+-- 
+2.43.0
+

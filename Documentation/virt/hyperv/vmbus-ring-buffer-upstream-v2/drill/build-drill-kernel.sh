@@ -234,6 +234,7 @@ enable BINFMT_ELF
 enable BINFMT_SCRIPT
 enable MMU
 enable EXPERT
+enable ADVISE_SYSCALLS
 enable POSIX_TIMERS
 enable SYSVIPC
 

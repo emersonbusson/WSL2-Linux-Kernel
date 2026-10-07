@@ -1777,3 +1777,6 @@ index 096054fa07a3..90bdbacee054 100644
  void vmbus_release_buffer(struct vmbus_buffer *buffer);
  
  void vmbus_reset_channel_cb(struct vmbus_channel *channel);
+-- 
+2.43.0
+

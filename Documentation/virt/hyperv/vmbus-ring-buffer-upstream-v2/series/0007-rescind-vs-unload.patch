@@ -197,3 +197,6 @@ index 2878aed14c45..096054fa07a3 100644
  
  int vmbus_request_offers(void);
  
+-- 
+2.43.0
+

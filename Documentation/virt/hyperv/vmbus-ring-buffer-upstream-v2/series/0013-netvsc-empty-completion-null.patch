@@ -1,4 +1,4 @@
-From c443f00bf12d5aaae91d4029f3ffd396aa6a9c05 Mon Sep 17 00:00:00 2001
+From 6d4a2b5419528b78c58013c1d96ad65dae85bb04 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Sun, 4 Oct 2026 17:20:25 -0300
 Subject: [PATCH v2 13/14] hv: netvsc: handle a NULL request address on empty
@@ -668,3 +668,6 @@ index 000000000000..2614b1ece232
 +};
 +
 +kunit_test_suite(netvsc_completion_test_suite);
+-- 
+2.43.0
+

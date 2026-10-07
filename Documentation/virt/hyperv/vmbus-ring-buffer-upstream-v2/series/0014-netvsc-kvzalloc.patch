@@ -1,4 +1,4 @@
-From 324561babda3387f2abf55d6bcfddb56dd3e7945 Mon Sep 17 00:00:00 2001
+From f950d50cea3c3a9ce3a69bb81f58fb8bba4563eb Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 7 Oct 2026 00:27:45 -0300
 Subject: [PATCH v2 14/14] hv: netvsc: use kvzalloc for device state
@@ -44,3 +44,6 @@ index 0d017f836b9e..8ea7c993baac 100644
  	if (!net_device)
  		return NULL;
  
+-- 
+2.43.0
+

@@ -118,3 +118,6 @@ index 60fc526af1af..9b401ef2ceea 100644
  	KUNIT_CASE(vmbus_ring_fallback_order_zero_test),
  	KUNIT_CASE(vmbus_buffer_failed_teardown_leaks_test),
  	KUNIT_CASE(vmbus_buffer_partial_allocation_cleanup_test),
+-- 
+2.43.0
+

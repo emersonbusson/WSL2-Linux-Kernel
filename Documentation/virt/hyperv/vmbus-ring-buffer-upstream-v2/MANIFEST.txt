@@ -1,9 +1,9 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: intentional TDD RED for requestor-array and bitmap backing awaits KUnit CI; no mail sent.
+Status: requestor array and bitmap now use vmalloc backing; fresh mainline and drill workflows are pending. No mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
-Mainline reconstructed tip: 3016a5000316b9f4af1ce576c6bfb9bb180246a1
-Expected applied source tree: 3325d73e744dbbd3b9ae23695b86c415a6d0a6ee
+Mainline reconstructed tip: f950d50cea3c3a9ce3a69bb81f58fb8bba4563eb
+Expected applied source tree: e6fe523ca92ce30ea7edb265b8a26bf20a867c47
 Shape: fourteen code mails plus one scoped review cover. Nothing sent.
 The WSL backport and its native/local results are distinct from mainline.
 The original withdrawn mail package is not modified by this CI snapshot.
@@ -25,26 +25,32 @@ ef973e71e2843a5b35f336d345ab88450b51447601eb9452014f3c359359000b  0013-netvsc-em
 1c6319d56d5fe204d5f5e6717dc6242d8903d88610f64b0a11999656b7a5f150  0014-netvsc-kvzalloc.patch
 
 CURRENT SERIES MAIL SHA-256 (pinned by series/SHA256SUMS)
-787ba98b14f38ea32e51ba48e2b97af389a64d44d88dd4c94e46e04093ae81d7  0001-ring-allocation.patch
-c91147e04a598e7d1fc728b5ab97f8cd3172f97d8cb6f1f74d0b853a7902b453  0002-allocation-safety.patch
-eb93ecd3c919bee60607b8cbc294db0f6e8aece05fc7c50d6d69db387d76e16a  0003-uio-owner.patch
-7067a229839f8b5e7c6397ca8ff57b6c640bd54be62bce40b382642ebffce128  0004-gpadl-fault-injection.patch
-adb7f1ae697a3b629b61bd8874c956f8a2c853a50aa8e2e3ac6deab00e7f7331  0005-order-zero-fallback-injection.patch
-230c8cd47d7826bad1c3763e2a31c4bdb48a960702b5cd84e944fecd0ae9b78b  0006-shared-page-test.patch
-f33e0e93b5c76ecb817957a8b7c567c2bb3f4f07ff1a3ed04a9badd6d90c2c73  0007-rescind-vs-unload.patch
-7aa78344410ac0ddf533508a8b450f5264d33d06b7e681829186d17e78ede1b9  0008-buffer-ownership.patch
-33358104ecb6a34e4926f38273d46e2cd5c9badaa5dd397ae4af83af8e1c6806  0009-alloc-buffer-prototype.patch
-88e6c3920a567fa34e5f7b16495c06348a7a9c02ad39fb4ae01b2d3a23fc31b1  0010-uio-mmap-pin.patch
-ae42c6714aa4ac9f5e922c58e8e1fc0b1fdee8b233689e8095d0da25254952d5  0011-requestor-kvcalloc.patch
-e67c37f2c45f3f89e77b3a61a48eba2d007083dea6bdc404531ece0d266e2a03  0012-rndis-request-kvmalloc.patch
-a7137c5dd0d815e3ae591b4fc65e90c3e6554f4388676e13e32e3fe7e96cf88e  0013-netvsc-empty-completion-null.patch
-544aabd7cae323d70fded8ea53ddc516721e49edd4d8824ac61c157c4753e018  0014-netvsc-kvzalloc.patch
+a68bc3b59e2d815c2b6cf62850f50f4f9b80e0850ea2595d17931faf75c630f4  0001-ring-allocation.patch
+435d7497d1d97a4dff70b60c1dd1352c29d059d13f8e4f10dd562f92fc509f73  0002-allocation-safety.patch
+79f7c12e596e0f403109a629a17479840ecda1d0d1a672e93d2fd6b668ebec93  0003-uio-owner.patch
+941e9f40e66f15a87cc4022a86c129fa653812c6d8f1bace1afa87cce7660b97  0004-gpadl-fault-injection.patch
+b7726dc6be3cb5fd025ee630edfc7fb956dd2c34991936edd30c523c280089a7  0005-order-zero-fallback-injection.patch
+0c68071c98d7cd167539497e78b36c144b3e673ca1e797d988d71b03676d4b14  0006-shared-page-test.patch
+6ddf655ed4f14ce10040a5f48319703730baafe883a7326ee951f2d398272082  0007-rescind-vs-unload.patch
+a25684af8c9b1bba67b649eacf89160cc0184182c2dcaf565c8ff884150d338f  0008-buffer-ownership.patch
+97e7ec6b6c406203a9b1871025a27e97d0c0ede8b42100a13b50afd68fab6e92  0009-alloc-buffer-prototype.patch
+f03fe47161aef80b33d1cf619efb170733d0076b3794498dbe48f7f329a36984  0010-uio-mmap-pin.patch
+d00887b49ccd8edf654328cd7cc9e6b5fe3320222fc66d4f60de20ed656512fc  0011-requestor-vmalloc.patch
+4a6b943d042c9ab94b1665c9301b6a7e402e69a446ebfc7827d2ccf7760c0f9f  0012-rndis-request-kvmalloc.patch
+5dcd739bfa3115f24b20ca6e200ba3c62484a95006bcd6449c496de81fea7478  0013-netvsc-empty-completion-null.patch
+27dac0e6c6a96df3eb2409a2c792de9c453f71f3fe3dc1407cb6606d78f06ac9  0014-netvsc-kvzalloc.patch
+TDD RED runs retained as regression evidence, not qualification:
+37585672952 and 37588106938 exercised the new vmalloc-backing assertions
+before the allocator fix. Their KUnit failures were expected; the WSL
+backport, mainline builds, and CoCo checks passed in the completed legs.
+The final source tree changes both requestor allocations to vzalloc(); it
+requires a fresh complete green workflow before qualification.
 
 PRE-CORRECTION COVER SHA-256
 1cb3fe228d6dc175c194d97a3c529a860bc63b1a157d7020d763a400d9619b61  0000-cover-letter.patch
 
 PRODUCTION COVER SHA-256 (current review text)
-9b385a3a729351569060ce0df7f2a12b030b848019b093931bde0095e69624d0  0000-cover-letter.patch
+7e95f21289127455b0ae512fc6fcbd515f6a988127effe21b6dcde621776268f  0000-cover-letter.patch
 
 Historical thirteen-patch evidence only; it does not qualify patch 0014.
 MEASURED SCOPE

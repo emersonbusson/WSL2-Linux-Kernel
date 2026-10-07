@@ -33,7 +33,7 @@ index 888a748cc7cb..80d33e9c0e57 100644
  mshv_root-y := mshv_root_main.o mshv_synic.o mshv_eventfd.o mshv_irq.o \
  	       mshv_root_hv_call.o mshv_portid_table.o mshv_regions.o
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
-index 7e4cc6f55237..bc5311427509 100644
+index 7e4cc6f55237..c7f3f5c6c0d2 100644
 --- a/drivers/hv/channel.c
 +++ b/drivers/hv/channel.c
 @@ -12,6 +12,8 @@
@@ -1174,50 +1174,68 @@ index 7e4cc6f55237..bc5311427509 100644
  }
  EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
  
-@@ -767,14 +1411,22 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
+@@ -767,14 +1411,26 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
   * keeps track of the next available slot in the array. Initially, each
   * slot points to the next one (as in a Linked List). The last slot
   * does not point to anything, so its value is U64_MAX by default.
 + *
-+ * Allocated with kvcalloc() rather than kcalloc(). @size is derived from
-+ * the ring size (netvsc_rqstor_size()) and at the default ring_size of
-+ * 128 pages the array exceeds 256 KiB, so kcalloc() asks for an order-7
-+ * compound page and fails outright under buddy fragmentation. The array
-+ * is guest-private request bookkeeping -- the host never sees the slot
-+ * values -- so a vmalloc-backed mapping carries no Confidential
++ * Allocated with vzalloc() rather than kvcalloc(). kvcalloc() can use a
++ * higher-order kmalloc allocation for arrays up to KMALLOC_MAX_SIZE, so
++ * both small requestor arrays and the default 128-page ring array may need
++ * contiguous pages while opening a channel under buddy fragmentation. The
++ * array is guest-private request bookkeeping -- the host never sees the
++ * slot values -- so a vmalloc-backed mapping carries no Confidential
 + * Computing implication and needs no set_memory_decrypted().
   * @size: The size of the array
   */
 -static u64 *request_arr_init(u32 size)
 +u64 *request_arr_init(u32 size)
  {
- 	int i;
+-	int i;
++	size_t bytes;
++	u32 i;
  	u64 *req_arr;
  
 -	req_arr = kcalloc(size, sizeof(u64), GFP_KERNEL);
-+	req_arr = kvcalloc(size, sizeof(u64), GFP_KERNEL);
++	if (!size || check_mul_overflow((size_t)size, sizeof(*req_arr), &bytes))
++		return NULL;
++
++	req_arr = vzalloc(bytes);
  	if (!req_arr)
  		return NULL;
  
-@@ -792,7 +1444,7 @@ static u64 *request_arr_init(u32 size)
+@@ -792,8 +1448,9 @@ static u64 *request_arr_init(u32 size)
   * Index 0 is the first free slot
   * @size: Size of the requestor array
   */
 -static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
 +int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  {
++	size_t bitmap_longs, bitmap_bytes;
  	u64 *rqst_arr;
  	unsigned long *bitmap;
-@@ -803,7 +1455,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  
- 	bitmap = bitmap_zalloc(size, GFP_KERNEL);
+@@ -801,9 +1458,17 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+ 	if (!rqst_arr)
+ 		return -ENOMEM;
+ 
+-	bitmap = bitmap_zalloc(size, GFP_KERNEL);
++	bitmap_longs = size / BITS_PER_LONG;
++	if (size % BITS_PER_LONG)
++		bitmap_longs++;
++	if (check_mul_overflow(bitmap_longs, sizeof(*bitmap), &bitmap_bytes)) {
++		vfree(rqst_arr);
++		return -ENOMEM;
++	}
++
++	bitmap = vzalloc(bitmap_bytes);
  	if (!bitmap) {
 -		kfree(rqst_arr);
-+		kvfree(rqst_arr);
++		vfree(rqst_arr);
  		return -ENOMEM;
  	}
  
-@@ -820,9 +1472,9 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+@@ -820,10 +1485,10 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
   * vmbus_free_requestor - Frees memory allocated for @rqstor
   * @rqstor: Pointer to the requestor struct
   */
@@ -1225,11 +1243,13 @@ index 7e4cc6f55237..bc5311427509 100644
 +void vmbus_free_requestor(struct vmbus_requestor *rqstor)
  {
 -	kfree(rqstor->req_arr);
-+	kvfree(rqstor->req_arr);
- 	bitmap_free(rqstor->req_bitmap);
+-	bitmap_free(rqstor->req_bitmap);
++	vfree(rqstor->req_arr);
++	vfree(rqstor->req_bitmap);
  }
  
-@@ -832,7 +1484,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -832,7 +1497,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  {
  	struct vmbus_channel_open_channel *open_msg;
  	struct vmbus_channel_msginfo *open_info = NULL;
@@ -1238,7 +1258,7 @@ index 7e4cc6f55237..bc5311427509 100644
  	u32 send_pages, recv_pages;
  	unsigned long flags;
  	int err;
-@@ -860,22 +1512,22 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -860,22 +1525,22 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  		newchannel->max_pkt_size = VMBUS_DEFAULT_MAX_PKT_SIZE;
  
  	/* Establish the gpadl for the ring buffer */
@@ -1268,7 +1288,7 @@ index 7e4cc6f55237..bc5311427509 100644
  				 recv_pages, newchannel->max_pkt_size,
  				 newchannel->co_ring_buffer);
  	if (err)
-@@ -897,8 +1549,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -897,8 +1562,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  	open_msg->header.msgtype = CHANNELMSG_OPENCHANNEL;
  	open_msg->openid = newchannel->offermsg.child_relid;
  	open_msg->child_relid = newchannel->offermsg.child_relid;
@@ -1278,7 +1298,7 @@ index 7e4cc6f55237..bc5311427509 100644
  	/*
  	 * The unit of ->downstream_ringbuffer_pageoffset is HV_HYP_PAGE and
  	 * the unit of ->ringbuffer_send_offset (i.e. send_pages) is PAGE, so
-@@ -956,7 +1607,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
+@@ -956,7 +1620,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
  error_free_info:
  	kfree(open_info);
  error_free_gpadl:
@@ -1287,7 +1307,7 @@ index 7e4cc6f55237..bc5311427509 100644
  error_clean_ring:
  	hv_ringbuffer_cleanup(&newchannel->outbound);
  	hv_ringbuffer_cleanup(&newchannel->inbound);
-@@ -1002,71 +1653,164 @@ EXPORT_SYMBOL_GPL(vmbus_open);
+@@ -1002,71 +1666,164 @@ EXPORT_SYMBOL_GPL(vmbus_open);
  /*
   * vmbus_teardown_gpadl -Teardown the specified GPADL handle
   */
@@ -1422,7 +1442,8 @@ index 7e4cc6f55237..bc5311427509 100644
 +		if (owner)
 +			vmbus_buffer_update_host_ownership(owner, true);
 +	}
-+
+ 
+-	gpadl->decrypted = ret;
 +	return ret;
 +}
 +
@@ -1449,8 +1470,7 @@ index 7e4cc6f55237..bc5311427509 100644
 +					  &vmbus_connection,
 +					  vmbus_gpadl_teardown_post_real, 5 * HZ);
 +}
- 
--	gpadl->decrypted = ret;
++
 +int vmbus_teardown_gpadl_owned(struct vmbus_channel *channel,
 +			       struct vmbus_buffer *buffer)
 +{
@@ -1492,7 +1512,7 @@ index 7e4cc6f55237..bc5311427509 100644
  
  	return ret;
  }
-@@ -1142,8 +1886,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
+@@ -1142,8 +1899,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
  	}
  
  	/* Tear down the gpadl for the channel's ring buffer */
@@ -1691,7 +1711,7 @@ index c02a1719e92f..a3eeb817b00e 100644
  	TP_PROTO(const struct vmbus_channel_message_header *hdr),
  	TP_ARGS(hdr),
 diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
-index 33923621a5a3..cac6011949a0 100644
+index 33923621a5a3..9819a6b686ce 100644
 --- a/drivers/hv/hyperv_vmbus.h
 +++ b/drivers/hv/hyperv_vmbus.h
 @@ -204,8 +204,8 @@ extern int hv_synic_cleanup(unsigned int cpu);
@@ -1816,9 +1836,9 @@ index 33923621a5a3..cac6011949a0 100644
 +/*
 + * Requestor array lifetime helpers, shared with vmbus_buffer_test.c for
 + * the same reason as the sizing helpers. Defined in channel.c, unexported.
-+ * request_arr_init() returns a kvcalloc()ed array the caller must kvfree();
-+ * vmbus_alloc_requestor() pairs that with a bitmap and takes ownership of
-+ * both on success.
++ * request_arr_init() returns a vmalloc-backed array the caller must vfree();
++ * vmbus_alloc_requestor() owns both vmalloc-backed objects on success, and
++ * vmbus_free_requestor() releases them.
 + */
 +u64 *request_arr_init(u32 size);
 +int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size);
@@ -1856,10 +1876,10 @@ index 592a9601faaa..16b1c2910789 100644
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
 new file mode 100644
-index 000000000000..9df9b2532976
+index 000000000000..d0102dabef73
 --- /dev/null
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -0,0 +1,978 @@
+@@ -0,0 +1,976 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * KUnit tests for Hyper-V VMBus buffer allocation and GPADL lifetime.
@@ -2640,16 +2660,12 @@ index 000000000000..9df9b2532976
 +}
 +
 +/*
-+ * Requestor array regressions for the kvcalloc() conversion (patch 0011).
-+ *
-+ * The requestor is guest-private bookkeeping: the host never sees the slot
-+ * values, so a vmalloc-backed array is correct here and needs no
-+ * set_memory_decrypted(). kvcalloc() still prefers kmalloc for arrays up to
-+ * KMALLOC_MAX_SIZE, while bitmap_zalloc() always uses kmalloc. Either can
-+ * require a higher-order compound page while opening a channel under
-+ * fragmentation. Require vmalloc backing for a typical 8 KiB array, a
-+ * requestor whose bitmap exceeds one page, and a size beyond
-+ * KMALLOC_MAX_SIZE, without memory pressure.
++ * Requestor metadata must use vmalloc backing because both the array and its
++ * bitmap can require multiple pages. The requestor is guest-private
++ * bookkeeping: the host never sees the slot values, so this mapping has no
++ * Confidential Computing implication and needs no set_memory_decrypted().
++ * Cover a typical 8 KiB array, a requestor whose bitmap exceeds one page,
++ * and a size beyond KMALLOC_MAX_SIZE without memory pressure.
 + */
 +static void vmbus_requestor_alloc_free_test(struct kunit *test)
 +{
@@ -2673,9 +2689,9 @@ index 000000000000..9df9b2532976
 +static void vmbus_requestor_vmalloc_backing_test(struct kunit *test)
 +{
 +	/*
-+	 * The small array models channel-open requestors and exposes the
-+	 * kmalloc-first path in kvcalloc(). The large allocation checks that
-+	 * the fallback remains vmalloc-backed above KMALLOC_MAX_SIZE.
++	 * Cover the small array, a requestor whose bitmap exceeds one page,
++	 * and a size beyond KMALLOC_MAX_SIZE. All requestor metadata must use
++	 * vmalloc backing regardless of size or allocator pressure.
 +	 */
 +	u32 small_size = 1024;
 +	u32 bitmap_size = (PAGE_SIZE / sizeof(unsigned long)) * BITS_PER_LONG + 1;
@@ -2683,19 +2699,21 @@ index 000000000000..9df9b2532976
 +	struct vmbus_requestor rqstor = {};
 +	u64 *req_arr;
 +
++	KUNIT_EXPECT_PTR_EQ(test, request_arr_init(0), NULL);
++
 +	req_arr = request_arr_init(small_size);
 +	KUNIT_ASSERT_NOT_NULL(test, req_arr);
 +	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
 +	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
 +	KUNIT_EXPECT_EQ(test, req_arr[small_size - 1], U64_MAX);
-+	kvfree(req_arr);
++	vfree(req_arr);
 +
 +	req_arr = request_arr_init(size);
 +	KUNIT_ASSERT_NOT_NULL(test, req_arr);
 +	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
 +	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
 +	KUNIT_EXPECT_EQ(test, req_arr[size - 1], U64_MAX);
-+	kvfree(req_arr);
++	vfree(req_arr);
 +
 +	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(&rqstor, bitmap_size), 0);
 +	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(rqstor.req_arr));

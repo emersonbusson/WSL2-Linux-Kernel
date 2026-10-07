@@ -262,3 +262,6 @@ index 90bdbacee054..0f482ed5c776 100644
  
  extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
  				u32 size,
+-- 
+2.43.0
+

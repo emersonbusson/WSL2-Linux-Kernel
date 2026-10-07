@@ -95,6 +95,12 @@ Event tracing is enabled for opaque owner accounting from boot. Function
 tracing remains disabled. Missing metadata or trace loss makes accounting
 PARTIAL.
 
+`ADVISE_SYSCALLS` is enabled and verified because the fragmentation helper
+uses `madvise(MADV_DONTNEED_LOCKED)` to return only verified order-0 pages
+without splitting VMAs. The previous tinyconfig image omitted this syscall,
+so recovery returned `ENOSYS`; the memory reserve and fragmentation limits
+remain unchanged.
+
 The command line is baked in with `CMDLINE_OVERRIDE`:
 
 ```
