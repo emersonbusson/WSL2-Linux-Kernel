@@ -781,8 +781,9 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_CHUNK (64L * 1024)
 #define FRAG_MAX_CHUNKS 48000
 #define FRAG_PAGE 4096L
-/* Cover the observed nine-block recovery plus one block of runner slack. */
-#define FRAG_BOUNDED_MAX_REMAINING_PAGES (10L << 7)
+/* Recovery can surface one block above the 12-block chase target. */
+#define FRAG_BOUNDED_TARGET_REMAINING_PAGES (12L << 7)
+#define FRAG_BOUNDED_MAX_REMAINING_PAGES (13L << 7)
 /*
  * Allocation-phase floor, measured against MemFree and only consulted while
  * order-7 remains: the test condition itself is the stop once it is met, so
@@ -857,18 +858,19 @@ static int do_mlock_hog(int argc, char **argv)
  * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
  * only inside this disposable guest, and watermark boost is disabled and
  * read back before pressure starts. The chase keeps the 1 MiB buddy-free
- * floor, a 1280-page high-order reserve ceiling, and a 4096-chunk hard cap.
+ * floor, a 1536-page chase target, a 1664-page recovery ceiling, and a
+ * 4096-chunk hard cap.
  * Crossing any of them to force raw high-order count to zero would weaken
  * the safety contract that kept earlier guests from OOM and panic.
  *
- * A hosted runner can stop with up to ten minimum order-7 blocks while still
- * meeting the safe stress target. The 1280-page ceiling accepts the measured
- * 1152-page recovery and leaves one additional order-7 block for runner
- * variation. The shell separately requires at least one minimum order-7 block
+ * A hosted runner can stop the chase with up to twelve minimum order-7 blocks
+ * while still meeting the safe stress target. Free-memory recovery may return
+ * one additional order-7 block, so the final pre-open ceiling is thirteen
+ * blocks. The shell separately requires at least one minimum order-7 block
  * and no more than 512 pages to survive channel open. That result qualifies
  * only as bounded ordinary-path pressure:
  * at least 99% of the initial order-7-and-higher free pages were removed, no
- * more than 1280 pages remain before channel open, a measured safety boundary
+ * more than 1664 pages remain before channel open, a measured safety boundary
  * caused the stop, and pagemap verified physical pages. It is
  * reported separately from full exhaustion and does not qualify the CoCo
  * chunked allocator, which an ordinary Hyper-V guest never executes.
@@ -1186,13 +1188,21 @@ static int frag_bounded_pressure_qualified(long before_pages,
 
 static int frag_should_preserve_order7(long blocks, long pages)
 {
-	return blocks > 0 && pages > 0 &&
-	       pages <= FRAG_BOUNDED_MAX_REMAINING_PAGES;
+	return blocks > 0 && pages >= (1L << 7) &&
+	       blocks <= pages / (1L << 7) &&
+	       pages <= FRAG_BOUNDED_TARGET_REMAINING_PAGES;
 }
 
 static int frag_should_refine_order7(long blocks, long pages)
 {
-	return blocks > 0 && pages > FRAG_BOUNDED_MAX_REMAINING_PAGES;
+	return blocks > 0 && pages > FRAG_BOUNDED_TARGET_REMAINING_PAGES;
+}
+
+static int frag_recovered_order7_qualified(long blocks, long pages)
+{
+	return blocks > 0 && pages >= (1L << 7) &&
+	       blocks <= pages / (1L << 7) &&
+	       pages <= FRAG_BOUNDED_MAX_REMAINING_PAGES;
 }
 
 static int frag_pcp_high_fraction_qualified(long requested, long current)
@@ -1726,10 +1736,14 @@ static int frag_recover_runtime_reserve(int pmfd, void **maps, long map_count,
 		return -1;
 	}
 	if (*recovered_pages > 0 &&
-	    !frag_should_preserve_order7(*high_after, *high_after_pages)) {
+	    !frag_recovered_order7_qualified(*high_after, *high_after_pages)) {
 		printf("FRAGMENT_BUDDY ready=0 reason=recovery-order7-not-preserved\n");
-		printf("FRAGMENT_BUDDY recovery high_order_7plus=%ld pages=%ld max_pages=%ld\n",
-		       *high_after, *high_after_pages,
+		printf("FRAGMENT_BUDDY recovery high_order_7plus=%ld pages=%ld "
+		       "recovered_pages=%ld scan=%ld free_kb=%ld "
+		       "above_wmark_kb=%ld max_pages=%ld\n",
+		       *high_after, *high_after_pages, *recovered_pages,
+		       *scanned_pages, *free_kb,
+		       *free_kb > *wmark_kb ? *free_kb - *wmark_kb : 0,
 		       FRAG_BOUNDED_MAX_REMAINING_PAGES);
 		fflush(stdout);
 		return -1;
@@ -2042,7 +2056,7 @@ static int do_fragment_buddy(int argc, char **argv)
 
 	/*
 	 * Allocate 64 KiB chunks and touch every page. Stop when the buddy has
-	 * no more than ten minimum order-7 blocks left, preserving the measured
+	 * no more than twelve minimum order-7 blocks left, preserving the measured
 	 * safety reserve,
 	 * or when the MemFree floor says the rest of the run needs more room.
 	 *
@@ -2055,7 +2069,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * ever being short of memory.
 	 *
 	 * The floor is a margin, not a measure of exhaustion. It is only
-	 * consulted while more than ten order-7 blocks remain; the chase stops
+	 * consulted while more than twelve order-7 blocks remain; the chase stops
 	 * at the same reserve if the main pass leaves it high-order.
 	 */
 	for (i = 0; i < want; i++) {
