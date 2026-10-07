@@ -1856,10 +1856,10 @@ index 592a9601faaa..16b1c2910789 100644
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
 new file mode 100644
-index 000000000000..be4e5f7cb433
+index 000000000000..9df9b2532976
 --- /dev/null
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -0,0 +1,969 @@
+@@ -0,0 +1,978 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * KUnit tests for Hyper-V VMBus buffer allocation and GPADL lifetime.
@@ -2644,10 +2644,12 @@ index 000000000000..be4e5f7cb433
 + *
 + * The requestor is guest-private bookkeeping: the host never sees the slot
 + * values, so a vmalloc-backed array is correct here and needs no
-+ * set_memory_decrypted(). kvcalloc() still prefers kmalloc for small arrays,
-+ * though, which can require a higher-order compound page while opening a
-+ * channel under fragmentation. Require vmalloc backing for both a typical
-+ * 8 KiB array and a size beyond KMALLOC_MAX_SIZE, without memory pressure.
++ * set_memory_decrypted(). kvcalloc() still prefers kmalloc for arrays up to
++ * KMALLOC_MAX_SIZE, while bitmap_zalloc() always uses kmalloc. Either can
++ * require a higher-order compound page while opening a channel under
++ * fragmentation. Require vmalloc backing for a typical 8 KiB array, a
++ * requestor whose bitmap exceeds one page, and a size beyond
++ * KMALLOC_MAX_SIZE, without memory pressure.
 + */
 +static void vmbus_requestor_alloc_free_test(struct kunit *test)
 +{
@@ -2676,7 +2678,9 @@ index 000000000000..be4e5f7cb433
 +	 * the fallback remains vmalloc-backed above KMALLOC_MAX_SIZE.
 +	 */
 +	u32 small_size = 1024;
++	u32 bitmap_size = (PAGE_SIZE / sizeof(unsigned long)) * BITS_PER_LONG + 1;
 +	u32 size = (KMALLOC_MAX_SIZE / sizeof(u64)) + 1;
++	struct vmbus_requestor rqstor = {};
 +	u64 *req_arr;
 +
 +	req_arr = request_arr_init(small_size);
@@ -2692,6 +2696,11 @@ index 000000000000..be4e5f7cb433
 +	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
 +	KUNIT_EXPECT_EQ(test, req_arr[size - 1], U64_MAX);
 +	kvfree(req_arr);
++
++	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(&rqstor, bitmap_size), 0);
++	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(rqstor.req_arr));
++	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(rqstor.req_bitmap));
++	vmbus_free_requestor(&rqstor);
 +}
 +
 +static void vmbus_requestor_id_lifecycle_test(struct kunit *test)

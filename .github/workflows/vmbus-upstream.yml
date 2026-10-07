@@ -361,7 +361,7 @@ jobs:
           test "$stage" -eq 14
           git -C linux add -- drivers/hv drivers/net/hyperv drivers/uio include/linux/hyperv.h
           git -C linux write-tree > vmbus-artifacts/final-source-tree.txt
-          test "$(cat vmbus-artifacts/final-source-tree.txt)" = e2c0e19b272eddb8e0ca89c7d560b69fe13afea2
+          test "$(cat vmbus-artifacts/final-source-tree.txt)" = 3325d73e744dbbd3b9ae23695b86c415a6d0a6ee
           for symbol in \
             vmbus_alloc_buffer \
             vmbus_free_buffer \
