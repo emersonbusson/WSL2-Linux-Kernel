@@ -1,6 +1,6 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Historical status (pre-final qualification): run 37590726170 stopped x86_64 and arm64 at strict checkpatch because patch 0011 lacked Signed-off-by; this was not a compile or test result. The sign-off and mail hash are corrected. Test-only WSL run 37591286755 confirmed the zero-size requestor Oops; the candidate now includes zero-size rejection, vmalloc-safe RNDIS GPAs, and kvzalloc-backed NetVSC state. Final green validation remains pending. No mail sent.
+Historical failed runs 37590726170 and 37591286755 remain recorded below. The sign-off correction, zero-size requestor rejection, vmalloc-safe RNDIS GPAs, and kvzalloc-backed NetVSC state are in the current fourteen-mail candidate. Current qualification and the outgoing dry-run are recorded below. No mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
 Mainline reconstructed tip: f950d50cea3c3a9ce3a69bb81f58fb8bba4563eb
 Expected applied source tree: e6fe523ca92ce30ea7edb265b8a26bf20a867c47
@@ -140,7 +140,8 @@ disposable VM/VHD/switch cleanup passes.
 The baseline runtime is an intentional negative control. It reproduces the
 expected fragmentation failure without guest faults; the runtime policy
 accepts that exact signature and the baseline job passes. It is not a
-candidate failure.
+candidate failure. This single scenario-specific control is not a matched
+same-configuration diagnostic-count comparison for every patch in the series.
 
 Qualification remains deliberately scoped. Runtime coverage is ordinary
 x86_64 Hyper-V and uses the vzalloc path. Full memory saturation, confidential
@@ -158,14 +159,24 @@ All fourteen code mails are sequentially numbered and pinned by
 series/SHA256SUMS. The From and Signed-off-by identities match in 14/14
 patches; no prohibited authorship trailers are present. Existing Fixes tags in
 0012 and 0013 resolve to commit objects 5b54dac856cb and 8b31f8c982b7.
-The combined series diff routes to linux-hyperv, netdev, and linux-kernel,
-with maintainers David S. Miller, K. Y. Srinivasan, Andrew Lunn, Dexuan Cui,
-Eric Dumazet, Greg Kroah-Hartman, Haiyang Zhang, Jakub Kicinski, Long Li,
-Paolo Abeni, and Wei Liu. No mail has been sent.
+Direct To: Michael Kelley <mhklinux@outlook.com>, using the address present in
+recent public Linux review traffic. The combined source diff's current
+get_maintainer.pl output routes Cc to linux-hyperv, netdev, linux-kernel, and
+K. Y. Srinivasan, Haiyang Zhang, Wei Liu, Dexuan Cui, Andrew Lunn, David S.
+Miller, Eric Dumazet, Jakub Kicinski, Paolo Abeni, and Greg Kroah-Hartman.
+Long Li is not selected by the path-based result and is not included.
+
+The explicit-recipient git send-email dry-run returns Result: OK for the
+cover and all fourteen patches. Every patch is threaded under the cover; no
+prior In-Reply-To is used. Automatic Cc discovery is suppressed. The
+invocation blanked stored SMTP credentials and used /bin/false as the SMTP
+endpoint, so it could not send. The local dry-run log SHA-256 is
+047f712f0e12c65491695fd18123d358c5fbd03969e550c3135ea2a42faf6b76.
+No mail has been sent.
 
 The strict checkpatch gate reports zero errors. Its remaining generic
 added-file/MAINTAINERS warnings concern the new KUnit files; the maintainer
 routing above resolves through their existing driver sections.
 
 CURRENT OUTGOING COVER SHA-256
-9cb636acba67bb46745df6b10980980d6f4515fc7b062bc6d39a9acfcf233ee7  0000-cover-letter.patch
+79a435e52d53bbbf1df99c5af9747455eb99d59ecdd06538a3e56b8a58ed7627  0000-cover-letter.patch

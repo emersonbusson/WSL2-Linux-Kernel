@@ -113,8 +113,12 @@ The Hyper-V runtime uses the ordinary x86_64 vzalloc path. It does not
 execute confidential chunk transitions. Full memory saturation, the
 chunked CoCo fallback on hardware, SEV-SNP, TDX without a paravisor, Arm
 CCA, and complete VMBus module unload and retained-owner destruction remain
-unqualified. No confidential-platform result is inferred from ordinary
-Hyper-V or static checks.
+unqualified. The exact mainline series has not been installed or booted on
+the daily WSL host; the installed kernel and Windows WSL matrix are a separate
+backport. The baseline is one intentional fragmentation negative control,
+not a matched same-configuration diagnostic-count comparison for every patch.
+No confidential-platform result is inferred from ordinary Hyper-V or static
+checks.
 
 ---
 Emerson Busson (14):

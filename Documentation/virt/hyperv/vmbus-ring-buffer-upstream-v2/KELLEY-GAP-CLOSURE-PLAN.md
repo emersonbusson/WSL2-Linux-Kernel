@@ -18,11 +18,20 @@ present in patches 0012 and 0013 resolve to commits in the source repository.
 Strict checkpatch has zero errors; the remaining warnings are the generic
 new-file/MAINTAINERS notices for the added KUnit files.
 
+The current recipient audit targets Michael Kelley at
+mhklinux@outlook.com and Cc's only the path-based get_maintainer.pl result.
+The dry-run returns Result: OK for all fifteen messages, threads every patch
+under the cover, and uses /bin/false with stored SMTP credentials blanked.
+Its local log SHA-256 is
+047f712f0e12c65491695fd18123d358c5fbd03969e550c3135ea2a42faf6b76.
+
 The package is ready for maintainer review with these explicit limits:
 confidential hardware transitions, full saturation, and complete VMBus
-module unload/retained-owner destruction remain unqualified. The separate
-local WSL candidate remains uninstalled pending a safe maintenance window.
-No e-mail has been sent.
+module unload/retained-owner destruction remain unqualified. The exact
+mainline series remains uninstalled on the daily WSL host; only a separate
+backport was installed there. The baseline is a single fragmentation negative
+control, not a matched same-configuration diagnostic-count comparison for all
+fourteen patches. No e-mail has been sent.
 
 # Corrected VMBus validation plan
 
