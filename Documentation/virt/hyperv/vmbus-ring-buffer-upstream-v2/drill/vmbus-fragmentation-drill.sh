@@ -66,6 +66,28 @@ fragment_order7_reserve_qualified() {
 	[ $(( $2 % 128 )) -eq 0 ] && [ "$2" -ge $(( $1 * 128 )) ]
 }
 
+fragment_nic_topology_fixtures() {
+	local root
+	root="$(mktemp -d /tmp/vmbus-fragment-nic-fixture.XXXXXX)"
+	mkdir -p "$root/channels/14" "$root/channels/15" \
+		"$root/channels/uevent"
+	: >"$root/channels/readme"
+	if ! fragment_count_nic_channels "$root"; then
+		rm -rf "$root"
+		return 1
+	fi
+	if [ "$FRAG_NIC_CHANNEL_COUNT" -ne 2 ] ||
+		! fragment_nic_topology_qualified 2 "$FRAG_NIC_CHANNEL_COUNT" ||
+		fragment_nic_topology_qualified 2 1 ||
+		fragment_nic_topology_qualified 1 1 ||
+		fragment_nic_topology_qualified invalid 2; then
+		rm -rf "$root"
+		return 1
+	fi
+	rm -rf "$root"
+	return 0
+}
+
 if [ "${1:-}" = --self-test ]; then
 	if fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1 exhausted=0 pagemap=1' &&
 		! fragment_pattern_ready no 'FRAGMENT_BUDDY ready=1 bounded=1 exhausted=0 pagemap=1' &&
@@ -81,6 +103,7 @@ if [ "${1:-}" = --self-test ]; then
 		! fragment_order7_reserve_qualified 4 127 &&
 		! fragment_order7_reserve_qualified 4 513 &&
 		! fragment_order7_reserve_qualified 5 512 &&
+		fragment_nic_topology_fixtures &&
 		fragment_restore_values_valid 65530 5696 15000 0 &&
 		! fragment_restore_values_valid 65530 5696 invalid 0 &&
 		! fragment_restore_values_valid 65530 5696 15000 invalid &&
