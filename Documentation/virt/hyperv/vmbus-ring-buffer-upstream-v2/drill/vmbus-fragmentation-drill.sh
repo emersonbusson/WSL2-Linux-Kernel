@@ -29,8 +29,9 @@
 #            64 KiB chunks, targeting 1536 measured high-order pages before
 #            recovery and allowing at most 1664 pages in the final pre-open
 #            reserve. It then discards pages with proven held buddies.
-#            Recovery may expose one additional order-7 block. The stricter
-#            128-to-512-page post-open band remains unchanged.
+#            Recovery may expose one additional order-7 block. After channel
+#            open, at most 512 order-7+ pages may remain; if that count reaches
+#            zero, at least 32 MiB must remain free across all buddy orders.
 #
 # Depends on vmbus_drill_helper (static, see hyperv-drill-initramfs/) for the
 # fragment-buddy primitive. The guest has no CPython and this is a Day-0
@@ -41,6 +42,7 @@ readonly FRAG_PRE_OPEN_RESERVE_TARGET_PAGES=1536
 readonly FRAG_PRE_OPEN_RESERVE_CEILING_PAGES=1664
 readonly FRAG_POST_OPEN_RESERVE_FLOOR_PAGES=128
 readonly FRAG_POST_OPEN_RESERVE_CEILING_PAGES=512
+readonly FRAG_POST_OPEN_MIN_BUDDY_PAGES=8192
 
 fragment_pattern_ready() {
 	[ "$1" = yes ] || return 1
@@ -73,6 +75,75 @@ fragment_order7_reserve_qualified() {
 	[ "$1" -ge 1 ] && [ "$1" -le $(( $3 / 128 )) ] &&
 	[ "$2" -ge "$FRAG_POST_OPEN_RESERVE_FLOOR_PAGES" ] && [ "$2" -le "$3" ] &&
 	[ $(( $2 % 128 )) -eq 0 ] && [ "$2" -ge $(( $1 * 128 )) ]
+}
+
+fragment_post_open_reserve_qualified() {
+	[ "$#" -eq 3 ] || return 1
+	case "$1" in '' | *[!0-9]*) return 1 ;; esac
+	case "$2" in '' | *[!0-9]*) return 1 ;; esac
+	case "$3" in '' | *[!0-9]*) return 1 ;; esac
+	if [ "$1" -eq 0 ]; then
+		[ "$2" -eq 0 ] || return 1
+	else
+		[ "$2" -ge "$FRAG_POST_OPEN_RESERVE_FLOOR_PAGES" ] &&
+		[ "$2" -le "$FRAG_POST_OPEN_RESERVE_CEILING_PAGES" ] &&
+		[ $(( $2 % 128 )) -eq 0 ] && [ "$2" -ge $(( $1 * 128 )) ] ||
+			return 1
+	fi
+	[ "$3" -ge "$FRAG_POST_OPEN_MIN_BUDDY_PAGES" ]
+}
+
+fragment_parse_buddyinfo() {
+	[ "$#" -eq 1 ] || return 1
+	local _input="$1" _bline _ord _count
+	[ -r "$_input" ] || return 1
+	FRAG_BUDDYINFO_ROWS=0
+	FRAG_BUDDY_FREE_PAGES=0
+	FRAG_HIGH_ORDER_BLOCKS=0
+	FRAG_HIGH_ORDER_PAGES=0
+	while IFS= read -r _bline || [ -n "$_bline" ]; do
+		[ -n "$_bline" ] || continue
+		set -- $_bline
+		[ "$#" -ge 12 ] && [ "$1" = Node ] && [ "$3" = zone ] ||
+			return 1
+		FRAG_BUDDYINFO_ROWS=$((FRAG_BUDDYINFO_ROWS + 1))
+		shift 4
+		_ord=0
+		for _count in "$@"; do
+			case "$_count" in '' | *[!0-9]*) return 1 ;; esac
+			FRAG_BUDDY_FREE_PAGES=$((FRAG_BUDDY_FREE_PAGES + _count * (1 << _ord)))
+			if [ "$_ord" -ge 7 ]; then
+				FRAG_HIGH_ORDER_BLOCKS=$((FRAG_HIGH_ORDER_BLOCKS + _count))
+				FRAG_HIGH_ORDER_PAGES=$((FRAG_HIGH_ORDER_PAGES + _count * (1 << _ord)))
+			fi
+			_ord=$((_ord + 1))
+		done
+	done < "$_input"
+	[ "$FRAG_BUDDYINFO_ROWS" -gt 0 ]
+}
+
+fragment_buddyinfo_fixtures() {
+	local fixture
+	fixture="$(mktemp /tmp/vmbus-buddyinfo-fixture.XXXXXX)" || return 1
+	cat >"$fixture" <<'EOF'
+Node 0, zone DMA32 1 2 3 4 5 6 7 8 9 10 11
+Node 1, zone Normal 2 0 0 0 0 0 0 1 0 0 0
+EOF
+	if ! fragment_parse_buddyinfo "$fixture" ||
+		[ "$FRAG_BUDDYINFO_ROWS" -ne 2 ] ||
+		[ "$FRAG_BUDDY_FREE_PAGES" -ne 20611 ] ||
+		[ "$FRAG_HIGH_ORDER_BLOCKS" -ne 39 ] ||
+		[ "$FRAG_HIGH_ORDER_PAGES" -ne 19840 ]; then
+		rm -f "$fixture"
+		return 1
+	fi
+	printf '%s\n' 'Node 0, zone DMA32 malformed' >"$fixture"
+	if fragment_parse_buddyinfo "$fixture"; then
+		rm -f "$fixture"
+		return 1
+	fi
+	rm -f "$fixture"
+	return 0
 }
 
 fragment_count_nic_channels() {
@@ -188,12 +259,21 @@ if [ "${1:-}" = --self-test ]; then
 		fragment_order7_reserve_qualified 13 1664 1664 &&
 		fragment_order7_reserve_qualified 1 128 512 &&
 		fragment_order7_reserve_qualified 4 512 512 &&
+		fragment_post_open_reserve_qualified 0 0 8192 &&
+		fragment_post_open_reserve_qualified 1 128 8192 &&
+		fragment_post_open_reserve_qualified 4 512 8192 &&
+		! fragment_post_open_reserve_qualified 0 128 8192 &&
+		! fragment_post_open_reserve_qualified 1 0 8192 &&
+		! fragment_post_open_reserve_qualified 5 640 8192 &&
+		! fragment_post_open_reserve_qualified 0 0 8191 &&
+		! fragment_post_open_reserve_qualified 2 128 8192 &&
 		! fragment_order7_reserve_qualified 0 128 1024 &&
 		! fragment_order7_reserve_qualified 4 127 1024 &&
 		! fragment_order7_reserve_qualified 9 1152 1024 &&
 		! fragment_order7_reserve_qualified 14 1792 1664 &&
 		! fragment_order7_reserve_qualified 5 512 1024 &&
 		fragment_nic_topology_fixtures &&
+		fragment_buddyinfo_fixtures &&
 		fragment_restore_values_valid 65530 5696 15000 0 &&
 		! fragment_restore_values_valid 65530 5696 invalid 0 &&
 		! fragment_restore_values_valid 65530 5696 15000 invalid &&
@@ -679,70 +759,29 @@ kv STOPREASON 'stop=' || true
 UNSPLIT=
 kv UNSPLIT 'unsplit=' || true
 
-# Reread order-7-and-up from buddyinfo. buddyinfo is `Node <n>, zone
-# <name>` followed by one count per order, so order-0 is the 5th token and
-# order-7 the 12th; drop the four header fields and count from order 7.
+# Reread all free buddy pages and order-7-and-up from buddyinfo. Counting all
+# orders lets the post-open gate distinguish high-order depletion from actual
+# loss of the order-zero reserve needed by the ordinary allocation path.
 HIGH_ORDER=unknown
 HIGH_ORDER_PAGES=unknown
-if [ -r /proc/buddyinfo ]; then
-	HIGH_ORDER=0
-	HIGH_ORDER_PAGES=0
-	while read -r _bline; do
-		set -- $_bline
-		shift 4 2>/dev/null || continue
-		_ord=0
-		for _c in "$@"; do
-			if [ "$_ord" -ge 7 ]; then
-				case "$_c" in
-				'' | *[!0-9]*) ;;
-				*)
-					HIGH_ORDER=$((HIGH_ORDER + _c))
-					HIGH_ORDER_PAGES=$((HIGH_ORDER_PAGES + _c * (1 << _ord)))
-					;;
-				esac
-			fi
-			_ord=$((_ord + 1))
-		done
-	done < /proc/buddyinfo
+BUDDY_FREE_PAGES=unknown
+if fragment_parse_buddyinfo /proc/buddyinfo; then
+	HIGH_ORDER=$FRAG_HIGH_ORDER_BLOCKS
+	HIGH_ORDER_PAGES=$FRAG_HIGH_ORDER_PAGES
+	BUDDY_FREE_PAGES=$FRAG_BUDDY_FREE_PAGES
 fi
-say "high_order_7plus_blocks_helper=${HIGH_ORDER_HELPER:-unknown} high_order_7plus_pages_helper=${HIGH_ORDER_PAGES_HELPER:-unknown} high_order_7plus_blocks_reread=$HIGH_ORDER high_order_7plus_pages_reread=$HIGH_ORDER_PAGES bounded=${BOUNDED:-unknown}"
+say "high_order_7plus_blocks_helper=${HIGH_ORDER_HELPER:-unknown} high_order_7plus_pages_helper=${HIGH_ORDER_PAGES_HELPER:-unknown} high_order_7plus_blocks_reread=$HIGH_ORDER high_order_7plus_pages_reread=$HIGH_ORDER_PAGES buddy_free_pages_reread=$BUDDY_FREE_PAGES bounded=${BOUNDED:-unknown}"
 
 read_high_orders() {
 	HIGH_ORDER=unknown
 	HIGH_ORDER_PAGES=unknown
+	BUDDY_FREE_PAGES=unknown
 	BUDDYINFO_VALID=no
-	if [ -r /proc/buddyinfo ]; then
-		HIGH_ORDER=0
-		HIGH_ORDER_PAGES=0
+	if fragment_parse_buddyinfo /proc/buddyinfo; then
+		HIGH_ORDER=$FRAG_HIGH_ORDER_BLOCKS
+		HIGH_ORDER_PAGES=$FRAG_HIGH_ORDER_PAGES
+		BUDDY_FREE_PAGES=$FRAG_BUDDY_FREE_PAGES
 		BUDDYINFO_VALID=yes
-		BUDDYINFO_ROWS=0
-		while read -r _bline; do
-			[ -n "$_bline" ] || continue
-			BUDDYINFO_ROWS=$((BUDDYINFO_ROWS + 1))
-			set -- $_bline
-			if [ "$#" -lt 12 ]; then
-				BUDDYINFO_VALID=no
-				continue
-			fi
-			shift 4
-			_ord=0
-			for _c in "$@"; do
-				if [ "$_ord" -ge 7 ]; then
-					case "$_c" in
-					'' | *[!0-9]*) BUDDYINFO_VALID=no ;;
-					*)
-						HIGH_ORDER=$((HIGH_ORDER + _c))
-						HIGH_ORDER_PAGES=$((HIGH_ORDER_PAGES + _c * (1 << $_ord)))
-						;;
-					esac
-				fi
-				_ord=$((_ord + 1))
-			done
-		done < /proc/buddyinfo
-		if [ "$BUDDYINFO_ROWS" -eq 0 ] || [ "$BUDDYINFO_VALID" != yes ]; then
-			HIGH_ORDER=unknown
-			HIGH_ORDER_PAGES=unknown
-		fi
 	fi
 }
 
@@ -832,6 +871,8 @@ fi
 read_high_orders
 HIGH_ORDER_AFTER_CHANNEL="$HIGH_ORDER"
 HIGH_ORDER_PAGES_AFTER_CHANNEL="$HIGH_ORDER_PAGES"
+BUDDY_FREE_PAGES_AFTER_CHANNEL="$BUDDY_FREE_PAGES"
+say "post_open_buddy_free_pages=$BUDDY_FREE_PAGES_AFTER_CHANNEL minimum=$FRAG_POST_OPEN_MIN_BUDDY_PAGES"
 say "--- BUDDY FINAL ---"
 buddy
 
@@ -962,14 +1003,14 @@ OOPS="$(printf '%s\n' "$DM" | grep -vF 'Warning: unable to open an initial conso
 
 # exhausted= is the strict raw-count result. Only the bounded ordinary-path
 # result is accepted: at least 99% removed, at most 1664 measured high-order
-# pages kept before channel open, at least one minimum order-7 block kept
-# after it with a 512-page ceiling, and the exact count reread after the
-# channel exercise. Reread both the block count and its page size after the
-# hole pattern so neither can grow
-# between the helper's sample and the channel-open exercise.
+# pages kept before channel open, at most 512 after it, and at least 32 MiB
+# still free across all buddy orders. Zero order-7 pages is a valid stress
+# result only while that lower-order reserve remains. Reread the full buddy
+# state after channel open so high-order depletion cannot be mistaken for
+# system-wide free-page exhaustion.
 HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER_REREAD}"
 HIGH_ORDER_PAGES="${HIGH_ORDER_PAGES_HELPER:-$HIGH_ORDER_PAGES_REREAD}"
-say "RESULT high_order_7plus_blocks=$HIGH_ORDER (after_holes=$HIGH_ORDER_REREAD after_channel=$HIGH_ORDER_AFTER_CHANNEL) high_order_7plus_pages=$HIGH_ORDER_PAGES (after_holes=$HIGH_ORDER_PAGES_REREAD after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL) exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} restore=$FRAG_RESTORE_OK restore_source=$FRAG_RESTORE_SOURCE helper_status=$HOG_EXIT_STATUS order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
+say "RESULT high_order_7plus_blocks=$HIGH_ORDER (after_holes=$HIGH_ORDER_REREAD after_channel=$HIGH_ORDER_AFTER_CHANNEL) high_order_7plus_pages=$HIGH_ORDER_PAGES (after_holes=$HIGH_ORDER_PAGES_REREAD after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL) buddy_free_pages_after_channel=$BUDDY_FREE_PAGES_AFTER_CHANNEL minimum_buddy_pages=$FRAG_POST_OPEN_MIN_BUDDY_PAGES exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} restore=$FRAG_RESTORE_OK restore_source=$FRAG_RESTORE_SOURCE helper_status=$HOG_EXIT_STATUS order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
 say "RESULT_CHANNELS baseline=$NIC_CHANNELS_BASELINE rebound=${NIC_CHANNELS_REBOUND:-no} post_open_channel_ids=${NIC_CHANNEL_IDS_POST_CAPTURE_OK:-no}"
 
 # Exit codes for init:
@@ -989,6 +1030,7 @@ for _number in "$HIGH_ORDER_BLOCKS_BEFORE" "$HIGH_ORDER_PAGES_BEFORE" \
 	"$HIGH_ORDER_HELPER" "$HIGH_ORDER_PAGES_HELPER" "$CHUNKS_HELPER" \
 	"$HIGH_ORDER_REREAD" "$HIGH_ORDER_PAGES_REREAD" \
 	"$HIGH_ORDER_AFTER_CHANNEL" "$HIGH_ORDER_PAGES_AFTER_CHANNEL" \
+	"$BUDDY_FREE_PAGES_AFTER_CHANNEL" \
 	"$EXHAUSTED" "$BOUNDED" "$PAGEMAP"; do
 	if ! is_uint "$_number"; then
 		NUMERIC_EVIDENCE=no
@@ -1031,8 +1073,8 @@ elif [ "$NUMERIC_EVIDENCE" != yes ]; then
 
 elif ! fragment_order7_reserve_qualified "$HIGH_ORDER_HELPER" "$HIGH_ORDER_PAGES_HELPER" "$FRAG_PRE_OPEN_RESERVE_CEILING_PAGES" ||
 	! fragment_order7_reserve_qualified "$HIGH_ORDER_REREAD" "$HIGH_ORDER_PAGES_REREAD" "$FRAG_PRE_OPEN_RESERVE_CEILING_PAGES" ||
-	! fragment_order7_reserve_qualified "$HIGH_ORDER_AFTER_CHANNEL" "$HIGH_ORDER_PAGES_AFTER_CHANNEL" "$FRAG_POST_OPEN_RESERVE_CEILING_PAGES"; then
-	say "VERDICT=FAIL_UNSAFE_ORDER7_SATURATION (the drill must retain a minimum order-7 block through channel open)"
+	! fragment_post_open_reserve_qualified "$HIGH_ORDER_AFTER_CHANNEL" "$HIGH_ORDER_PAGES_AFTER_CHANNEL" "$BUDDY_FREE_PAGES_AFTER_CHANNEL"; then
+	say "VERDICT=FAIL_UNSAFE_POST_OPEN_BUDDY_RESERVE (order7_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL buddy_free_pages=$BUDDY_FREE_PAGES_AFTER_CHANNEL minimum_buddy_pages=$FRAG_POST_OPEN_MIN_BUDDY_PAGES)"
 	RC=1
 elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
 	[ "$HIGH_ORDER_BLOCKS_BEFORE" -gt 0 ] &&
@@ -1052,7 +1094,7 @@ elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
 		RC=3
 	else
 		say "VERDICT=PASS_RING_ALLOCATION_UNDER_BOUNDED_FRAGMENTATION"
-		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL; pre_open_reserve_target_pages=$FRAG_PRE_OPEN_RESERVE_TARGET_PAGES pre_open_recovery_ceiling_pages=$FRAG_PRE_OPEN_RESERVE_CEILING_PAGES post_open_reserve_floor_pages=$FRAG_POST_OPEN_RESERVE_FLOOR_PAGES post_open_reserve_ceiling_pages=$FRAG_POST_OPEN_RESERVE_CEILING_PAGES; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
+		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_order7_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL after_channel_buddy_free_pages=$BUDDY_FREE_PAGES_AFTER_CHANNEL; pre_open_reserve_target_pages=$FRAG_PRE_OPEN_RESERVE_TARGET_PAGES pre_open_recovery_ceiling_pages=$FRAG_PRE_OPEN_RESERVE_CEILING_PAGES post_open_nonzero_reserve_floor_pages=$FRAG_POST_OPEN_RESERVE_FLOOR_PAGES post_open_reserve_ceiling_pages=$FRAG_POST_OPEN_RESERVE_CEILING_PAGES post_open_min_buddy_pages=$FRAG_POST_OPEN_MIN_BUDDY_PAGES; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
 		RC=0
 	fi
 else

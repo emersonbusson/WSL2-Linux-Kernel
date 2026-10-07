@@ -860,14 +860,17 @@ static int do_mlock_hog(int argc, char **argv)
  * read back before pressure starts. The chase keeps the 1 MiB buddy-free
  * floor, a 1536-page chase target, a 1664-page recovery ceiling, and a
  * 4096-chunk hard cap.
- * Crossing any of them to force raw high-order count to zero would weaken
- * the safety contract that kept earlier guests from OOM and panic.
+ * Crossing any of them to force raw high-order count to zero during the chase
+ * would weaken the safety contract that kept earlier guests from OOM and
+ * panic. Channel open can consume the remaining high-order pages later; the
+ * shell measures that separately from total free buddy pages.
  *
  * A hosted runner can stop the chase with up to twelve minimum order-7 blocks
  * while still meeting the safe stress target. Free-memory recovery may return
  * one additional order-7 block, so the final pre-open ceiling is thirteen
- * blocks. The shell separately requires at least one minimum order-7 block
- * and no more than 512 pages to survive channel open. That result qualifies
+ * blocks. The shell requires at most 512 order-7+ pages after channel open.
+ * If channel open consumes that reserve, at least 8192 lower-order buddy
+ * pages (32 MiB) must remain free. That result qualifies
  * only as bounded ordinary-path pressure:
  * at least 99% of the initial order-7-and-higher free pages were removed, no
  * more than 1664 pages remain before channel open, a measured safety boundary
