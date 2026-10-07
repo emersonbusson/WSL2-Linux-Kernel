@@ -1,4 +1,4 @@
-From 7f4e5261a1e221a19cc9f0249d60f7f72fdddd2e Mon Sep 17 00:00:00 2001
+From e5cfd37f708d10430277ed3bc5eb2f03459c30a4 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 21:41:54 -0300
 Subject: [PATCH v2 09/14] hv: use owned VMBus buffers in NetVSC and UIO

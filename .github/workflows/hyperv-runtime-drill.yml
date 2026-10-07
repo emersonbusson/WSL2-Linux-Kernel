@@ -133,7 +133,7 @@ jobs:
           test "$stage" -eq 14
           git -C linux add -- drivers/hv drivers/net/hyperv drivers/uio include/linux/hyperv.h
           git -C linux write-tree > drill-artifacts/applied-source-tree.txt
-          test "$(cat drill-artifacts/applied-source-tree.txt)" = 2bdbf11b13e916ae42342de83f10e4d7247cb59f
+          test "$(cat drill-artifacts/applied-source-tree.txt)" = a4d818bed9e5a356972f7afe491071721ef914e3
 
       - name: Build the self-booting drill kernel
         env:

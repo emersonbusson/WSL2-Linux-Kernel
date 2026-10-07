@@ -361,7 +361,7 @@ jobs:
           test "$stage" -eq 14
           git -C linux add -- drivers/hv drivers/net/hyperv drivers/uio include/linux/hyperv.h
           git -C linux write-tree > vmbus-artifacts/final-source-tree.txt
-          test "$(cat vmbus-artifacts/final-source-tree.txt)" = 2bdbf11b13e916ae42342de83f10e4d7247cb59f
+          test "$(cat vmbus-artifacts/final-source-tree.txt)" = a4d818bed9e5a356972f7afe491071721ef914e3
           for symbol in \
             vmbus_alloc_buffer \
             vmbus_free_buffer \
@@ -529,6 +529,8 @@ jobs:
               exit 1
             }
           done
+          grep -q 'KUNIT_CASE(rndis_request_vmalloc_page_buffers_test)' \
+            linux/drivers/net/hyperv/rndis_request_test.c
           if grep -q 'vmbus_set_chn_rescind_callback' linux/drivers/uio/uio_hv_generic.c; then
             echo 'UIO must use ordinary device unregister on rescind'
             exit 1
@@ -563,7 +565,9 @@ jobs:
             vmbus-artifacts/kunit.log
           grep -Eq 'hyperv-vmbus-mmap \(2 subtests\)' vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-mmap' vmbus-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 68 tests: passed: 68$' \
+          grep -Eq 'hyperv-rndis-request \(5 subtests\)' \
+            vmbus-artifacts/kunit.log
+          grep -Eq 'Testing complete\. Ran 69 tests: passed: 69$' \
             vmbus-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-rndis-request' \
             vmbus-artifacts/kunit.log
@@ -607,6 +611,7 @@ jobs:
             vmbus_requestor_id_lifecycle_test \
             vmbus_requestor_invalid_ids_test \
             vmbus_requestor_exhaustion_test \
+            rndis_request_vmalloc_page_buffers_test \
             hv_uio_unregister_wakes_reader_test \
             hv_uio_remove_disconnects_open_channel_test \
             hv_uio_ring_mmap_range_test \

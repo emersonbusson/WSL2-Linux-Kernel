@@ -1,4 +1,4 @@
-From a77c03ddb849070edea95195442648d76b6c14b1 Mon Sep 17 00:00:00 2001
+From d65aa694201e25aed697ff261d3fd20ce5009170 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Wed, 23 Sep 2026 09:57:36 -0300
 Subject: [PATCH v2 01/14] hv: vmbus: convert ring backing through the chunk

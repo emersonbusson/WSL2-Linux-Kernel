@@ -1,14 +1,14 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: fourteen-patch bytes await fresh build/runtime qualification; no mail sent.
+Status: the refreshed fourteen-patch bytes await exact build/runtime qualification; no mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
-Mainline reconstructed tip: 506a9cde19a7024bd18c43247661974f93dac0bf
-Expected applied source tree: 2bdbf11b13e916ae42342de83f10e4d7247cb59f
+Mainline reconstructed tip: 324561babda3387f2abf55d6bcfddb56dd3e7945
+Expected applied source tree: a4d818bed9e5a356972f7afe491071721ef914e3
 Shape: fourteen code mails plus one scoped review cover. Nothing sent.
 The WSL backport and its native/local results are distinct from mainline.
 The original withdrawn mail package is not modified by this CI snapshot.
 
-PRODUCTION MAIL SHA-256
+PRE-CORRECTION MAIL SHA-256 (diagnostic run 37572161916; retained for traceability)
 b91d0f6166c8bb459064015ad605a51727892023662f85ba93f37d1ba7d197cc  0001-ring-allocation.patch
 242bc3876598415658d9e6d75b7653de367358826fb30b6d04b07d7aaa0f658f  0002-allocation-safety.patch
 58f6b92468a2a3c8166eadffd5fd8ca485d07ae904a06e56888ce6ace3d831b1  0003-uio-owner.patch
@@ -24,8 +24,27 @@ da6aa20d1b74fa0cf829cf87e63ba0e6a82547ccf5c361178a8edebeaa570fa3  0012-rndis-req
 ef973e71e2843a5b35f336d345ab88450b51447601eb9452014f3c359359000b  0013-netvsc-empty-completion-null.patch
 1c6319d56d5fe204d5f5e6717dc6242d8903d88610f64b0a11999656b7a5f150  0014-netvsc-kvzalloc.patch
 
-COVER SHA-256
+PRODUCTION MAIL SHA-256 (current bytes; pinned by series/SHA256SUMS)
+787ba98b14f38ea32e51ba48e2b97af389a64d44d88dd4c94e46e04093ae81d7  0001-ring-allocation.patch
+c91147e04a598e7d1fc728b5ab97f8cd3172f97d8cb6f1f74d0b853a7902b453  0002-allocation-safety.patch
+eb93ecd3c919bee60607b8cbc294db0f6e8aece05fc7c50d6d69db387d76e16a  0003-uio-owner.patch
+7067a229839f8b5e7c6397ca8ff57b6c640bd54be62bce40b382642ebffce128  0004-gpadl-fault-injection.patch
+adb7f1ae697a3b629b61bd8874c956f8a2c853a50aa8e2e3ac6deab00e7f7331  0005-order-zero-fallback-injection.patch
+230c8cd47d7826bad1c3763e2a31c4bdb48a960702b5cd84e944fecd0ae9b78b  0006-shared-page-test.patch
+f33e0e93b5c76ecb817957a8b7c567c2bb3f4f07ff1a3ed04a9badd6d90c2c73  0007-rescind-vs-unload.patch
+7aa78344410ac0ddf533508a8b450f5264d33d06b7e681829186d17e78ede1b9  0008-buffer-ownership.patch
+33358104ecb6a34e4926f38273d46e2cd5c9badaa5dd397ae4af83af8e1c6806  0009-alloc-buffer-prototype.patch
+88e6c3920a567fa34e5f7b16495c06348a7a9c02ad39fb4ae01b2d3a23fc31b1  0010-uio-mmap-pin.patch
+44e21c18b74b7b5873448601dbe39420a9eb2a411e7ddc19e5e63649683be597  0011-requestor-kvcalloc.patch
+e67c37f2c45f3f89e77b3a61a48eba2d007083dea6bdc404531ece0d266e2a03  0012-rndis-request-kvmalloc.patch
+a7137c5dd0d815e3ae591b4fc65e90c3e6554f4388676e13e32e3fe7e96cf88e  0013-netvsc-empty-completion-null.patch
+544aabd7cae323d70fded8ea53ddc516721e49edd4d8824ac61c157c4753e018  0014-netvsc-kvzalloc.patch
+
+PRE-CORRECTION COVER SHA-256
 1cb3fe228d6dc175c194d97a3c529a860bc63b1a157d7020d763a400d9619b61  0000-cover-letter.patch
+
+PRODUCTION COVER SHA-256 (current review text)
+9b385a3a729351569060ce0df7f2a12b030b848019b093931bde0095e69624d0  0000-cover-letter.patch
 
 Historical thirteen-patch evidence only; it does not qualify patch 0014.
 MEASURED SCOPE
@@ -40,7 +59,22 @@ Native ordinary WSL Actions 37395696464: executed PASS, 456 matching ACKs.
 Exact-source Hyper-V Actions 37405207883: both 100-cycle lifecycles/rescinds PASS.
 Fragmentation: windows-2025 PASS; windows-latest PARTIAL, one order-7+ block.
 Owner ledgers: 681/682 created, 674/675 reclaimed, seven active each; no errors.
-Negative baselines fail lifecycle; aggregate workflow failure is preserved.
+The historical baseline controls emitted their planned failure signatures;
+that workflow revision surfaced them as a red aggregate. The current runtime
+policy green-lights only the exact checksum-verified, fault-free baseline
+signature and still requires full PASS from candidates.
+Diagnostic run 37572161916 built both candidate kernels, then failed runtime:
+windows-2025 failed closed below its unchanged 64 MiB free reserve; windows-latest
+blocked in rndis_filter_device_add() waiting for RNDIS initialization response.
+Disposable-VM cleanup passed. This is a failure finding, not qualification.
+Patch 0012 now emits page-wise GPA descriptors for vmalloc-backed requests and
+adds a crossing-page KUnit regression. The refreshed bytes await rerun.
+The drill helper now recovers at most 64 MiB of verified order-0 pages with
+MADV_DONTNEED_LOCKED when refine consumes the initial hole reserve. It keeps
+the 64 MiB free-memory floor, the 256-page order-7 ceiling and existing hole
+caps unchanged, and fails closed if either measurement is missed. The
+single-page host-kernel discard smoke and local policy tests pass; this is
+not guest runtime qualification.
 Candidate image SHA-256: e245a6a1e30b37360f092992d1b1a3909418c3b95de8f427c7ce23bd52f8dd16
 Corrected ordinary local pair: installed; two 3,200 MiB integrity rounds PASS.
 Historical local host-control continuity PARTIAL; later action refusals retained.

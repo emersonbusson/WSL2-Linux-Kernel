@@ -1,4 +1,4 @@
-From 707ca539d51c000752040c7def0ac854baf1f4ce Mon Sep 17 00:00:00 2001
+From a10569af5a569bbaea6f28caa2a09726902cd2b5 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
 Subject: [PATCH v2 11/14] hv: vmbus: allocate the requestor array with
@@ -22,11 +22,11 @@ vmbus_add_channel_work   ? ___kmalloc_large_node   ? __kmalloc_noprof
 ? __vmbus_open   hv_netvsc ... eth0: sub channel open failed: -12
 
 The rings themselves already come from vmbus_alloc_buffer() (patch
-1/14), so this removes the order-7 allocation from the open path. A
+1/13), so this removes the order-7 allocation from the open path. A
 second, smaller high-order allocation remains there: the RNDIS
 request descriptor in rndis_filter.c is larger than
 KMALLOC_MAX_CACHE_SIZE and takes an order-2 compound page. That one
-is removed in patch 12/14.
+is removed in patch 12/13.
 
 The requestor array is guest-private bookkeeping: it stores request
 ids the guest hands out and never reaches the host, so it is not

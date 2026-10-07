@@ -45,10 +45,13 @@
  * not the density, and an uncapped punch drains the Unmovable slab through
  * vm_area_dup() until out_of_memory() panics an unkillable guest. It
  * also has to fund reopening hv_netvsc: its default receive buffer is
- * 16 MiB and its send buffer can be 15 MiB. The helper requires at least
- * 64 MiB of measured free memory above the live watermark and an order-2
- * stack reserve before it pins the pattern or reports ready=1. A smaller
- * reserve fails closed before the channel-open attempt.
+ * 16 MiB and its send buffer can be 15 MiB. If refine consumes pages from
+ * the initial hole reserve, the helper recovers verified order-0 pages from
+ * still-mapped locked ranges with MADV_DONTNEED_LOCKED. This does not split
+ * VMAs, and each discarded page has a live held buddy. The helper requires
+ * at least 64 MiB of measured free memory above the live watermark and an
+ * order-2 stack reserve before it pins the pattern or reports ready=1. A
+ * smaller reserve fails closed before the channel-open attempt.
  *
  * The loop stops on the measured condition, not on hard refusal, and keeps
  * a real free-memory margin while doing it: pagefault_out_of_memory() only
@@ -104,6 +107,11 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Linux 7.3 UAPI; some build hosts ship older userspace headers. */
+#ifndef MADV_DONTNEED_LOCKED
+#define MADV_DONTNEED_LOCKED 24
+#endif
 
 static long parse_long(const char *s, const char *what)
 {
@@ -835,6 +843,8 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_RUNTIME_MIN_FREE_KB (64L * 1024)
 #define FRAG_RUNTIME_MIN_HOLE_PAGES \
 	((FRAG_RUNTIME_MIN_FREE_KB * 1024L) / FRAG_PAGE)
+/* Recovery never frees more than the reserve we are trying to establish. */
+#define FRAG_RUNTIME_RECOVERY_MAX_PAGES FRAG_RUNTIME_MIN_HOLE_PAGES
 #define FRAG_RUNTIME_MIN_ORDER2_BLOCKS 64L
 /* Drive page frees from PCP into buddy lists during the held drill window. */
 #define FRAG_PCP_HIGH_FRACTION_MIN 8L
@@ -1515,6 +1525,198 @@ static int frag_page_has_held_buddy(unsigned long encoded_pfn,
 	return !(pfn & 1UL) && pfn_bitmap_get(seen, seen_words, pfn + 1);
 }
 
+static long frag_recovery_pages_needed(long free_kb, long wmark_kb)
+{
+	long free_above_wmark_kb, needed_kb;
+
+	if (free_kb < 0 || wmark_kb < 0)
+		return -1;
+	free_above_wmark_kb = free_kb > wmark_kb ? free_kb - wmark_kb : 0;
+	if (free_above_wmark_kb >= FRAG_RUNTIME_MIN_FREE_KB)
+		return 0;
+
+	needed_kb = FRAG_RUNTIME_MIN_FREE_KB - free_above_wmark_kb;
+	return (needed_kb * 1024L + FRAG_PAGE - 1) / FRAG_PAGE;
+}
+
+/* Rebuild the bitmap from resident PFNs after the hole and refine passes. */
+static int frag_record_mapping_pfns(int pmfd, char *mapping, long bytes,
+				    unsigned long **seen, size_t *seen_words)
+{
+	long off;
+
+	for (off = 0; off < bytes; off += FRAG_PAGE) {
+		unsigned long pfn;
+
+		if (pagemap_pfn(pmfd, mapping + off, &pfn) != 0)
+			continue;
+		if (pfn_bitmap_set(seen, seen_words, pfn))
+			return -1;
+	}
+	return 0;
+}
+
+static int frag_recover_runtime_reserve(int pmfd, void **maps, long map_count,
+					void **chase_maps, long chase_count,
+					void **reserve, long reserve_count,
+					unsigned long **seen, size_t *seen_words,
+					const char *release_file,
+					long *recovered_pages,
+					long *scanned_pages, long *free_kb,
+					long *wmark_kb, long *high_after,
+					long *high_after_pages)
+{
+	long needed_pages, i;
+	int done;
+
+	*recovered_pages = 0;
+	*scanned_pages = 0;
+	*free_kb = mem_free_kb();
+	*wmark_kb = live_min_watermark_kb();
+	needed_pages = frag_recovery_pages_needed(*free_kb, *wmark_kb);
+	if (needed_pages < 0) {
+		printf("FRAGMENT_BUDDY ready=0 reason=runtime-recovery-measurement-unavailable\n");
+		fflush(stdout);
+		return -1;
+	}
+	if (needed_pages > FRAG_RUNTIME_RECOVERY_MAX_PAGES) {
+		printf("FRAGMENT_BUDDY ready=0 reason=runtime-recovery-cap\n");
+		printf("FRAGMENT_BUDDY recovery needed_pages=%ld cap_pages=%ld\n",
+		       needed_pages, FRAG_RUNTIME_RECOVERY_MAX_PAGES);
+		fflush(stdout);
+		return -1;
+	}
+	done = needed_pages == 0;
+	if (!done) {
+		/*
+		 * Hole punching and refine can change which PFNs are still held.
+		 * Rebuild from live mappings so a page released earlier is never
+		 * mistaken for a held buddy.
+		 */
+		free(*seen);
+		*seen = NULL;
+		*seen_words = 0;
+		for (i = 0; i < map_count; i++) {
+			if (frag_record_mapping_pfns(pmfd, maps[i], FRAG_CHUNK,
+						     seen, seen_words))
+				goto pfn_set_failed;
+		}
+		for (i = 0; i < chase_count; i++) {
+			if (frag_record_mapping_pfns(pmfd, chase_maps[i],
+						     FRAG_CHUNK, seen,
+						     seen_words))
+				goto pfn_set_failed;
+		}
+		for (i = 0; i < reserve_count; i++) {
+			if (frag_record_mapping_pfns(pmfd, reserve[i],
+						     FRAG_RESERVE_CHUNK, seen,
+						     seen_words))
+				goto pfn_set_failed;
+		}
+
+		/*
+		 * MADV_DONTNEED_LOCKED drops resident pages without splitting the
+		 * VMA. Release only an even PFN whose odd buddy remains present in
+		 * the live bitmap, so each returned page stays order-0 and cannot
+		 * rebuild high-order blocks. No discarded page is touched again.
+		 */
+		for (i = 0; i < map_count + chase_count + reserve_count && !done;
+		     i++) {
+			char *mapping;
+			long bytes, page_off;
+
+			if (i < map_count) {
+				mapping = maps[i];
+				bytes = FRAG_CHUNK;
+			} else if (i < map_count + chase_count) {
+				mapping = chase_maps[i - map_count];
+				bytes = FRAG_CHUNK;
+			} else {
+				mapping = reserve[i - map_count - chase_count];
+				bytes = FRAG_RESERVE_CHUNK;
+			}
+			for (page_off = 0; page_off < bytes && !done;
+			     page_off += FRAG_PAGE) {
+				unsigned long pfn, after_pfn;
+
+				if (((*scanned_pages)++ & 63L) == 0 &&
+				    frag_release_requested(release_file))
+					return -1;
+				if (pagemap_pfn(pmfd, mapping + page_off, &pfn) != 0 ||
+				    !frag_page_has_held_buddy(pfn + 1, *seen,
+							      *seen_words))
+					continue;
+				if (madvise(mapping + page_off, (size_t)FRAG_PAGE,
+					    MADV_DONTNEED_LOCKED) != 0) {
+					printf("FRAGMENT_BUDDY recovery_madvise errno=%d\n",
+					       errno);
+					fflush(stdout);
+					return -1;
+				}
+				if (pagemap_pfn(pmfd, mapping + page_off,
+						&after_pfn) == 0) {
+					printf("FRAGMENT_BUDDY recovery_page_retained\n");
+					fflush(stdout);
+					return -1;
+				}
+				(*recovered_pages)++;
+				if (((*recovered_pages) & 63L) == 0 ||
+				    *recovered_pages == FRAG_RUNTIME_RECOVERY_MAX_PAGES) {
+					*free_kb = mem_free_kb();
+					*wmark_kb = live_min_watermark_kb();
+					needed_pages = frag_recovery_pages_needed(*free_kb,
+										  *wmark_kb);
+					if (needed_pages < 0) {
+						printf("FRAGMENT_BUDDY recovery_measurement\n");
+						fflush(stdout);
+						return -1;
+					}
+					done = needed_pages == 0;
+				}
+			}
+		}
+		*free_kb = mem_free_kb();
+		*wmark_kb = live_min_watermark_kb();
+		needed_pages = frag_recovery_pages_needed(*free_kb, *wmark_kb);
+		if (needed_pages < 0 || !done) {
+			printf("FRAGMENT_BUDDY ready=0 reason=reserve-recovery-insufficient\n");
+			printf("FRAGMENT_BUDDY recovery pages=%ld scan=%ld needed=%ld cap=%ld\n",
+			       *recovered_pages, *scanned_pages, needed_pages,
+			       FRAG_RUNTIME_RECOVERY_MAX_PAGES);
+			fflush(stdout);
+			return -1;
+		}
+	}
+	*high_after = buddy_blocks_at_or_above(7);
+	*high_after_pages = buddy_pages_at_or_above(7);
+	if (*high_after < 0 || *high_after_pages < 0) {
+		printf("FRAGMENT_BUDDY ready=0 reason=recovery-buddyinfo-unavailable\n");
+		fflush(stdout);
+		return -1;
+	}
+	if (*recovered_pages > 0 &&
+	    !frag_should_preserve_order7(*high_after, *high_after_pages)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=recovery-order7-not-preserved\n");
+		printf("FRAGMENT_BUDDY recovery high_order_7plus=%ld pages=%ld max_pages=%ld\n",
+		       *high_after, *high_after_pages,
+		       FRAG_BOUNDED_MAX_REMAINING_PAGES);
+		fflush(stdout);
+		return -1;
+	}
+	printf("FRAGMENT_BUDDY recovery pages=%ld scan=%ld free_kb=%ld above_wmark_kb=%ld\n",
+	       *recovered_pages, *scanned_pages, *free_kb,
+	       *free_kb > *wmark_kb ? *free_kb - *wmark_kb : 0);
+	printf("FRAGMENT_BUDDY recovery required_kb=%ld high_order_7plus=%ld pages=%ld\n",
+	       FRAG_RUNTIME_MIN_FREE_KB, *high_after, *high_after_pages);
+	fflush(stdout);
+	return 0;
+
+pfn_set_failed:
+	printf("FRAGMENT_BUDDY ready=0 reason=runtime-recovery-pfn-set-failed\n");
+	fflush(stdout);
+	return -1;
+}
+
 static int do_fragment_buddy(int argc, char **argv)
 {
 	long mib, hold, want, got = 0, locked = 0, i, off, stopped = 0;
@@ -1525,6 +1727,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	long high_after_pages = -1;
 	long wmark_kb = -1, floor_kb = -1;
 	long chase_free_kb = -1, chase_wmark_kb = -1, chase_floor_kb = -1;
+	long recovery_pages = 0, recovery_scanned = 0;
 	long min_free_saved = -1, min_free_set = 512, min_free_now = -1;
 	long boost_saved = -1, boost_now = -1;
 	long pcp_high_fraction_saved = -1, pcp_high_fraction_now = -1;
@@ -2371,8 +2574,15 @@ static int do_fragment_buddy(int argc, char **argv)
 	printf("FRAGMENT_BUDDY order2_reserve groups=%ld pages=%ld reserve=%ld buddy_order2=%ld\n",
 	       order2_groups, order2_pages, reserve_got, order2_buddy);
 	fflush(stdout);
-	free_kb = mem_free_kb();
-	wmark_kb = live_min_watermark_kb();
+	if (frag_recover_runtime_reserve(pmfd, maps, got, chase_maps, chase,
+					 reserve, reserve_got, &seen, &seen_words,
+					 release_file, &recovery_pages,
+					 &recovery_scanned, &free_kb, &wmark_kb,
+					 &high_after, &high_after_pages)) {
+		rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+		goto cleanup;
+	}
+	order2_buddy = buddy_blocks_at_or_above(2);
 	if (free_kb >= 0 && wmark_kb >= 0 && free_kb >= wmark_kb)
 		free_above_wmark_kb = free_kb - wmark_kb;
 	if (!frag_runtime_reserve_qualified(FRAG_HOLE_CAP, freed_pages,

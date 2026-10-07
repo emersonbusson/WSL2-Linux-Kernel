@@ -1,4 +1,4 @@
-From 1c07a43a98c2c2c92efb73d40ab07404a6b639d9 Mon Sep 17 00:00:00 2001
+From c443f00bf12d5aaae91d4029f3ffd396aa6a9c05 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Sun, 4 Oct 2026 17:20:25 -0300
 Subject: [PATCH v2 13/14] hv: netvsc: handle a NULL request address on empty
@@ -79,12 +79,12 @@ index 6f1abc756fde..b2d22855fd8a 100644
 +hv_netvsc-$(CONFIG_HYPERV_NET_KUNIT_TEST) += netvsc_completion_test.o
  hv_netvsc-$(CONFIG_HYPERV_NET_KUNIT_TEST) += rndis_request_test.o
 diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-index c9dddfca834e..f43e96dcafae 100644
+index 6492e7e93ded..be3a63a168cf 100644
 --- a/drivers/net/hyperv/hyperv_net.h
 +++ b/drivers/net/hyperv/hyperv_net.h
-@@ -226,6 +226,21 @@ struct rndis_request *get_rndis_request(struct rndis_device *dev,
- 					u32 msg_type, u32 msg_len);
- void put_rndis_request(struct rndis_device *dev, struct rndis_request *req);
+@@ -229,6 +229,21 @@ int rndis_build_page_buffers(const void *data, u32 len,
+ 			     struct hv_page_buffer *page_bufs,
+ 			     u32 *page_buf_cnt);
  
 +void netvsc_send_acct(struct net_device *ndev,
 +		      struct netvsc_device *net_device,

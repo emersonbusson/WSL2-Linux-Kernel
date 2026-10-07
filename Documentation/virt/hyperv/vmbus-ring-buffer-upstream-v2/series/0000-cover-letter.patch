@@ -9,11 +9,13 @@ CCA and TDX guests without a paravisor need direct-map page transitions.
 This revision uses the existing chunk allocator and keeps allocation,
 GPADL ownership and mapping references together.
 
-This is a review snapshot. A fourteenth patch adds a vmalloc fallback for
-the large guest-private NetVSC device object, after the runtime drill exposed
-an order-7 allocation in device setup. The thirteen-patch architecture and
-runtime results below predate that patch; the exact fourteen-patch series is
-not qualified until its build and runtime workflows pass.
+This is a review snapshot. Patch 0012 now describes vmalloc-backed RNDIS
+control payloads with page-wise GPA buffers; this closes a physical-contiguity
+assumption exposed by a diagnostic run. Patch 0014 keeps the large
+guest-private NetVSC device object from requiring an order-7 allocation. The
+prior architecture and runtime results below predate these final bytes; the
+exact fourteen-patch series is not qualified until fresh build and runtime
+workflows pass.
 
 References:
   Initial proposal: https://lists.openwall.net/linux-kernel/2026/09/18/276
@@ -82,11 +84,13 @@ maintainers.
 Prior thirteen-patch software and Windows evidence
 --------------------------------------------------
 
-The exact final tree passes 68 linked x86_64 QEMU KUnit cases: 33 VMBus,
+The prior thirteen-patch tree passes 68 linked x86_64 QEMU KUnit cases: 33 VMBus,
 2 actual sysfs/MM cases, 14 UIO, 11 netvsc completion, 4 RNDIS and
 4 refcount cases. Reintroducing the shutdown requeue decision fails two
 real-workqueue running-window cases. Removing production wrapper unpin
 fails both actual-MM cases. Restoring the source passes all 68 again.
+Patch 0012 adds a fifth RNDIS page-buffer case; the refreshed tree's gate
+requires all 69 cases to pass, and no result on those bytes is claimed yet.
 Complete VMBus unload and retained-owner destruction remain unqualified.
 
 A distinct WSL backport passes 25 production-request/matcher cases.
@@ -126,11 +130,29 @@ owners and seven still active each, with no missing creates or capture
 errors. No panic, splat or access fault is observed. windows-2025 exhausts
 order-7-and-higher supply and passes the fragmentation drill. windows-latest
 retains one such block at the safety cap: its fragmentation and overall
-runtime verdicts are PARTIAL. Both baseline lifecycle controls fail; the
-aggregate workflow is therefore failure. Candidate job success does not
-upgrade that PARTIAL result. The actual candidate image and all thirteen
+runtime verdicts are PARTIAL. The baseline legs produced their intentional
+negative-control signatures; that workflow revision surfaced the expected
+failures as a red aggregate. The current policy accepts only the exact,
+checksum-verified and fault-free baseline signature, while candidates still
+require full PASS. Candidate job success does not upgrade that PARTIAL result.
+The actual candidate image and all thirteen
 prior code-mail hashes bind to the same final source tree as the architecture
-run. The new fourteenth mail is not covered by those results.
+run. The refreshed exact fourteen-patch bytes are not covered by those results.
+
+Follow-up diagnostic run on the pre-correction fourteen-patch bytes:
+  https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37572161916
+Both candidate builds passed. windows-2025 failed closed below the unchanged
+64 MiB free reserve before attempting rebind. windows-latest reached rebind
+and blocked in rndis_filter_device_add() waiting for the RNDIS initialization
+response; disposable-VM cleanup passed. This is a failure finding, not a
+candidate qualification. It exposed that kvzalloc-backed RNDIS payloads were
+still described through one virt_to_phys() PFN. Patch 0012 now emits one GPA
+entry per backing page and adds a vmalloc boundary KUnit regression. The
+drill helper also has a bounded recovery pass for the independent reserve gap:
+it discards at most 64 MiB of verified order-0 pages with MADV_DONTNEED_LOCKED,
+without splitting VMAs, then checks the unchanged 64 MiB free reserve and
+256-page order-7 ceiling again. The host-kernel discard smoke passed, but the
+exact guest bytes remain pending build and runtime validation.
 
 The six static CoCo conditions are necessary source checks, not runtime
 proof. SEV-SNP, TDX without a paravisor and Arm CCA remain unmeasured.
@@ -165,14 +187,14 @@ Emerson Busson (14):
  drivers/hv/vmbus_mmap_test.c                |  145 ++++
  drivers/net/hyperv/Kconfig                  |   12 +
  drivers/net/hyperv/Makefile                 |    2 +
- drivers/net/hyperv/hyperv_net.h             |   65 +-
- drivers/net/hyperv/netvsc.c                 |  139 ++--
+ drivers/net/hyperv/hyperv_net.h             |   68 +-
+ drivers/net/hyperv/netvsc.c                 |  143 ++--
  drivers/net/hyperv/netvsc_completion_test.c |  439 ++++++++++
- drivers/net/hyperv/rndis_filter.c           |   54 +-
- drivers/net/hyperv/rndis_request_test.c     |  157 ++++
+ drivers/net/hyperv/rndis_filter.c           |  117 ++-
+ drivers/net/hyperv/rndis_request_test.c     |  216 +++++
  drivers/uio/Kconfig                         |   11 +
  drivers/uio/uio.c                           |   20 +
  drivers/uio/uio_hv_generic.c                |  388 +++++++--
  drivers/uio/uio_hv_generic_mmap_test.c      |  875 ++++++++++++++++++++
  include/linux/hyperv.h                      |   72 +-
- 22 files changed, 4370 insertions(+), 415 deletions(-)
+ 22 files changed, 4490 insertions(+), 424 deletions(-)

@@ -51,6 +51,7 @@ int main(void)
 	const long min_holes = FRAG_RUNTIME_MIN_HOLE_PAGES;
 	const long usable_kb = FRAG_RUNTIME_MIN_FREE_KB;
 	const long min_order2 = FRAG_RUNTIME_MIN_ORDER2_BLOCKS;
+	long recovery_needed;
 	unsigned long *seen = calloc(1, sizeof(*seen));
 	size_t seen_words = 1;
 	const unsigned long distant_pfn = 64UL * 9000UL + 3UL;
@@ -128,6 +129,14 @@ int main(void)
 						 FRAG_PCP_HIGH_FRACTION - 1));
 	assert(!frag_pcp_high_fraction_qualified(7, 7));
 	assert(!frag_pcp_high_fraction_qualified(-1, -1));
+	/* Recovery keeps the 64 MiB watermark reserve and has a fixed cap. */
+	assert(min_holes == FRAG_RUNTIME_RECOVERY_MAX_PAGES);
+	recovery_needed = frag_recovery_pages_needed(10484, 640);
+	assert(recovery_needed == 13923);
+	assert(frag_recovery_pages_needed(66176, 640) == 0);
+	assert(frag_recovery_pages_needed(640, 640) == min_holes);
+	assert(frag_recovery_pages_needed(-1, 640) == -1);
+	assert(frag_recovery_pages_needed(640, -1) == -1);
 	/* Keep the channel-open hole budget large enough for netvsc buffers. */
 	assert(hole_cap * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES);
 	assert(hole_cap <= FRAG_HOLE_MAX_CAP);
