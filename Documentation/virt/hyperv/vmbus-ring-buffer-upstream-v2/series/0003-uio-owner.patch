@@ -1,7 +1,7 @@
 From d5101eb6b4019770ef6e698d908ab9d8e042f07a Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:35 -0300
-Subject: [PATCH v2 03/13] uio: hv_generic: describe buffers for owned
+Subject: [PATCH v2 03/14] uio: hv_generic: describe buffers for owned
  allocation
 
 Group receive and send backing in VMBus descriptors before adopting the

@@ -1,11 +1,12 @@
-> Current snapshot: all thirteen x86_64/arm64 architecture stages pass.
-> Exact-source ordinary Hyper-V lifecycle/rescind passes on both runners;
-> windows-latest fragmentation remains PARTIAL. See MANIFEST.txt for scope.
-> Ordinary WSL evidence qualifies its distinct backport. Sending is NO_GO.
+> Current snapshot: fourteen-patch build and runtime requalification is in
+> progress.
+> Results below for the thirteen-patch series are historical and do not qualify
+> patch 0014. Ordinary WSL results qualify only the distinct WSL backport.
+> Sending remains NO_GO until the exact current bytes pass the final review.
 
 # BUILD — image for one CoCo attempt
 
-**Role in the bundle:** how to turn the thirteen patches into a kernel a
+**Role in the bundle:** how to turn the fourteen patches into a kernel a
 disposable guest can boot. Everything here is already in the tree; this file
 names the recipe rather than inventing one.
 
@@ -30,8 +31,8 @@ Both shapes build the **production bytes only**. No diagnostic delta is
 applied here. This bundle supplies no runtime transition-failure injection
 delta. COCO-4/5 remain `not_run` unless a separately reviewed diagnostic
 delta is supplied and recorded as `candidate.diagnostic_delta` with
-`experimental: true` in the result. Never fold a diagnostic into the series and then report it as the
-candidate.
+`experimental: true` in the result. Never fold a diagnostic into the series
+and then report it as the candidate.
 
 ## 2. Shape A — the drill image (default)
 
@@ -58,7 +59,7 @@ link the build stops.
 ./drill/build-drill-kernel.sh /path/to/kernel-src /path/to/out
 ```
 
-`kernel-src` is the mainline tree with `0001`–`0013` applied. `out` receives
+`kernel-src` is the mainline tree with `0001`–`0014` applied. `out` receives
 the image and the evidence the build itself produced:
 
 | File | Why it is kept |
@@ -137,7 +138,9 @@ git -C /path/to/kernel-src checkout 93f51579e7df248780214094418f205253383cc5
 
 # 3. apply them
 TASK_BUNDLE_ROOT=$(pwd)
-git -C /path/to/kernel-src am "$TASK_BUNDLE_ROOT"/series/000[1-9]-*.patch "$TASK_BUNDLE_ROOT"/series/001[0-3]-*.patch
+git -C /path/to/kernel-src am \
+  "$TASK_BUNDLE_ROOT"/series/000[1-9]-*.patch \
+  "$TASK_BUNDLE_ROOT"/series/001[0-4]-*.patch
 ```
 
 Every line of `sha256sum -c` must say `OK`. Run it **inside the guest too**
@@ -175,7 +178,7 @@ initramfs layout.
 
 Not one of these is optional.
 
-- `sha256sum -c SHA256SUMS` in the guest reports `OK` for all thirteen.
+- `sha256sum -c SHA256SUMS` in the guest reports `OK` for all fourteen.
 - The tree that was built is the tree those hashes name.
 - `uname -a` after boot matches the image you built.
 - `coco-capability-preflight.sh` after boot shows the **same** isolation mode

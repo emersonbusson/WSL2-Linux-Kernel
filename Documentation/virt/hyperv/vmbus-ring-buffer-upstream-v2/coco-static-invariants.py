@@ -5,7 +5,7 @@ Static negative check for the guest-fatal pattern Michael Kelley named
 (set_memory_decrypted() on a vmalloc()/vmap() virtual range): every
 set_memory_*() site in the paths this series allocates receives a
 page_address() direct-map chunk, an accepted legacy argument, or the file is
-rejected. Run against the candidate tree after all thirteen patches are
+rejected. Run against the candidate tree after all fourteen patches are
 applied.
 
   python3 coco-static-invariants.py --tree <linux-tree>
@@ -909,7 +909,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tree",
-        help="candidate kernel tree with all thirteen patches applied",
+        help="candidate kernel tree with all fourteen patches applied",
     )
     parser.add_argument(
         "--self-test",

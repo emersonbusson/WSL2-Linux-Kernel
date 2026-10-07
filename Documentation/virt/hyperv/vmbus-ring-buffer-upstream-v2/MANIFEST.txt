@@ -1,38 +1,40 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: bounded ordinary data/control qualified; final send approval pending.
+Status: fourteen-patch bytes await fresh build/runtime qualification; no mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
-Mainline reconstructed tip: 1c07a43a98c2c2c92efb73d40ab07404a6b639d9
-Expected applied source tree: 55eff83ccf8ef5fef028c5f1d612884cad6010d6
-Shape: thirteen code mails plus one scoped review cover. Nothing sent.
+Mainline reconstructed tip: 506a9cde19a7024bd18c43247661974f93dac0bf
+Expected applied source tree: 2bdbf11b13e916ae42342de83f10e4d7247cb59f
+Shape: fourteen code mails plus one scoped review cover. Nothing sent.
 The WSL backport and its native/local results are distinct from mainline.
 The original withdrawn mail package is not modified by this CI snapshot.
 
 PRODUCTION MAIL SHA-256
-274aca668ac001ee850400c2b73b1aab22821ecbee9a4f523be984a45f3930b0  0001-ring-allocation.patch
-60807020ec7d12bd8d1fb3042129a8ad63ced8b5110522c173e84fe5129aed05  0002-allocation-safety.patch
-264d18727ee986412da8d157f3e22c36efac599caa471562965726272fba59df  0003-uio-owner.patch
-d56ce0ff7bf1e77e7d4e5c59e4bbbe1411027d3e821fcd6b7f3e0a07b60ad619  0004-gpadl-fault-injection.patch
-82f7534608ba1c6aecc39386f38e768f13a5ae8ee6c478bc084e6b832d90b803  0005-order-zero-fallback-injection.patch
-0f25df329462641185613cf2ebb7229a8b592832750d1a3fb505f82faec3dd73  0006-shared-page-test.patch
-d96bce74881dc5d341dae06f13704ac0b47f4195f08994d5fe9b08f992069e9d  0007-rescind-vs-unload.patch
-9e7f408a0a5cb8bb917764311257f77666371b463bec75a94adb4a503b6d9cd9  0008-buffer-ownership.patch
-4787e16584a4725e6ff37131129e74a86affea3ba8903bf81e6335ec5053a77c  0009-alloc-buffer-prototype.patch
-80f4740cbc797060a199cf9fac3bae995a059b1f8f80c62430110cd645b3d600  0010-uio-mmap-pin.patch
-44ceb889509bcbaac7f3888edd802842e6c4050f88dd11f073e63a66b4d29081  0011-requestor-kvcalloc.patch
-e0675addf91bc5783bfc0a43042ac6eca0132ea3674300191fe28bea9034e1f4  0012-rndis-request-kvmalloc.patch
-d5176dcdf2c2b49f8381cfef4d2d24fce9cb8df830ee6143666a10da60447170  0013-netvsc-empty-completion-null.patch
+b91d0f6166c8bb459064015ad605a51727892023662f85ba93f37d1ba7d197cc  0001-ring-allocation.patch
+242bc3876598415658d9e6d75b7653de367358826fb30b6d04b07d7aaa0f658f  0002-allocation-safety.patch
+58f6b92468a2a3c8166eadffd5fd8ca485d07ae904a06e56888ce6ace3d831b1  0003-uio-owner.patch
+3d7674e15968b61e14567b1be5d27c600f6f68797ee69bcda52921195c4a6f7f  0004-gpadl-fault-injection.patch
+38a65f2f10becf5eea2ec47a6d93775336a0599daddfe3e1c427980b6c79939d  0005-order-zero-fallback-injection.patch
+13629115fdff2aedbed3916e8028f7f4a6e7e7ff823568bb7e1d3434facb0293  0006-shared-page-test.patch
+40c35595acd247ffdc441126d562c7e10ea544ec3d52ee05e5e984902f20c2ce  0007-rescind-vs-unload.patch
+95177b1f804a920d9a9372dfab0deeada0e59cf122328eedbcca1018c5d00003  0008-buffer-ownership.patch
+416723ac4633febea128dd3c83e9b9610a11d1972f2c936938d297f07e46fd1b  0009-alloc-buffer-prototype.patch
+c6c9a9eeaece235a7bac296fd76a970eee3f8cb9a3b6eb182d043de51333f5f1  0010-uio-mmap-pin.patch
+f87467b928eacf71d1b860ad9bb9d0e38ab6c075933713c909b1ed817b247555  0011-requestor-kvcalloc.patch
+da6aa20d1b74fa0cf829cf87e63ba0e6a82547ccf5c361178a8edebeaa570fa3  0012-rndis-request-kvmalloc.patch
+ef973e71e2843a5b35f336d345ab88450b51447601eb9452014f3c359359000b  0013-netvsc-empty-completion-null.patch
+1c6319d56d5fe204d5f5e6717dc6242d8903d88610f64b0a11999656b7a5f150  0014-netvsc-kvzalloc.patch
 
 COVER SHA-256
-e2ec23f72faa96abe842fc0e5e84732a8982ccdcd9b9ee7be51ed0376c37f72b  0000-cover-letter.patch
+1cb3fe228d6dc175c194d97a3c529a860bc63b1a157d7020d763a400d9619b61  0000-cover-letter.patch
 
+Historical thirteen-patch evidence only; it does not qualify patch 0014.
 MEASURED SCOPE
-Exact final mainline tree: linked x86_64 QEMU KUnit 68/68 locally.
+Prior thirteen-patch mainline tree: linked x86_64 QEMU KUnit 68/68 locally.
 Shutdown decision mutation: two running-window failures, then restoration PASS.
 Wrapper-unpin mutation: two real-MM failures, then restoration PASS.
 Every reconstructed stage preserves the four-argument exported interfaces.
 Strict mail style: zero errors/checks; only FILE_PATH_CHANGES on 2/10/12/13.
-Per-stage x86_64/arm64 W=1/C=2 compilation: PASS, Actions 37402766418.
+Prior thirteen-patch x86_64/arm64 W=1/C=2 compilation: PASS, Actions 37402766418.
 WSL request/matcher KUnit: 25/25; native collector regressions: 34/34.
 Native ordinary WSL Actions 37395696464: executed PASS, 456 matching ACKs.
 Exact-source Hyper-V Actions 37405207883: both 100-cycle lifecycles/rescinds PASS.

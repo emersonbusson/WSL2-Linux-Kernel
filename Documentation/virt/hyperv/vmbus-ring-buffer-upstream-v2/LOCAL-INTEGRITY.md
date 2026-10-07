@@ -1,9 +1,9 @@
 # Bounded ordinary local integrity
 
-The installed ordinary WSL backport is distinct from the thirteen mainline
-mails. Its source is 22d912949f44c0b377f7612d048d92a2b9a6ee79, kernel GNU
-identity 524c9914b466a5407e6a215424fb745087fc926c, and complete running-note
-SHA-256 c20ab50c62d0c83f30f650aef7fcdf2ef27a2b785b5ebd1348badc50c4e05b2a.
+The installed ordinary WSL backport is distinct from the fourteen-patch
+mainline mails. Its source is 22d912949f44c0b377f7612d048d92a2b9a6ee79,
+kernel GNU identity 524c9914b466a5407e6a215424fb745087fc926c, and complete
+running-note SHA-256 c20ab50c62d0c83f30f650aef7fcdf2ef27a2b785b5ebd1348badc50c4e05b2a.
 
 On 2026-10-06 UTC, two Windows-supervised ordinary local rounds each verify
 3,200 MiB in fifty chunks with equal before/after SHA-256 digests. ZRAM is

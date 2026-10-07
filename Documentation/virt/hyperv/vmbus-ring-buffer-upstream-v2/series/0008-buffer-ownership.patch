@@ -1,7 +1,7 @@
 From 32a47e763ddd0f557abac0f8c75c2872c5975fd1 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 21:34:10 -0300
-Subject: [PATCH v2 08/13] hv: vmbus: retain backing until ownership and
+Subject: [PATCH v2 08/14] hv: vmbus: retain backing until ownership and
  references clear
 
 Keep allocation and GPADL state in one retained owner. Unknown create or

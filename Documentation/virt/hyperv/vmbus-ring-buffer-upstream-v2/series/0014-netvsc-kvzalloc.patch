@@ -1,0 +1,49 @@
+From 506a9cde19a7024bd18c43247661974f93dac0bf Mon Sep 17 00:00:00 2001
+From: Emerson Busson <emersonbusson@gmail.com>
+Date: Wed, 7 Oct 2026 00:27:45 -0300
+Subject: [PATCH v2 14/14] hv: netvsc: use kvzalloc for device state
+
+alloc_net_device() allocates the fixed-channel netvsc_device with
+kzalloc_obj(). The runtime fragmentation drill reaches this allocation
+from netvsc_device_add(): windows-2025 reports an order-7 allocation
+failure with about 99 MiB free, while windows-latest stalls at channel
+open until the guest timeout.
+
+This object is guest-private control-plane metadata, not DMA backing.
+Use kvzalloc_obj() so the allocation can fall back to vmalloc when a
+high-order kmalloc cannot be satisfied. Zero initialization is preserved.
+The RCU workqueue cleanup uses kvfree() to release either backing.
+
+Rollback trigger: revert if channel setup fails with vmalloc capacity
+available or teardown leaves netvsc_device allocations outstanding.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
+---
+ drivers/net/hyperv/netvsc.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
+index 0d017f836b9e..8ea7c993baac 100644
+--- a/drivers/net/hyperv/netvsc.c
++++ b/drivers/net/hyperv/netvsc.c
+@@ -144,7 +144,7 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
+ 		vfree(nvdev->chan_table[i].mrc.slots);
+ 	}
+ 
+-	kfree(nvdev);
++	kvfree(nvdev);
+ }
+ 
+ static void free_netvsc_device(struct work_struct *w)
+@@ -171,7 +171,7 @@ static struct netvsc_device *alloc_net_device(void)
+ {
+ 	struct netvsc_device *net_device;
+ 
+-	net_device = kzalloc_obj(struct netvsc_device);
++	net_device = kvzalloc_obj(struct netvsc_device);
+ 	if (!net_device)
+ 		return NULL;
+ 
+-- 
+2.43.0
+

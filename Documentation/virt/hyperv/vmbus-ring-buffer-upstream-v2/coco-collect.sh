@@ -448,14 +448,14 @@ cmd_finish() {
 			while read -r hash name; do
 				[ -n "$hash" ] || continue
 				i=$((i + 1))
-				if [ "$i" -lt 13 ]; then
+				if [ "$i" -lt 14 ]; then
 					printf '      "%s",\n' "$hash"
 				else
 					printf '      "%s"\n' "$hash"
 				fi
 			done < series/SHA256SUMS
-			if [ "$i" -ne 13 ]; then
-				warn "finish: series/SHA256SUMS has $i entries, expected 13"
+			if [ "$i" -ne 14 ]; then
+				warn "finish: series/SHA256SUMS has $i entries, expected 14"
 			fi
 		else
 			printf '      "%s"' "TODO"

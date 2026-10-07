@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Tue, 6 Oct 2026 00:00:00 +0000
-Subject: [PATCH v2 0/13] hv: vmbus: make rings and host-visible buffers
+Date: Wed, 7 Oct 2026 00:31:00 -0300
+Subject: [PATCH v2 0/14] hv: vmbus: make rings and host-visible buffers
  survive buddy fragmentation
 
 Michael Kelley's review of the original vzalloc() fallback explains why
@@ -9,9 +9,11 @@ CCA and TDX guests without a paravisor need direct-map page transitions.
 This revision uses the existing chunk allocator and keeps allocation,
 GPADL ownership and mapping references together.
 
-This is a review snapshot. The thirteen-stage architecture builds
-and ordinary Hyper-V lifecycle/rescind drills exercise these exact code
-mails. Final review and the explicitly unmeasured scopes below remain open.
+This is a review snapshot. A fourteenth patch adds a vmalloc fallback for
+the large guest-private NetVSC device object, after the runtime drill exposed
+an order-7 allocation in device setup. The thirteen-patch architecture and
+runtime results below predate that patch; the exact fourteen-patch series is
+not qualified until its build and runtime workflows pass.
 
 References:
   Initial proposal: https://lists.openwall.net/linux-kernel/2026/09/18/276
@@ -37,7 +39,7 @@ the final decision test; this does not qualify confidential hardware.
 Ring consumers select co_ring_buffer. External buffers and the legacy
 allocator select co_external_memory. The exported allocator and
 caller-decrypted GPADL prototypes retain four arguments through all
-thirteen stages. Private entry points carry the additional ownership
+fourteen stages. Private entry points carry the additional ownership
 and policy state. UIO's allocation migration follows its release support.
 
 The address, page/chunk arrays and embedded GPADL belong to one buffer.
@@ -70,13 +72,15 @@ Two new tests call the real sysfs wrapper, insert actual PTEs and check
 readable bytes and page references through success and partial -EBUSY.
 They do not execute a full kernfs syscall or full device destruction.
 
-The final three fixes use kvcalloc() for requestors, kvzalloc_obj() for
-guest-private RNDIS descriptors, and accept NULL control requests for
-empty netvsc completions. Their Fixes objects are independently pinned.
-They can be routed separately through the netvsc maintainers.
+The final four fixes use kvcalloc() for requestors, kvzalloc_obj() for
+guest-private RNDIS descriptors, handle NULL control requests for empty
+netvsc completions, and use kvzalloc_obj()/kvfree() for the large
+guest-private NetVSC device object. Their Fixes objects are independently
+pinned where applicable. They can be routed separately through the netvsc
+maintainers.
 
-Measured software and ordinary Windows evidence
------------------------------------------------
+Prior thirteen-patch software and Windows evidence
+--------------------------------------------------
 
 The exact final tree passes 68 linked x86_64 QEMU KUnit cases: 33 VMBus,
 2 actual sysfs/MM cases, 14 UIO, 11 netvsc completion, 4 RNDIS and
@@ -125,14 +129,15 @@ retains one such block at the safety cap: its fragmentation and overall
 runtime verdicts are PARTIAL. Both baseline lifecycle controls fail; the
 aggregate workflow is therefore failure. Candidate job success does not
 upgrade that PARTIAL result. The actual candidate image and all thirteen
-code-mail hashes bind to the same final source tree as the architecture run.
+prior code-mail hashes bind to the same final source tree as the architecture
+run. The new fourteenth mail is not covered by those results.
 
 The six static CoCo conditions are necessary source checks, not runtime
 proof. SEV-SNP, TDX without a paravisor and Arm CCA remain unmeasured.
 No platform result is inferred or simulated.
 
 ---
-Emerson Busson (13):
+Emerson Busson (14):
   hv: vmbus: convert ring backing through the chunk allocator
   hv: vmbus: validate chunk buffer allocation and cleanup
   uio: hv_generic: describe buffers for owned allocation
@@ -146,6 +151,7 @@ Emerson Busson (13):
   hv: vmbus: allocate the requestor array with kvcalloc()
   hv: netvsc: allocate RNDIS request descriptors with kvzalloc_obj()
   hv: netvsc: handle a NULL request address on empty completions
+  hv: netvsc: use kvzalloc for device state
 
  drivers/hv/Kconfig                          |   11 +
  drivers/hv/Makefile                         |    1 +

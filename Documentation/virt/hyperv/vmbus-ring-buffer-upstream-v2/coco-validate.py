@@ -81,7 +81,14 @@ def self_test(schema):
     report = {
         "schema": "ramshared-coco-result/v1",
         "run": {"run_id": "validator-fixture", "attempt": 1, "started_utc": "2026-10-04T00:00:00Z", "finished_utc": "2026-10-04T00:01:00Z", "executor": "fixture", "bundle_sha256": digest},
-        "candidate": {"series_base": "a" * 40, "series_tip": "b" * 40, "cover_sha256": digest, "patch_sha256s": [digest] * 13, "series_sha256sums_ok": True, "architecture": "x86_64"},
+        "candidate": {
+            "series_base": "a" * 40,
+            "series_tip": "b" * 40,
+            "cover_sha256": digest,
+            "patch_sha256s": [digest] * 14,
+            "series_sha256sums_ok": True,
+            "architecture": "x86_64",
+        },
         "row": "COCO-1",
         "capability": {"claimed_platform": "sev_snp", "isolation_mode": "sev_snp", "isolation_proof": ["synthetic fixture only"], "paravisor": "unknown", "paravisor_evidence": [], "vmbus_present": True, "preflight_report_path": "preflight.txt"},
         "infrastructure_status": "completed", "qualification_status": "PASS", "status_justification": "Validator fixture, never platform proof",

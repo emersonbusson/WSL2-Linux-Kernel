@@ -1,7 +1,7 @@
 From 1c07a43a98c2c2c92efb73d40ab07404a6b639d9 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Sun, 4 Oct 2026 17:20:25 -0300
-Subject: [PATCH v2 13/13] hv: netvsc: handle a NULL request address on empty
+Subject: [PATCH v2 13/14] hv: netvsc: handle a NULL request address on empty
  completions
 
 netvsc_send_pkt() registers (ulong)skb as the VMBus request address.

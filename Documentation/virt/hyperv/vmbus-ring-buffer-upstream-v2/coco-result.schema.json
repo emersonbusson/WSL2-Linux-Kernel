@@ -85,10 +85,10 @@
         "cover_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "patch_sha256s": {
           "type": "array",
-          "minItems": 13,
-          "maxItems": 13,
+          "minItems": 14,
+          "maxItems": 14,
           "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-          "description": "SHA-256 of 0001 through 0013 in order. Exactly thirteen, never the cover."
+          "description": "SHA-256 of 0001 through 0014 in order. Exactly fourteen, never the cover."
         },
         "series_sha256sums_ok": {
           "type": "boolean",
@@ -105,7 +105,7 @@
           "type": ["object", "null"],
           "additionalProperties": false,
           "required": ["description", "sha256", "experimental"],
-          "description": "Any patch or config change that is NOT part of the thirteen production bytes, used only to gather diagnostics. Must be marked experimental and must never be folded into a production claim. null when the candidate was unmodified.",
+          "description": "Any patch or config change that is NOT part of the fourteen production bytes, used only to gather diagnostics. Must be marked experimental and must never be folded into a production claim. null when the candidate was unmodified.",
           "properties": {
             "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
             "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },

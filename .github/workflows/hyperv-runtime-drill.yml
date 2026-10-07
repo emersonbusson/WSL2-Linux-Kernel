@@ -1,6 +1,6 @@
 name: Hyper-V runtime drill
 
-# Boots the exact thirteen-patch candidate as a disposable Gen2 Hyper-V guest
+# Boots the exact fourteen-patch candidate as a disposable Gen2 Hyper-V guest
 # and runs the GPADL/UIO lifecycle and order-zero fallback drills against those
 # bytes.
 #
@@ -130,10 +130,10 @@ jobs:
           done
           git -C linux diff --check
           printf 'applied_stages=%s\n' "$stage" | tee drill-artifacts/applied-stages.txt
-          test "$stage" -eq 13
+          test "$stage" -eq 14
           git -C linux add -- drivers/hv drivers/net/hyperv drivers/uio include/linux/hyperv.h
           git -C linux write-tree > drill-artifacts/applied-source-tree.txt
-          test "$(cat drill-artifacts/applied-source-tree.txt)" = 55eff83ccf8ef5fef028c5f1d612884cad6010d6
+          test "$(cat drill-artifacts/applied-source-tree.txt)" = 2bdbf11b13e916ae42342de83f10e4d7247cb59f
 
       - name: Build the self-booting drill kernel
         env:
@@ -194,8 +194,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-2025, windows-latest]
-        variant: [baseline, candidate]
+        # The negative control is required on windows-2025, where it can
+        # reach the unchanged 64 MiB reserve gate and reproduce the planned
+        # order-7 failure. windows-latest runs the candidate only: its baseline
+        # cannot meet that reserve gate, so it is not a valid control there.
+        include:
+          - runner: windows-2025
+            variant: baseline
+          - runner: windows-2025
+            variant: candidate
+          - runner: windows-latest
+            variant: candidate
     runs-on: ${{ matrix.runner }}
     # 40, not 30: the guest backstop below is 1200s and the harness adds
     # ~110s of setup/teardown on top. 30 minutes would kill the job while

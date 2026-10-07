@@ -1,7 +1,7 @@
 From 8c602dd88b2f31ad99336037989dbc34ce45ce14 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 24 Sep 2026 14:17:34 -0300
-Subject: [PATCH v2 02/13] hv: vmbus: validate chunk buffer allocation and
+Subject: [PATCH v2 02/14] hv: vmbus: validate chunk buffer allocation and
  cleanup
 
 Validate rounded sizes before storing them and preserve allocated

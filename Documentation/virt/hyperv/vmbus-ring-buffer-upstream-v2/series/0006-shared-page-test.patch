@@ -1,7 +1,7 @@
 From c40b519737f2dcb868556b4d863a8b84bdb8514b Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Fri, 2 Oct 2026 20:43:31 -0300
-Subject: [PATCH v2 06/13] hv: vmbus: cover all shared-page policy combinations
+Subject: [PATCH v2 06/14] hv: vmbus: cover all shared-page policy combinations
 
 Name the shared-page selection and enumerate all eight combinations of
 Hyper-V isolation, independent guest-memory encryption and channel
