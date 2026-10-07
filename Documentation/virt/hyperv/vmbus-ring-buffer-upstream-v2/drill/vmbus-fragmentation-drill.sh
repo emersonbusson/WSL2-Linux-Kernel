@@ -34,6 +34,27 @@
 # dependency, not a shim.
 set -euo pipefail
 
+fragment_pattern_ready() {
+	[ "$1" = yes ] || return 1
+	case "$2" in
+	*"FRAGMENT_BUDDY ready=1 "*) return 0 ;;
+	esac
+	return 1
+}
+
+if [ "${1:-}" = --self-test ]; then
+	if fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=1 bounded=1' &&
+		! fragment_pattern_ready no 'FRAGMENT_BUDDY ready=1 bounded=1' &&
+		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=0 reason=reserve' &&
+		! fragment_pattern_ready yes 'FRAGMENT_BUDDY ready=10 bounded=1' &&
+		! fragment_pattern_ready yes ''; then
+		printf '%s\n' 'fragmentation admission fixtures: PASS'
+		exit 0
+	fi
+	printf '%s\n' 'fragmentation admission fixtures: FAIL' >&2
+	exit 1
+fi
+
 LOG="${2:-/var/tmp/vmbus-fragmentation-drill.log}"
 : >"$LOG"
 FRAG_RELEASE="${LOG}.release.$$"
@@ -428,6 +449,12 @@ elif [ -z "$FRAG_LINE" ]; then
 	say "FRAGMENT refused to build the pattern (see FRAGMENT_BUDDY line above)"
 else
 	say "FRAGMENT pattern in place"
+fi
+
+if ! fragment_pattern_ready "$FRAG_READY" "$FRAG_LINE"; then
+	say "VERDICT=INCONCLUSIVE_NO_PATTERN (runtime reserve did not qualify)"
+	release_fragment_helper
+	exit 3
 fi
 
 say "--- BUDDY AFTER FRAGMENT ---"

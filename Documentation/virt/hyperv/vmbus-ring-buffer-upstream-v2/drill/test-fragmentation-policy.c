@@ -119,8 +119,21 @@ int main(void)
 	assert(!frag_should_refine_order7(1, 256));
 	assert(!frag_should_refine_order7(0, 384));
 	/* Keep the channel-open hole budget large enough for netvsc buffers. */
-	assert(FRAG_HOLE_CAP * FRAG_PAGE >= 96L * 1024 * 1024);
-	assert(FRAG_HOLE_CAP <= 32768L);
+	assert(FRAG_HOLE_CAP * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES);
+	assert(FRAG_HOLE_CAP <= FRAG_HOLE_MAX_CAP);
+	assert(frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES,
+					       FRAG_RUNTIME_MIN_FREE_KB,
+					       FRAG_RUNTIME_MIN_ORDER2_BLOCKS));
+	assert(!frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES - 1,
+						FRAG_RUNTIME_MIN_FREE_KB,
+						FRAG_RUNTIME_MIN_ORDER2_BLOCKS));
+	assert(!frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES,
+						FRAG_RUNTIME_MIN_FREE_KB - 1,
+						FRAG_RUNTIME_MIN_ORDER2_BLOCKS));
+	assert(!frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES,
+						FRAG_RUNTIME_MIN_FREE_KB,
+						FRAG_RUNTIME_MIN_ORDER2_BLOCKS - 1));
+	assert(!frag_runtime_reserve_qualified(-1, -1, -1));
 	assert(!frag_release_requested("/nonexistent/vmbus-release-sentinel"));
 	assert(frag_release_requested("/dev/null"));
 	frag_stop_signal = SIGTERM;

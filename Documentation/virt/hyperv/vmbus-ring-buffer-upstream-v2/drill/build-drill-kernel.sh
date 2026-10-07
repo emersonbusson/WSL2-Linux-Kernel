@@ -54,6 +54,8 @@ cc -O2 -Wall -Wextra -Werror \
 	-o "$OUT/bin/test-fragmentation-policy" \
 	"$HERE/test-fragmentation-policy.c"
 "$OUT/bin/test-fragmentation-policy"
+say "policy: testing fail-closed fragmentation admission"
+bash "$HERE/vmbus-fragmentation-drill.sh" --self-test
 cc -O2 -Wall -Wextra -static -s \
 	-o "$OUT/bin/vmbus_drill_helper" \
 	"$HERE/vmbus_drill_helper.c"

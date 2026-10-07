@@ -44,7 +44,11 @@
  * order-0 fallback. Hole count is capped: the property is what matters,
  * not the density, and an uncapped punch drains the Unmovable slab through
  * vm_area_dup() until out_of_memory() panics an unkillable guest. It
- * prints FRAGMENT_BUDDY ready=1 only after the pattern is in place.
+ * also has to fund reopening hv_netvsc: its default receive buffer is
+ * 16 MiB and its send buffer can be 15 MiB. The helper requires at least
+ * 64 MiB of measured free memory above the live watermark and an order-2
+ * stack reserve before it pins the pattern or reports ready=1. A smaller
+ * reserve fails closed before the channel-open attempt.
  *
  * The loop stops on the measured condition, not on hard refusal, and keeps
  * a real free-memory margin while doing it: pagefault_out_of_memory() only
@@ -816,7 +820,21 @@ static int do_mlock_hog(int argc, char **argv)
  * free pages are buddies", not how dense the holes are, so cap them and
  * stop punching before slab starves.
  */
-#define FRAG_HOLE_CAP 4096L
+#define FRAG_HOLE_MIN_BYTES (96L * 1024 * 1024)
+#define FRAG_HOLE_MAX_BYTES (128L * 1024 * 1024)
+#define FRAG_HOLE_CAP (FRAG_HOLE_MIN_BYTES / FRAG_PAGE)
+#define FRAG_HOLE_MAX_CAP (FRAG_HOLE_MAX_BYTES / FRAG_PAGE)
+/*
+ * hv_netvsc may allocate a 16 MiB receive buffer and a 15 MiB send buffer
+ * while this pattern is held. Require 64 MiB of real MemFree above the live
+ * watermark before opening the channel so those buffers retain 33 MiB of
+ * guest headroom. The 96 MiB hole cap leaves room for the VMA metadata
+ * created by each isolated munmap.
+ */
+#define FRAG_RUNTIME_MIN_FREE_KB (64L * 1024)
+#define FRAG_RUNTIME_MIN_HOLE_PAGES \
+	((FRAG_RUNTIME_MIN_FREE_KB * 1024L) / FRAG_PAGE)
+#define FRAG_RUNTIME_MIN_ORDER2_BLOCKS 64L
 /*
  * The chase spends the remaining safe headroom after the main fragmentation
  * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
@@ -1126,6 +1144,17 @@ static int frag_should_preserve_order7(long blocks, long pages)
 static int frag_should_refine_order7(long blocks, long pages)
 {
 	return blocks > 0 && pages > FRAG_BOUNDED_MAX_REMAINING_PAGES;
+}
+
+static int frag_runtime_reserve_qualified(long freed_pages,
+					  long free_above_wmark_kb,
+					  long order2_blocks)
+{
+	return FRAG_HOLE_CAP * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES &&
+	       FRAG_HOLE_CAP <= FRAG_HOLE_MAX_CAP &&
+	       freed_pages >= FRAG_RUNTIME_MIN_HOLE_PAGES &&
+	       free_above_wmark_kb >= FRAG_RUNTIME_MIN_FREE_KB &&
+	       order2_blocks >= FRAG_RUNTIME_MIN_ORDER2_BLOCKS;
 }
 
 static void frag_wait_for_release(const char *release_file, long hold)
@@ -1452,7 +1481,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	long mib, hold, want, got = 0, locked = 0, i, off, stopped = 0;
 	long freed_pages = 0, held_pages = 0, no_pfn = 0, pairs = 0;
 	long high_before = -1, high_locked = -1, high_after = -1;
-	long free_kb = -1;
+	long free_kb = -1, free_above_wmark_kb = -1;
 	long high_before_pages = -1, high_locked_pages = -1;
 	long high_after_pages = -1;
 	long wmark_kb = -1, floor_kb = -1;
@@ -1906,9 +1935,9 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * Punching after means the chase faults into an untouched margin whose
 	 * only free memory is the order-0-and-up the main loop left behind.
 	 * The small-order residue goes first, and then every subsequent chunk
-	 * is a split of an order-7-and-up block. It also keeps the 16 MiB out
-	 * of the chase's RSS: the ring allocation gets it later, which is the
-	 * point of the holes in the first place.
+	 * is a split of an order-7-and-up block. It also keeps the bounded
+	 * channel-open reserve out of the chase's RSS: that reserve is released
+	 * later, which is the point of the holes in the first place.
 	 *
 	 * Chase: split the high-order blocks the main loop's margin left
 	 * behind. Checked every chunk, against the same measured condition as
@@ -2037,10 +2066,11 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * VMA and allocates a vm_area_struct from the Unmovable slab; a quarter
 	 * million of them drained that pool on a 2 GiB guest and the resulting
 	 * out_of_memory() panicked the machine because this process was
-	 * unkillable. Cap the holes at FRAG_HOLE_CAP and the slab demand
-	 * disappears: 4096 vm_area_structs cannot starve Unmovable.
-	 * FRAG_HOLE_CAP holes still free 16 MiB of order-0 -- far more than the
-	 * 2 MiB ring needs -- and the held buddies keep order-7 from reforming.
+	 * unkillable. Cap the holes at FRAG_HOLE_CAP (24,576 VMA splits), and
+	 * require the measured free-memory reserve before opening the channel.
+	 * This frees up to 96 MiB of order-0 pages for hv_netvsc buffers plus
+	 * guest headroom; held buddies keep order-7 from reforming. If the cap
+	 * cannot produce the minimum reserve, fail closed.
 	 */
 	for (i = 0; i < got && freed_pages < FRAG_HOLE_CAP; i++) {
 		char *m = maps[i];
@@ -2187,31 +2217,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	}
 
 	/*
-	 * The pattern is built and measured. Pin now, and keep the pin for the
-	 * whole hold: the drill shell's post-ready work -- the buddy snapshot,
-	 * the high-order count and the channel-open rebind -- all run against
-	 * this process holding the pages, and a reclaim in that window is what
-	 * turned a finished pattern into 356 free high-order blocks and a
-	 * rebind that failed on a buddy that had reassembled. The pin is
-	 * dropped again when the hold ends.
-	 */
-	if (set_oom_adj(-1000) || oom_score_adj_read() != -1000) {
-		printf("FRAGMENT_BUDDY ready=0 reason=oom-score-pin-failed\n");
-		fflush(stdout);
-		rc = 3;
-		goto cleanup;
-	}
-
-	/*
-	 * Return order-2 stacks BEFORE ready=1 is printed, not after. The
-	 * drill shell's wait loop greps the log for ready=1 and forks
-	 * immediately -- grep | tail | tee, buddy(), the channel rebind --
-	 * and every one of those forks needs an order-2 stack. Releasing
-	 * after the printf is a race that run 36914537690 lost: the shell
-	 * forked, copy_process() found no order-2 block, the OOM killer
-	 * took the shell (this process is pinned at -1000), init found
-	 * nothing killable and the guest panicked. The OOM dump still read
-	 * `8*8kB (U)` because this loop had run by then -- too late.
+	 * Return order-2 stacks before ready=1. The current shell parser uses
+	 * builtins, but channel setup and recovery still need compound-page
+	 * headroom. Earlier runs lost the shell when copy_process() found no
+	 * order-2 block; the guest then panicked before evidence was written.
 	 *
 	 * Returning the groups first does not weaken the measured claim.
 	 * high_order_7plus counts orders 7 and up; order-2 blocks are
@@ -2299,6 +2308,33 @@ static int do_fragment_buddy(int argc, char **argv)
 	printf("FRAGMENT_BUDDY order2_reserve groups=%ld pages=%ld reserve=%ld buddy_order2=%ld\n",
 	       order2_groups, order2_pages, reserve_got, order2_buddy);
 	fflush(stdout);
+	free_kb = mem_free_kb();
+	wmark_kb = live_min_watermark_kb();
+	if (free_kb >= 0 && wmark_kb >= 0 && free_kb >= wmark_kb)
+		free_above_wmark_kb = free_kb - wmark_kb;
+	if (!frag_runtime_reserve_qualified(freed_pages, free_above_wmark_kb,
+					    order2_buddy)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=runtime-reserve-insufficient "
+		       "freed=%ld required_holes=%ld free_kb=%ld "
+		       "free_above_wmark_kb=%ld "
+		       "required_free_kb=%ld buddy_order2=%ld "
+		       "required_order2=%ld wmark_kb=%ld\n",
+		       freed_pages, FRAG_RUNTIME_MIN_HOLE_PAGES, free_kb,
+		       free_above_wmark_kb,
+		       FRAG_RUNTIME_MIN_FREE_KB, order2_buddy,
+		       FRAG_RUNTIME_MIN_ORDER2_BLOCKS, wmark_kb);
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
+
+	/* Pin only after the pressure pattern and channel-open reserve qualify. */
+	if (set_oom_adj(-1000) || oom_score_adj_read() != -1000) {
+		printf("FRAGMENT_BUDDY ready=0 reason=oom-score-pin-failed\n");
+		fflush(stdout);
+		rc = 3;
+		goto cleanup;
+	}
 
 	/*
 	 * `exhausted` remains the strict raw-count result. `bounded` is a
@@ -2310,8 +2346,6 @@ static int do_fragment_buddy(int argc, char **argv)
 						  chase_free_kb >= 0 &&
 						  chase_wmark_kb >= 0 &&
 						  chase_free_kb >= chase_wmark_kb);
-	free_kb = mem_free_kb();
-	wmark_kb = live_min_watermark_kb();
 	printf("FRAGMENT_BUDDY ready=1 bounded=%d chunks=%ld pages=%ld held=%ld freed=%ld locked=%ld pairs=%ld chunk_kib=64 cap_chunks=%ld hole_cap=%ld chase=%ld chase_holes=%ld chase_pairs=%ld unsplit=%ld exhausted=%ld pagemap=1 groups=%ld buddy_order2=%ld stop=%s high_order_7plus=%ld->%ld->%ld high_order_7plus_pages=%ld->%ld->%ld floor_kb=%ld wmark_kb=%ld free_kb=%ld chase_floor_kb=%ld chase_wmark_kb=%ld chase_free_kb=%ld\n",
 	       bounded, got, got * (FRAG_CHUNK / FRAG_PAGE), held_pages,
 	       freed_pages, locked, pairs, want, FRAG_HOLE_CAP, chase, chase_holes,
