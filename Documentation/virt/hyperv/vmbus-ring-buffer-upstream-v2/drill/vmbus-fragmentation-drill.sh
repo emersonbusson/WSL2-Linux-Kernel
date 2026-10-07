@@ -66,8 +66,71 @@ fragment_order7_reserve_qualified() {
 	[ $(( $2 % 128 )) -eq 0 ] && [ "$2" -ge $(( $1 * 128 )) ]
 }
 
+fragment_count_nic_channels() {
+	local device="${1:-}" channel
+	[ "$#" -eq 1 ] && [ -n "$device" ] &&
+		[ -d "$device/channels" ] || return 1
+	FRAG_NIC_CHANNEL_COUNT=0
+	for channel in "$device"/channels/*; do
+		[ -d "$channel" ] || continue
+		case "${channel##*/}" in '' | *[!0-9]*) continue ;; esac
+		FRAG_NIC_CHANNEL_COUNT=$((FRAG_NIC_CHANNEL_COUNT + 1))
+	done
+	return 0
+}
+
+fragment_nic_topology_qualified() {
+	[ "$#" -eq 2 ] || return 1
+	case "$1" in '' | *[!0-9]*) return 1 ;; esac
+	case "$2" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 2 ] && [ "$2" -eq "$1" ]
+}
+
+fragment_wait_nic_topology() {
+	local device="${1:-}" expected="${2:-}" stable_required="${3:-}"
+	local retry_budget="${4:-}" tries=0 stable_run=0 previous='' current=''
+	FRAG_NIC_CHANNELS_REBOUND=no
+	case "$expected" in '' | *[!0-9]*) return 1 ;; esac
+	case "$stable_required" in '' | *[!0-9]*) return 1 ;; esac
+	case "$retry_budget" in '' | *[!0-9]*) return 1 ;; esac
+	if [ "$expected" -lt 2 ] || [ "$stable_required" -lt 2 ] ||
+		[ "$retry_budget" -lt 1 ]; then
+		return 1
+	fi
+	while [ "$tries" -le "$retry_budget" ]; do
+		if fragment_count_nic_channels "$device"; then
+			current="$FRAG_NIC_CHANNEL_COUNT"
+		else
+			current=''
+		fi
+		if [ -n "$current" ] &&
+			fragment_nic_topology_qualified "$expected" "$current"; then
+			if [ "$current" = "$previous" ]; then
+				stable_run=$((stable_run + 1))
+			else
+				stable_run=1
+			fi
+		else
+			stable_run=0
+		fi
+		say "NIC_CHANNELS_REBOUND try=$tries run=$stable_run count=${current:-unavailable} expected=$expected"
+		if [ "$stable_run" -ge "$stable_required" ]; then
+			FRAG_NIC_CHANNELS_REBOUND=yes
+			return 0
+		fi
+		previous="$current"
+		tries=$((tries + 1))
+		if [ "$tries" -le "$retry_budget" ]; then
+			read -t 1 _nic_tick 2>/dev/null || true
+		fi
+	done
+	say "NIC_CHANNELS_REBOUND verified=no expected=$expected last=${current:-unavailable}"
+	return 1
+}
+
 fragment_nic_topology_fixtures() {
 	local root
+	say() { :; }
 	root="$(mktemp -d /tmp/vmbus-fragment-nic-fixture.XXXXXX)"
 	mkdir -p "$root/channels/14" "$root/channels/15" \
 		"$root/channels/uevent"
@@ -81,6 +144,16 @@ fragment_nic_topology_fixtures() {
 		fragment_nic_topology_qualified 2 1 ||
 		fragment_nic_topology_qualified 1 1 ||
 		fragment_nic_topology_qualified invalid 2; then
+		rm -rf "$root"
+		return 1
+	fi
+	if ! fragment_wait_nic_topology "$root" 2 3 3 ||
+		[ "$FRAG_NIC_CHANNELS_REBOUND" != yes ]; then
+		rm -rf "$root"
+		return 1
+	fi
+	rmdir "$root/channels/15"
+	if fragment_wait_nic_topology "$root" 2 2 1; then
 		rm -rf "$root"
 		return 1
 	fi
@@ -130,7 +203,11 @@ FRAG_SAVED_PCP_HIGH_FRACTION=
 NIC=${NIC:-}
 TRACE_DIR=/sys/kernel/tracing
 OWNER_CHANNEL_IDS_FILE="${LOG}.channels.$$"
+OWNER_CHANNEL_IDS_POST_FILE="${LOG}.channels-post.$$"
 OWNER_CHANNEL_COUNT=0
+NIC_CHANNELS_BASELINE=0
+NIC_CHANNELS_REBOUND=no
+NIC_CHANNEL_IDS_POST_CAPTURE_OK=no
 OWNER_TRACE_FROZEN=no
 OWNER_TRACE_AVAILABLE=no
 OWNER_TRACE_WAS_ENABLED=no
@@ -250,9 +327,10 @@ count_vmbus_maps() {
 }
 
 capture_owner_channels() {
+	_channel_ids_file="${1:-$OWNER_CHANNEL_IDS_FILE}"
 	_channel_dir="/sys/bus/vmbus/devices/$NIC/channels"
 	OWNER_CHANNEL_COUNT=0
-	: >"$OWNER_CHANNEL_IDS_FILE" || return 1
+	: >"$_channel_ids_file" || return 1
 	if [ ! -d "$_channel_dir" ]; then
 		return 1
 	fi
@@ -262,7 +340,7 @@ capture_owner_channels() {
 		case "$_channel_id" in
 		'' | *[!0-9]*) return 1 ;;
 		esac
-		printf '%s\n' "$_channel_id" >>"$OWNER_CHANNEL_IDS_FILE" || return 1
+		printf '%s\n' "$_channel_id" >>"$_channel_ids_file" || return 1
 		OWNER_CHANNEL_COUNT=$((OWNER_CHANNEL_COUNT + 1))
 	done
 	[ "$OWNER_CHANNEL_COUNT" -gt 0 ]
@@ -317,7 +395,7 @@ restore_nic_binding() {
 fragmentation_exit_cleanup() {
 	release_fragment_helper
 	restore_owner_trace_state
-	rm -f "$OWNER_CHANNEL_IDS_FILE" 2>/dev/null || true
+	rm -f "$OWNER_CHANNEL_IDS_FILE" "$OWNER_CHANNEL_IDS_POST_FILE" 2>/dev/null || true
 	if ! restore_nic_binding; then
 		printf '%s\n' 'FRAGMENT_NIC_RESTORE verified=no' >>"$LOG"
 	fi
@@ -353,11 +431,17 @@ quiesce_nic_before_pressure() {
 		say "FAIL: tracing state is unavailable"
 		return 1
 	fi
+	if ! capture_owner_channels; then
+		say "FAIL: no channel directories captured for NIC topology"
+		return 1
+	fi
+	NIC_CHANNELS_BASELINE=$OWNER_CHANNEL_COUNT
+	if [ "$NIC_CHANNELS_BASELINE" -lt 2 ]; then
+		say "FAIL: fragmented channel-open drill needs at least two NIC channels, got $NIC_CHANNELS_BASELINE"
+		return 1
+	fi
+	say "NIC_CHANNELS baseline=$NIC_CHANNELS_BASELINE minimum_required=2"
 	if [ "$_owner_event_enable" = 1 ] && [ "$_owner_trace_on" = 1 ]; then
-		if ! capture_owner_channels; then
-			say "FAIL: no channel IDs captured for NIC owner accounting"
-			return 1
-		fi
 		OWNER_TRACE_AVAILABLE=yes
 		OWNER_CHANNEL_CAPTURE_OK=yes
 		say "OWNER_CHANNELS target_capture=verified channels=$OWNER_CHANNEL_COUNT"
@@ -691,10 +775,20 @@ for _d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
 	[ "${_d##*/}" = "$NIC" ] && REBOUND=yes
 done
 say "nic_rebound=$REBOUND"
-if [ "$REBOUND" = yes ] && [ "$OWNER_CHANNEL_CAPTURE_OK" = yes ]; then
-	say "OWNER_CHANNELS rebound_check=using_pre_unbind_capture channels=$OWNER_CHANNEL_COUNT"
+if [ "$REBOUND" = yes ] && fragment_wait_nic_topology \
+	"/sys/bus/vmbus/devices/$NIC" "$NIC_CHANNELS_BASELINE" 3 10; then
+	NIC_CHANNELS_REBOUND=yes
+	say "NIC_CHANNELS rebound=verified baseline=$NIC_CHANNELS_BASELINE"
+	if capture_owner_channels "$OWNER_CHANNEL_IDS_POST_FILE" &&
+		[ "$OWNER_CHANNEL_COUNT" -eq "$NIC_CHANNELS_BASELINE" ]; then
+		NIC_CHANNEL_IDS_POST_CAPTURE_OK=yes
+		say "OWNER_CHANNELS post_open_capture=verified channels=$OWNER_CHANNEL_COUNT"
+	else
+		say "OWNER_CHANNELS post_open_capture=failed expected=$NIC_CHANNELS_BASELINE observed=$OWNER_CHANNEL_COUNT"
+	fi
 else
-	say "OWNER_CHANNELS rebound_check=unavailable"
+	NIC_CHANNELS_REBOUND=no
+	say "NIC_CHANNELS rebound=failed expected=$NIC_CHANNELS_BASELINE"
 fi
 
 # --- verdict ----------------------------------------------------------------
@@ -798,10 +892,11 @@ if printf '0\n' >"$TRACE_DIR/tracing_on" 2>>"$LOG"; then
 else
 	OWNER_TRACE_FROZEN=no
 fi
-if [ "$REBOUND" = yes ] && [ "$OWNER_CHANNEL_CAPTURE_OK" = yes ] &&
-	[ "$OWNER_TRACE_FROZEN" = yes ]; then
+if [ "$REBOUND" = yes ] && [ "$NIC_CHANNELS_REBOUND" = yes ] &&
+	[ "$NIC_CHANNEL_IDS_POST_CAPTURE_OK" = yes ] &&
+	[ "$OWNER_CHANNEL_CAPTURE_OK" = yes ] && [ "$OWNER_TRACE_FROZEN" = yes ]; then
 	if OWNER_POST_OPEN_RESULT=$("$HELPER" owner-channel-check "$TRACE_DIR/trace" \
-		"$OWNER_CHANNEL_IDS_FILE" active 2>&1) && owner_trace_stats_clean; then
+		"$OWNER_CHANNEL_IDS_POST_FILE" active 2>&1) && owner_trace_stats_clean; then
 		OWNER_POST_OPEN_STATS=$OWNER_TRACE_STATS
 		OWNER_POST_OPEN_VERIFIED=yes
 		say "$OWNER_POST_OPEN_RESULT"
@@ -812,6 +907,10 @@ if [ "$REBOUND" = yes ] && [ "$OWNER_CHANNEL_CAPTURE_OK" = yes ] &&
 	fi
 elif [ "$REBOUND" != yes ]; then
 	say "OWNER_TRACE_POST_OPEN verified=no reason=NIC-not-rebound-or-channels-missing"
+elif [ "$NIC_CHANNELS_REBOUND" != yes ]; then
+	say "OWNER_TRACE_POST_OPEN verified=no reason=channel-topology-not-restored"
+elif [ "$NIC_CHANNEL_IDS_POST_CAPTURE_OK" != yes ]; then
+	say "OWNER_TRACE_POST_OPEN verified=no reason=post-open-channel-capture"
 elif [ "$OWNER_CHANNEL_CAPTURE_OK" != yes ]; then
 	say "OWNER_TRACE_POST_OPEN verified=no reason=owner-trace-unavailable"
 else
@@ -853,6 +952,7 @@ OOPS="$(printf '%s\n' "$DM" | grep -vF 'Warning: unable to open an initial conso
 HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER_REREAD}"
 HIGH_ORDER_PAGES="${HIGH_ORDER_PAGES_HELPER:-$HIGH_ORDER_PAGES_REREAD}"
 say "RESULT high_order_7plus_blocks=$HIGH_ORDER (after_holes=$HIGH_ORDER_REREAD after_channel=$HIGH_ORDER_AFTER_CHANNEL) high_order_7plus_pages=$HIGH_ORDER_PAGES (after_holes=$HIGH_ORDER_PAGES_REREAD after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL) exhausted=${EXHAUSTED:-unknown} bounded=${BOUNDED:-unknown} pagemap=${PAGEMAP:-unknown} unsplit=${UNSPLIT:-unknown} stop=${STOPREASON:-unknown} restore=$FRAG_RESTORE_OK restore_source=$FRAG_RESTORE_SOURCE helper_status=$HOG_EXIT_STATUS order7_dmesg=$ORDER7 accept4_failures=$ACCEPT oops=$OOPS rebind=$REBOUND"
+say "RESULT_CHANNELS baseline=$NIC_CHANNELS_BASELINE rebound=${NIC_CHANNELS_REBOUND:-no} post_open_channel_ids=${NIC_CHANNEL_IDS_POST_CAPTURE_OK:-no}"
 
 # Exit codes for init:
 #   0  PASS            pressure achieved and ring allocation survived it
@@ -890,6 +990,9 @@ elif [ -z "$FRAG_LINE" ]; then
 	RC=3
 elif [ "$REBOUND" != yes ]; then
 	say "VERDICT=FAIL channel did not rebind after fragmentation"
+	RC=1
+elif [ "$NIC_CHANNELS_REBOUND" != yes ]; then
+	say "VERDICT=FAIL channel count did not return to the captured multi-channel topology"
 	RC=1
 elif [ "$OWNER_POST_OPEN_VERIFIED" != yes ]; then
 	say "VERDICT=FAIL target channel owner was not proven live after fragmented open"

@@ -1300,7 +1300,6 @@ for i in $(seq 1 "$CYCLES"); do
 	if ! settle_vmbus_nic_channels "CYCLE_${i}_CHANNELS" \
 		"$NIC_SYSFS_DIR" "$NIC_CHANNELS_BASELINE" 2 3; then
 		CYCLE_TOPOLOGY_FAILS=$((CYCLE_TOPOLOGY_FAILS + 1))
-		CYCLE_FAILS=$((CYCLE_FAILS + 1))
 		say "cycle$i channel_topology_fail expected=$NIC_CHANNELS_BASELINE observed=${NIC_CHANNELS_SETTLED:-none}"
 	fi
 	if [ $((i % 10)) -eq 0 ]; then
@@ -1310,9 +1309,8 @@ done
 if ! settle_vmbus_nic_channels PHASE1_CHANNELS \
 	"$NIC_SYSFS_DIR" "$NIC_CHANNELS_BASELINE" 3 15; then
 	CYCLE_TOPOLOGY_FAILS=$((CYCLE_TOPOLOGY_FAILS + 1))
-	CYCLE_FAILS=$((CYCLE_FAILS + 1))
 fi
-say "PHASE1 cycle_fails=$CYCLE_FAILS topology_fails=$CYCLE_TOPOLOGY_FAILS / $((CYCLES * 4)) steps"
+say "PHASE1 write_failures=$CYCLE_FAILS/$((CYCLES * 4)) topology_failures=$CYCLE_TOPOLOGY_FAILS expected_channels=$NIC_CHANNELS_BASELINE"
 
 say "PHASE1-AFTER $(vmbus_maps || echo 'MAPS unavailable')"
 
@@ -1851,6 +1849,9 @@ CLEANUP_WHY="steps ok, teardown released"
 if [ "${CYCLE_FAILS:-0}" -gt 0 ]; then
 	CLEANUP_VERDICT=FAIL
 	CLEANUP_WHY="cycle_fails=$CYCLE_FAILS"
+elif [ "${CYCLE_TOPOLOGY_FAILS:-0}" -gt 0 ]; then
+	CLEANUP_VERDICT=FAIL
+	CLEANUP_WHY="channel_topology_failures=$CYCLE_TOPOLOGY_FAILS expected_channels=$NIC_CHANNELS_BASELINE"
 elif [ -n "$PHASE2_TUPLE" ] && [ -n "$SETTLE_TUPLE" ]; then
 	PH2_N=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $1+0}')
 	PH2_B=$(printf '%s\n' "$PHASE2_TUPLE" | awk '{print $2+0}')
