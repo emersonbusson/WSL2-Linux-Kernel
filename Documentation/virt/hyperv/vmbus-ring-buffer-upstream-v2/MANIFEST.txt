@@ -1,6 +1,6 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: run 37590726170 stopped x86_64 and arm64 at strict checkpatch because patch 0011 lacked Signed-off-by; this was not a compile or test result. The sign-off and mail hash are corrected. Test-only WSL run 37591286755 confirmed the zero-size requestor Oops; the candidate now includes zero-size rejection, vmalloc-safe RNDIS GPAs, and kvzalloc-backed NetVSC state. Final green validation remains pending. No mail sent.
+Historical status (pre-final qualification): run 37590726170 stopped x86_64 and arm64 at strict checkpatch because patch 0011 lacked Signed-off-by; this was not a compile or test result. The sign-off and mail hash are corrected. Test-only WSL run 37591286755 confirmed the zero-size requestor Oops; the candidate now includes zero-size rejection, vmalloc-safe RNDIS GPAs, and kvzalloc-backed NetVSC state. Final green validation remains pending. No mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
 Mainline reconstructed tip: f950d50cea3c3a9ce3a69bb81f58fb8bba4563eb
 Expected applied source tree: e6fe523ca92ce30ea7edb265b8a26bf20a867c47
@@ -53,7 +53,7 @@ requires a fresh complete green workflow before qualification.
 PRE-CORRECTION COVER SHA-256
 1cb3fe228d6dc175c194d97a3c529a860bc63b1a157d7020d763a400d9619b61  0000-cover-letter.patch
 
-PRODUCTION COVER SHA-256 (current review text)
+PRE-QUALIFICATION PRODUCTION COVER SHA-256 (retained in history)
 7e95f21289127455b0ae512fc6fcbd515f6a988127effe21b6dcde621776268f  0000-cover-letter.patch
 
 Historical thirteen-patch evidence only; it does not qualify patch 0014.
@@ -91,3 +91,81 @@ Historical local host-control continuity PARTIAL; later action refusals retained
 Guardian and managed custody regressions PASS; corrected two-round pressure PASS.
 See LOCAL-INTEGRITY.md; full capacity and prolonged qualification remain open.
 Confidential transitions and complete mainline unload/destruction: unqualified.
+
+CURRENT FOURTEEN-PATCH QUALIFICATION UPDATE — 2026-10-07
+This section supersedes the pre-qualification status above. The prior text and
+cover bytes are retained under history/ for audit. No e-mail has been sent.
+
+Current review branch commit: a4490a1cec985158127ce7dc8e690860a7aa1cef
+VMBus run source commit: ba7422432d54473f9aa77a75fb376cf06ed65d09
+WSL and Hyper-V run source commit: a4490a1cec985158127ce7dc8e690860a7aa1cef
+Exact applied fourteen-patch source tree: e6fe523ca92ce30ea7edb265b8a26bf20a867c47
+Pinned base: 93f51579e7df248780214094418f205253383cc5
+All fourteen code-mail SHA-256 entries still pass series/SHA256SUMS.
+The cover is excluded from that file by design.
+
+VMBus build, KUnit, and CoCo static checks:
+https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37638929227
+x86_64 and arm64 W=1/C=2 builds and sparse pass. The linked x86_64 QEMU
+suite passes 69/69 cases. The separate WSL backport KUnit suite passes
+26/26. CoCo static invariants pass on both architectures; they are necessary
+source checks and do not qualify confidential hardware.
+
+Actual Windows WSL backport matrix:
+https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37645708153
+Windows 2025: 64 commands, 452 matching ACKs/452 requests, zero
+unacknowledged, zero backing/tail growth, and six shutdown checks pass.
+Windows latest: 64 commands, 456 matching ACKs/456 requests, zero
+unacknowledged, zero backing/tail growth, and six shutdown checks pass.
+Both live candidates required zero shutdown retries. The bounded retry path
+is covered by 40 local parser/refusal regressions that do not invoke WSL.
+These results qualify the WSL backport only, not the mainline mail series.
+
+Exact-source Hyper-V runtime with host rescind enabled:
+https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37650468077
+The candidate kernel artifact proves all fourteen patches applied to the
+pinned base, source tree e6fe523ca92ce30ea7edb265b8a26bf20a867c47, and
+hyperv_drill_host_rescind=1 in the resolved kernel command line.
+Both windows-2025 and windows-latest candidate guests pass 100 bind/unbind
+cycles, bounded fragmentation, two-channel rebind, UIO mapping teardown,
+and controlled host NIC removal. Both report
+HYPERV_DRILL_HOST_RESCIND status=PASS target_absent=yes matching_events=1.
+There are zero splats, faults, trace overruns, and dropped events. Owner
+accounting captures 722 creates, zero unobserved creates, 715 reclaimed
+owners, and seven still-active owners; active owners are not leaks. The
+held-mapping teardown reconciles to the settled operational map state.
+Kernel settings are restored, evidence transport and validation pass, and
+disposable VM/VHD/switch cleanup passes.
+
+The baseline runtime is an intentional negative control. It reproduces the
+expected fragmentation failure without guest faults; the runtime policy
+accepts that exact signature and the baseline job passes. It is not a
+candidate failure.
+
+Qualification remains deliberately scoped. Runtime coverage is ordinary
+x86_64 Hyper-V and uses the vzalloc path. Full memory saturation, confidential
+chunk transitions on SEV-SNP, TDX without a paravisor or Arm CCA, and complete
+VMBus module unload/retained-owner destruction remain unqualified. No
+confidential hardware result is inferred from static checks or ordinary
+Hyper-V.
+
+The local WSL candidate has not been installed or booted. Local installation
+is deferred to a safe maintenance window; the hosted WSL matrix above is not
+represented as a local boot result.
+
+MAIL-PACKAGE AUDIT
+All fourteen code mails are sequentially numbered and pinned by
+series/SHA256SUMS. The From and Signed-off-by identities match in 14/14
+patches; no prohibited authorship trailers are present. Existing Fixes tags in
+0012 and 0013 resolve to commit objects 5b54dac856cb and 8b31f8c982b7.
+The combined series diff routes to linux-hyperv, netdev, and linux-kernel,
+with maintainers David S. Miller, K. Y. Srinivasan, Andrew Lunn, Dexuan Cui,
+Eric Dumazet, Greg Kroah-Hartman, Haiyang Zhang, Jakub Kicinski, Long Li,
+Paolo Abeni, and Wei Liu. No mail has been sent.
+
+The strict checkpatch gate reports zero errors. Its remaining generic
+added-file/MAINTAINERS warnings concern the new KUnit files; the maintainer
+routing above resolves through their existing driver sections.
+
+CURRENT OUTGOING COVER SHA-256
+9cb636acba67bb46745df6b10980980d6f4515fc7b062bc6d39a9acfcf233ee7  0000-cover-letter.patch

@@ -1,8 +1,10 @@
-> Current snapshot: fourteen-patch build and runtime requalification is in
-> progress.
-> Results below for the thirteen-patch series are historical and do not qualify
-> patch 0014. Ordinary WSL results qualify only the distinct WSL backport.
-> Sending remains NO_GO until the exact current bytes pass the final review.
+> Qualification status, 2026-10-07: the exact fourteen-patch source passes
+> x86_64 and arm64 W=1/C=2 builds and sparse, all 69 x86_64 KUnit cases, and
+> ordinary Hyper-V candidate runtime on windows-2025 and windows-latest,
+> including controlled host rescind. See MANIFEST.txt for run identities.
+> These results do not qualify confidential hardware, full saturation, or
+> complete VMBus module unload and retained-owner destruction. The earlier
+> pre-qualification status is preserved in history/BUILD-pre-final-qualification-20261007.md.
 
 # BUILD — image for one CoCo attempt
 

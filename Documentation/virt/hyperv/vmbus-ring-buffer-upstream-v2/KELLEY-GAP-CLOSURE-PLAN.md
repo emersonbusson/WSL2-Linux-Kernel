@@ -1,3 +1,29 @@
+# Qualification status — 2026-10-07
+
+The exact fourteen-patch series now passes its architecture, KUnit, and
+ordinary Hyper-V runtime gates. The host-rescind subgate passes on both
+windows-2025 and windows-latest, and the intended baseline negative control
+passes its exact-signature policy. Current evidence and scope are recorded in
+MANIFEST.txt and the refreshed cover letter.
+
+The original pre-qualification plan below is retained as historical context;
+its earlier test counts and pending-run statements are superseded by the
+qualification update. Its exact original bytes are preserved at
+history/KELLEY-GAP-CLOSURE-PLAN-pre-final-qualification-20261007.md.
+
+Mail-package audit is complete: all fourteen patch hashes pass, DCO author
+and sign-off identities match 14/14, and get_maintainer.pl maps the series to
+linux-hyperv, netdev, linux-kernel and their listed maintainers. Fixes tags
+present in patches 0012 and 0013 resolve to commits in the source repository.
+Strict checkpatch has zero errors; the remaining warnings are the generic
+new-file/MAINTAINERS notices for the added KUnit files.
+
+The package is ready for maintainer review with these explicit limits:
+confidential hardware transitions, full saturation, and complete VMBus
+module unload/retained-owner destruction remain unqualified. The separate
+local WSL candidate remains uninstalled pending a safe maintenance window.
+No e-mail has been sent.
+
 # Corrected VMBus validation plan
 
 This unsent kernel snapshot replaces the withdrawn source for new validation.

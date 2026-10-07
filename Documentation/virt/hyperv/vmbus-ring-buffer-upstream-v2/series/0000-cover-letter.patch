@@ -1,165 +1,120 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
-Date: Wed, 7 Oct 2026 00:31:00 -0300
+Date: Wed, 7 Oct 2026 13:38:19 -0300
 Subject: [PATCH v2 0/14] hv: vmbus: make rings and host-visible buffers
  survive buddy fragmentation
 
-Michael Kelley's review of the original vzalloc() fallback explains why
-CCA and TDX guests without a paravisor need direct-map page transitions.
-This revision uses the existing chunk allocator and keeps allocation,
-GPADL ownership and mapping references together.
+This series moves VMBus ring backing to the chunk allocator and keeps the
+allocation, GPADL ownership, and mapping references together. It preserves
+the exported four-argument interfaces while allowing the private allocation
+paths to carry ownership and sharing policy.
 
-This is a review snapshot. Patch 0012 now describes vmalloc-backed RNDIS
-control payloads with page-wise GPA buffers; this closes a physical-contiguity
-assumption exposed by a diagnostic run. Patch 0014 keeps the large
-guest-private NetVSC device object from requiring an order-7 allocation. The
-prior architecture and runtime results below predate these final bytes; the
-exact fourteen-patch series is not qualified until fresh build and runtime
-workflows pass.
-
-References:
-  Initial proposal: https://lists.openwall.net/linux-kernel/2026/09/18/276
-  Review:
-    https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2658605.html
-  Allocator discussion:
-    https://lists.openwall.net/linux-kernel/2026/08/11/2006
-
-Base: 93f51579e7df248780214094418f205253383cc5 (Linux 7.3-rc4).
+A review of the original vzalloc fallback noted that CCA and TDX guests
+without a paravisor need direct-map page transitions. This revision uses
+contiguous chunks for buffers that must be host-shared, transitions each
+page through page_address(), and combines the chunks with vmap(). Ordinary
+guest-private buffers retain vzalloc-style allocation.
 
 Allocation and compatibility
 ----------------------------
 
-Every ring allocation uses the chunk allocator. Ordinary guests and
-buffers kept private by their channel policy use vzalloc(). When a buffer
-requires host-shared pages in an encrypted or isolated guest, it uses
-contiguous chunks, transitions each through page_address(), then combines
-them with vmap(). Order descent includes order zero. Guest-memory
-encryption is selected independently of Hyper-V isolation from patch 0001.
-All eight isolation/encryption/confidentiality combinations execute in
-the final decision test; this does not qualify confidential hardware.
+Every ring allocation uses the chunk allocator. Ordinary guests and buffers
+kept private by channel policy use vzalloc(). For host-shared buffers in an
+encrypted or isolated guest, the allocator uses contiguous chunks and
+transitions them page by page. Guest-memory encryption is selected
+independently of Hyper-V isolation.
 
 Ring consumers select co_ring_buffer. External buffers and the legacy
-allocator select co_external_memory. The exported allocator and
-caller-decrypted GPADL prototypes retain four arguments through all
-fourteen stages. Private entry points carry the additional ownership
-and policy state. UIO's allocation migration follows its release support.
+allocator select co_external_memory. The exported allocator and caller-
+decrypted GPADL prototypes retain four arguments throughout all fourteen
+patches. UIO migration follows its release support.
 
-The address, page/chunk arrays and embedded GPADL belong to one buffer.
-Allocation extent, host-described GPADL extent and retained allocation
-extent remain distinct. Interior GPADL duplication supports the existing
-exported interfaces. Prepared owned buffers avoid repeat decryption;
+The address, page and chunk arrays, and embedded GPADL belong to one buffer.
+The allocation extent, host-described GPADL extent, and retained allocation
+extent remain distinct. Interior GPADL duplication preserves the existing
+exported interfaces. Prepared owned buffers avoid repeat decryption, and
 HV_GPADL_BUFFER_DECRYPTED is removed.
 
-Lifetime and host acknowledgment
---------------------------------
+Lifetime and host acknowledgement
+---------------------------------
 
-A host rescind alone does not prove GPADL revocation. For a known-live
-GPADL with its channel identifier still held, teardown posts a request
-and requires a matching GPADL_TORNDOWN message before clearing ownership.
-Synthetic rescind notification cannot substitute for this acknowledgment.
-Unknown creates, local removal, invalid identifiers, failed posting and
-timeouts retain ownership. Waiter removal shares the response-list lock
-with matching replies so a late acknowledgment cannot use a freed waiter.
+A host rescind alone does not prove GPADL revocation. For a known-live GPADL
+whose channel identifier is still held, teardown posts a request and waits
+for a matching GPADL_TORNDOWN message before clearing ownership. Synthetic
+rescind notification cannot replace this acknowledgement. Unknown creates,
+local removal, invalid identifiers, failed posting, and timeouts retain
+ownership.
 
-Released owners also retain pages across mapping references and failed
-page-state restoration. Reclaimer shutdown cancels pending timers while
-holding the owner lock and requeues only work actually canceled. Already
-running callbacks drain through workqueue destruction without a second
-execution of their possibly freed embedded work item.
+Waiter removal shares the response-list lock with matching replies so a late
+acknowledgement cannot use a freed waiter. Released owners retain pages
+across mapping references and failed page-state restoration. Reclaimer
+shutdown cancels pending timers under the owner lock and requeues only work
+that was actually canceled; running callbacks drain through workqueue
+destruction without re-executing freed embedded work.
 
-Sysfs mappings install no vm_ops, as kernfs requires, and release the
-bridge pin on every setup outcome. UIO mappings hold their pin through
-VMA close. Page/count/protection snapshots share the owner-lock boundary.
-Two new tests call the real sysfs wrapper, insert actual PTEs and check
-readable bytes and page references through success and partial -EBUSY.
-They do not execute a full kernfs syscall or full device destruction.
+Sysfs mappings install no vm_ops and release the bridge pin on every setup
+outcome. UIO mappings hold their pin through VMA close. Page, count, and
+protection snapshots share the owner-lock boundary. New tests call the real
+sysfs wrapper, insert actual PTEs, and check readable bytes and page
+references through success and partial -EBUSY. They do not execute a full
+kernfs syscall or full device destruction.
 
 The final four fixes use vzalloc() for guest-private requestor arrays and
 bitmaps, kvzalloc_obj() for guest-private RNDIS descriptors, handle NULL
-control requests for empty netvsc completions, and use kvzalloc_obj()/kvfree()
-for the large guest-private NetVSC device object. Their Fixes objects are
-independently pinned where applicable. They can be routed separately through
-the netvsc maintainers.
+control requests on empty NetVSC completions, and use kvzalloc_obj()/kvfree()
+for the large guest-private NetVSC device object.
 
-Prior thirteen-patch software and Windows evidence
---------------------------------------------------
+Qualification on the exact fourteen-patch series
+------------------------------------------------
 
-The prior thirteen-patch tree passes 68 linked x86_64 QEMU KUnit cases: 33 VMBus,
-2 actual sysfs/MM cases, 14 UIO, 11 netvsc completion, 4 RNDIS and
-4 refcount cases. Reintroducing the shutdown requeue decision fails two
-real-workqueue running-window cases. Removing production wrapper unpin
-fails both actual-MM cases. Restoring the source passes all 68 again.
-Patch 0012 adds a fifth RNDIS page-buffer case; the refreshed tree's gate
-requires all 69 cases to pass, and no result on those bytes is claimed yet.
-Complete VMBus unload and retained-owner destruction remain unqualified.
+The code mails are pinned by series/SHA256SUMS. Applying all fourteen to
+93f51579e7df248780214094418f205253383cc5 produces source tree
+e6fe523ca92ce30ea7edb265b8a26bf20a867c47.
 
-A distinct WSL backport passes 25 production-request/matcher cases.
-Its module-enabled kernel and paired module image boot on actual Windows:
-64 ordinary commands produce 456 matching host teardown acknowledgments,
-zero close errors and zero final-batch physical-backing growth. All 751
-module-tree files match and actual module loading succeeds. The exact
-pair is installed locally; current identity/log and short passive
-observations pass. This qualifies that backport's measured ordinary
-behavior, not confidential transitions or these mainline mail bytes.
+The VMBus workflow builds x86_64 and arm64 with W=1 and C=2, passes sparse,
+and passes all 69 linked x86_64 QEMU KUnit cases. The distinct WSL backport
+passes all 26 of its KUnit cases. CoCo source invariants pass on both
+architectures; these are necessary static checks, not confidential-hardware
+qualification.
 
-Two updated bounded local backport rounds verify 3,232/3,200 MiB with
-matching checksums after actual ZRAM/NBD use and swapoff-first cleanup.
-The installed kernel and guest boot remain unchanged; the userspace pair
-is bound to its clean release. All four before/after checkpoints have
-healthy control/guardian and ready origin. The 413-sample action window
-has 185 healthy, 210 guarded and 18 critical samples, no measurement
-errors and no emergency. Closed admission and actual applied freeze or
-proved target absence qualify the protective states. No VM termination
-occurs. The preceding stale-reader and interrupted-checksum runs are
-preserved. This qualifies bounded data/control continuity; full three-tier
-saturation, prolonged operation and confidential transitions stay unmeasured.
+Exact-source Hyper-V runtime, including controlled host rescind:
+https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37650468077
 
-Native WSL run:
-  https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37395696464
-Build of all thirteen stages with W=1/C=2 on x86_64 and arm64:
-  https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37402766418
-The linked mainline run passes all 68 named cases; the WSL leg passes 25.
-The final applied source tree is independently pinned in both arch jobs.
+On both windows-2025 and windows-latest, the candidate passes 100 bind/unbind
+cycles, bounded buddy fragmentation, channel rebind, UIO mapping teardown,
+and the controlled host-origin NIC removal. Each report records
+HYPERV_DRILL_HOST_RESCIND status=PASS, target_absent=yes,
+matching_events=1. Both report zero splats and faults, restore the measured
+kernel settings, and return lifecycle map accounting to the settled operational
+baseline. Captured owner accounting reports 722 created, zero unobserved
+creates, 715 reclaimed, and seven still active; active owners are not
+classified as leaks. Trace capture has no overruns or dropped events, and
+the disposable VM, VHD, and switch cleanup passes.
 
-Exact-mail mainline runtime:
-  https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37405207883
-Both ordinary Hyper-V candidate legs pass 100 bind/unbind cycles, all five
-lifecycle subgates and an actual controlled host adapter rescind. Their
-captured owner ledgers reconcile 681/682 creations to 674/675 reclaimed
-owners and seven still active each, with no missing creates or capture
-errors. No panic, splat or access fault is observed. windows-2025 exhausts
-order-7-and-higher supply and passes the fragmentation drill. windows-latest
-retains one such block at the safety cap: its fragmentation and overall
-runtime verdicts are PARTIAL. The baseline legs produced their intentional
-negative-control signatures; that workflow revision surfaced the expected
-failures as a red aggregate. The current policy accepts only the exact,
-checksum-verified and fault-free baseline signature, while candidates still
-require full PASS. Candidate job success does not upgrade that PARTIAL result.
-The actual candidate image and all thirteen
-prior code-mail hashes bind to the same final source tree as the architecture
-run. The refreshed exact fourteen-patch bytes are not covered by those results.
+The baseline is an intentional negative control. It reproduces the expected
+fragmented-allocation failure without guest faults; the workflow accepts
+that exact signature as a passing control. It is not a candidate result.
 
-Follow-up diagnostic run on the pre-correction fourteen-patch bytes:
-  https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37572161916
-Both candidate builds passed. windows-2025 failed closed below the unchanged
-64 MiB free reserve before attempting rebind. windows-latest reached rebind
-and blocked in rndis_filter_device_add() waiting for the RNDIS initialization
-response; disposable-VM cleanup passed. This is a failure finding, not a
-candidate qualification. It exposed that kvzalloc-backed RNDIS payloads were
-still described through one virt_to_phys() PFN. Patch 0012 now emits one GPA
-entry per backing page and adds a vmalloc boundary KUnit regression. The
-drill helper also has a bounded recovery pass for the independent reserve gap:
-it discards at most 64 MiB of verified order-0 pages with MADV_DONTNEED_LOCKED,
-without splitting VMAs, then checks the unchanged 64 MiB free reserve and
-256-page order-7 ceiling again. A diagnostic guest run found that the drill image's tinyconfig had
-CONFIG_ADVISE_SYSCALLS disabled, so madvise returned ENOSYS (38) before
-channel open. The image recipe now explicitly enables and verifies that
-syscall. The free-memory floor, order-7 ceiling and hole caps remain
-unchanged; fresh build and runtime validation are pending.
+WSL backport runtime matrix:
+https://github.com/emersonbusson/WSL2-Linux-Kernel/actions/runs/37645708153
 
-The six static CoCo conditions are necessary source checks, not runtime
-proof. SEV-SNP, TDX without a paravisor and Arm CCA remain unmeasured.
-No platform result is inferred or simulated.
+That separate backport passes the actual Windows candidate matrix. Each
+runner completes 64 commands with matching teardown acknowledgements,
+zero unacknowledged requests, no backing or tail growth, and all six
+shutdown checks. The shutdown retry path is covered by 40 local parser and
+refusal regressions; the live candidate runs required zero retries. These
+results qualify the WSL backport's measured ordinary behavior, not the
+mainline mail series.
+
+Qualification limits
+--------------------
+
+The Hyper-V runtime uses the ordinary x86_64 vzalloc path. It does not
+execute confidential chunk transitions. Full memory saturation, the
+chunked CoCo fallback on hardware, SEV-SNP, TDX without a paravisor, Arm
+CCA, and complete VMBus module unload and retained-owner destruction remain
+unqualified. No confidential-platform result is inferred from ordinary
+Hyper-V or static checks.
 
 ---
 Emerson Busson (14):
@@ -177,27 +132,3 @@ Emerson Busson (14):
   hv: netvsc: allocate RNDIS request descriptors with kvzalloc_obj()
   hv: netvsc: handle a NULL request address on empty completions
   hv: netvsc: use kvzalloc for device state
-
- drivers/hv/Kconfig                          |   11 +
- drivers/hv/Makefile                         |    1 +
- drivers/hv/channel.c                        | 1183 ++++++++++++++++++++++-----
- drivers/hv/channel_mgmt.c                   |   55 +-
- drivers/hv/hv_trace.h                       |   24 +
- drivers/hv/hyperv_vmbus.h                   |  112 ++-
- drivers/hv/ring_buffer.c                    |    9 +-
- drivers/hv/vmbus_buffer_test.c              |  976 ++++++++++++++++++++++
- drivers/hv/vmbus_drv.c                      |   63 +-
- drivers/hv/vmbus_mmap_test.c                |  145 ++++
- drivers/net/hyperv/Kconfig                  |   12 +
- drivers/net/hyperv/Makefile                 |    2 +
- drivers/net/hyperv/hyperv_net.h             |   68 +-
- drivers/net/hyperv/netvsc.c                 |  143 ++--
- drivers/net/hyperv/netvsc_completion_test.c |  439 ++++++++++
- drivers/net/hyperv/rndis_filter.c           |  117 ++-
- drivers/net/hyperv/rndis_request_test.c     |  216 +++++
- drivers/uio/Kconfig                         |   11 +
- drivers/uio/uio.c                           |   20 +
- drivers/uio/uio_hv_generic.c                |  388 +++++++--
- drivers/uio/uio_hv_generic_mmap_test.c      |  875 ++++++++++++++++++++
- include/linux/hyperv.h                      |   72 +-
- 22 files changed, 4515 insertions(+), 427 deletions(-)
