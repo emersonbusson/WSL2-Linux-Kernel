@@ -78,6 +78,12 @@ int main(void)
 	assert(pfn_bitmap_set(&seen, &seen_words, 99) == 0);
 	assert(!frag_page_has_held_buddy(101, seen, seen_words));
 	free(seen);
+	/* The retained half must be the order-2 buddy within one order-3 block. */
+	assert(frag_order2_group_alignment_skip(0) == 0);
+	assert(frag_order2_group_alignment_skip(4) == 4);
+	assert(frag_order2_group_alignment_skip(7) == 1);
+	assert(frag_order2_group_alignment_skip(8) == 0);
+	assert(frag_order2_group_alignment_skip(15) == 1);
 
 	/* The safe stop retains up to two measured minimum order-7 blocks. */
 	assert(frag_bounded_pressure_qualified(500000, 128,

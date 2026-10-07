@@ -911,13 +911,13 @@ static int do_mlock_hog(int argc, char **argv)
  *
  * mmap faults order-0, so held pages are physically scattered and an
  * order-2 candidate run is found by PFN, not assumed from a virtual
- * run. Each released group is eight consecutive PFNs on a 4-page
- * alignment: the first four pages lose their resident backing, and the last
- * four stay held. The
- * kept half is the freed half's order-2 buddy, so the freed half cannot
- * coalesce past order-2 even if the PCP does drain -- the order-7
- * safety reserve just measured is not undone. Cap the groups like the holes;
- * discarded pages are not touched again before cleanup.
+ * run. Each released group is eight consecutive PFNs aligned to an
+ * order-3 boundary: the first four pages lose their resident backing, and
+ * the last four stay held. A 4-page-aligned group can straddle that boundary
+ * and leave the freed half's order-2 buddy free, allowing coalescing above
+ * order-2. The 8-page alignment keeps the held half as the exact buddy, so
+ * the order-7 safety reserve just measured is not undone. Cap the groups
+ * like the holes; discarded pages are not touched again before cleanup.
  *
  * Two properties make the runs findable. The per-cpu page cache is
  * drained first: it serves recycled, physically scattered order-0 pages
@@ -1534,6 +1534,11 @@ static int pfn_bitmap_get(const unsigned long *bits, size_t words,
 	if (word >= words)
 		return 0;
 	return !!(bits[word] & (1UL << (pfn % bits_per_word)));
+}
+
+static unsigned long frag_order2_group_alignment_skip(unsigned long pfn)
+{
+	return (8UL - (pfn & 7UL)) & 7UL;
 }
 
 /* pfns[] stores PFN+1 so zero can mark an unread pagemap entry. */
@@ -2518,10 +2523,10 @@ static int do_fragment_buddy(int argc, char **argv)
 	 *
 	 * Returning the groups first does not weaken the measured claim.
 	 * high_order_7plus counts orders 7 and up; order-2 blocks are
-	 * invisible to it. Each group is eight consecutive PFNs on a
-	 * 4-page alignment whose first four are unmapped while the last
-	 * four stay held, so the freed half cannot coalesce past order-2
-	 * and the order-7 safety reserve just measured is not undone.
+	 * invisible to it. Each group is eight consecutive PFNs aligned to
+	 * an order-3 boundary. Its first four pages are unmapped while the
+	 * last four stay held, so the freed order-2 half cannot coalesce
+	 * with a free order-2 buddy and rebuild order-7 blocks.
 	 */
 	for (i = 0; i < reserve_got && order2_groups < FRAG_ORDER2_GROUPS; i++) {
 		char *m = reserve[i];
@@ -2533,7 +2538,7 @@ static int do_fragment_buddy(int argc, char **argv)
 		off = 0;
 		while (off + 8 * FRAG_PAGE <= FRAG_RESERVE_CHUNK &&
 		       order2_groups < FRAG_ORDER2_GROUPS) {
-			unsigned long p0 = 0, p = 0;
+			unsigned long p0 = 0, p = 0, align_skip;
 			int run = 1, j;
 
 			if (pagemap_pfn(pmfd, m + off, &p0) != 0) {
@@ -2541,17 +2546,15 @@ static int do_fragment_buddy(int argc, char **argv)
 				continue;
 			}
 			/*
-			 * Walk to the next 4-page-aligned PFN, not to the next
-			 * 4-page virtual step. mmap faults order-0 pages, so a
-			 * chunk that starts at PFN 4k+2 is physically fine but
-			 * no offset that is a multiple of 4 pages from the start
-			 * is PFN-aligned. Stepping `off += 4 * FRAG_PAGE` from
-			 * there skipped every candidate and reported
-			 * `order2_reserve groups=0` on run 36914537690 w25
-			 * while the chunk held contiguous pages.
+			 * Walk to the next 8-page-aligned PFN, not to the next
+			 * 8-page virtual step. mmap faults order-0 pages, so a
+			 * chunk whose first PFN is misaligned keeps that residue
+			 * at every 8-page virtual step. Advance by the physical
+			 * PFN residue to reach the next order-3 boundary.
 			 */
-			if ((p0 & 3UL) != 0) {
-				off += (4UL - (p0 & 3UL)) * FRAG_PAGE;
+			align_skip = frag_order2_group_alignment_skip(p0);
+			if (align_skip) {
+				off += align_skip * FRAG_PAGE;
 				continue;
 			}
 			for (j = 1; j < 8; j++) {
