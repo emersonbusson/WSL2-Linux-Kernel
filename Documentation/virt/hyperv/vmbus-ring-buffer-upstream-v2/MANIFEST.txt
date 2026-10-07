@@ -96,7 +96,7 @@ CURRENT FOURTEEN-PATCH QUALIFICATION UPDATE — 2026-10-07
 This section supersedes the pre-qualification status above. The prior text and
 cover bytes are retained under history/ for audit. No e-mail has been sent.
 
-Current review branch commit: a4490a1cec985158127ce7dc8e690860a7aa1cef
+Validated code base for the review branch: a4490a1cec985158127ce7dc8e690860a7aa1cef
 VMBus run source commit: ba7422432d54473f9aa77a75fb376cf06ed65d09
 WSL and Hyper-V run source commit: a4490a1cec985158127ce7dc8e690860a7aa1cef
 Exact applied fourteen-patch source tree: e6fe523ca92ce30ea7edb265b8a26bf20a867c47
