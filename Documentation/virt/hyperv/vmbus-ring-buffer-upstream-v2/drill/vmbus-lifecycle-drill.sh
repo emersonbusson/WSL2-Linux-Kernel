@@ -146,6 +146,71 @@ settle_vmbus_maps() {
 	return 1
 }
 
+# Count channel directories owned by one VMBus device. Metadata files and
+# named sysfs entries do not count as channels.
+vmbus_nic_channel_count() {
+	local device="${1:-}" channel count=0
+	[ -n "$device" ] && [ -d "$device/channels" ] || return 1
+	for channel in "$device"/channels/*; do
+		[ -d "$channel" ] || continue
+		case "${channel##*/}" in '' | *[!0-9]*) continue ;; esac
+		count=$((count + 1))
+	done
+	printf '%s\n' "$count"
+}
+
+# settle_vmbus_nic_channels <label> <device> <expected|auto>
+#   <stable_samples> <retry_budget>
+# Auto captures a topology only after at least two channels are stable;
+# later checks require that exact count to return after each rebind.
+settle_vmbus_nic_channels() {
+	local label="${1:-}" device="${2:-}" expected="${3:-}"
+	local stable_required="${4:-}" retry_budget="${5:-}"
+	local tries=0 stable_run=0 previous='' current=''
+	NIC_CHANNELS_SETTLED=''
+	case "$label" in '' | *[!A-Za-z0-9_-]*) return 1 ;; esac
+	[ -n "$device" ] || return 1
+	case "$expected" in auto) ;; '' | *[!0-9]*) return 1 ;; esac
+	case "$stable_required" in '' | *[!0-9]*) return 1 ;; esac
+	case "$retry_budget" in '' | *[!0-9]*) return 1 ;; esac
+	if [ "$stable_required" -lt 2 ] || [ "$retry_budget" -lt 1 ]; then
+		return 1
+	fi
+	while [ "$tries" -le "$retry_budget" ]; do
+		current="$(vmbus_nic_channel_count "$device" 2>/dev/null || true)"
+		case "$current" in '' | *[!0-9]*)
+			stable_run=0
+			previous=''
+			;;
+		*)
+			if { [ "$expected" = auto ] && [ "$current" -ge 2 ]; } ||
+				[ "$current" = "$expected" ]; then
+				if [ "$current" = "$previous" ]; then
+					stable_run=$((stable_run + 1))
+				else
+					stable_run=1
+				fi
+			else
+				stable_run=0
+			fi
+			;;
+		esac
+		say "$label try=$tries run=$stable_run channels=${current:-unavailable} expected=$expected"
+		if [ "$stable_run" -ge "$stable_required" ]; then
+			NIC_CHANNELS_SETTLED="$current"
+			say "$label stable_samples=$stable_run channels=$NIC_CHANNELS_SETTLED"
+			return 0
+		fi
+		previous="$current"
+		tries=$((tries + 1))
+		if [ "$tries" -le "$retry_budget" ]; then
+			sleep 1
+		fi
+	done
+	say "$label unstable retry_budget=$retry_budget stable_run=$stable_run last=${current:-unavailable} expected=$expected"
+	return 1
+}
+
 # Per-map sizes of live vmbus_alloc_buffer areas, one byte count per line.
 # Size is the owner attribution available here: /proc/vmallocinfo names the
 # allocating symbol for every one of these, so one kernel owner cannot be told
@@ -474,17 +539,21 @@ derive_map_surface_verdict() {
 	fi
 }
 
-# derive_restore_verdict <rebind>
-# Sets RESTORE_VERDICT and RESTORE_WHY. This verdict is about one thing:
-# did the selected NIC actually come back. Map accounting is somebody
-# else's verdict. With rebind=no the device did not return, so this cannot
-# be a complete PASS -- the hv_uio_remove() gap is pre-existing mainline and
-# is disclosed, and a PARTIAL is the honest reading of a run that proved
-# the maps and not the device.
+# derive_restore_verdict <driver_rebind> <channel_topology_match>
+# Sets RESTORE_VERDICT and RESTORE_WHY. The selected NIC and its captured
+# channel topology must both return. With rebind=no the device did not
+# return, so this cannot be a complete PASS. The hv_uio_remove() gap is
+# pre-existing mainline and is disclosed; PARTIAL is the honest reading of
+# a run that proved the maps and not the device.
 derive_restore_verdict() {
 	if [ "${1:-no}" = yes ]; then
-		RESTORE_VERDICT=PASS
-		RESTORE_WHY="hv_netvsc rebound onto the selected NIC"
+		if [ "${2:-yes}" = yes ]; then
+			RESTORE_VERDICT=PASS
+			RESTORE_WHY="hv_netvsc rebound with the captured channel topology"
+		else
+			RESTORE_VERDICT=FAIL
+			RESTORE_WHY="hv_netvsc rebound but did not restore the captured channel topology"
+		fi
 	else
 		RESTORE_VERDICT=PARTIAL
 		RESTORE_WHY="rebind=no (hv_netvsc did not rebind; open channel is the known hv_uio_remove gap); device restoration not proven"
@@ -1092,6 +1161,21 @@ if [ -z "${NIC:-}" ]; then
 	exit 2
 fi
 say "NIC=$NIC (discovered from hv_netvsc binding)"
+NIC_SYSFS_DIR="/sys/bus/vmbus/devices/$NIC"
+if ! settle_vmbus_nic_channels NIC_CHANNELS_BASELINE \
+	"$NIC_SYSFS_DIR" auto 3 15; then
+	CLEANUP_VERDICT=PARTIAL
+	CLEANUP_WHY="the selected NIC did not expose a stable multi-channel topology"
+	MAP_ACCOUNTING_VERDICT=PARTIAL
+	MAP_ACCOUNTING_WHY="channel-aware lifecycle accounting needs at least two stable channels"
+	RESTORE_VERDICT=SKIP
+	RESTORE_WHY="not reached (phase 1 did not start)"
+	LIFE=PARTIAL
+	LIFE_CODE=3
+	emit_verdicts_and_exit 3
+fi
+NIC_CHANNELS_BASELINE="$NIC_CHANNELS_SETTLED"
+say "NIC_CHANNELS baseline=$NIC_CHANNELS_BASELINE minimum_required=2"
 # class_id_show() emits "{%pUl}" WITH braces, but new_id_store() hands the
 # buffer to guid_parse() -> uuid_is_valid(), which accepts exactly the 36-char
 # canonical form. Braces make guid_parse() return -EINVAL, the dynid is never
@@ -1113,8 +1197,8 @@ else
 fi
 DRIVER_DIR="/sys/bus/vmbus/drivers"
 
-# REBIND_OK records whether restore_nic actually got hv_netvsc back on the
-# device. It is a scoring input, not a nicety: after the BUG-3 hold the
+# REBIND_OK records whether restore_nic got hv_netvsc and the captured
+# channel topology back. It is a scoring input: after the BUG-3 hold the
 # channel is still CHANNEL_OPENED_STATE because hv_uio_remove() never calls
 # vmbus_disconnect_ring() -- identical in mainline base 93f51579e7df -- and
 # the rebind then fails with -22. When that happens the NIC's own ring maps
@@ -1122,6 +1206,8 @@ DRIVER_DIR="/sys/bus/vmbus/drivers"
 # map tuple cannot return to the boot baseline and must not be scored as if
 # it should.
 REBIND_OK=no
+REBIND_DRIVER_OK=no
+REBIND_CHANNELS_OK=no
 
 restore_nic() {
 	say "RESTORE begin"
@@ -1142,10 +1228,21 @@ restore_nic() {
 	say "RESTORE driver=$RESTORE_DRIVER"
 	case "$RESTORE_DRIVER" in
 	*/drivers/hv_netvsc)
-		REBIND_OK=yes
-		say "RESTORE rebind=yes"
+		REBIND_DRIVER_OK=yes
+		if settle_vmbus_nic_channels RESTORE_CHANNELS \
+			"$NIC_SYSFS_DIR" "$NIC_CHANNELS_BASELINE" 3 15; then
+			REBIND_CHANNELS_OK=yes
+			REBIND_OK=yes
+			say "RESTORE rebind=yes channels=$REBIND_CHANNELS_OK count=$NIC_CHANNELS_SETTLED"
+		else
+			REBIND_CHANNELS_OK=no
+			REBIND_OK=no
+			say "RESTORE rebind=yes topology=no expected_channels=$NIC_CHANNELS_BASELINE observed=${NIC_CHANNELS_SETTLED:-none}"
+		fi
 		;;
 	*)
+		REBIND_DRIVER_OK=no
+		REBIND_CHANNELS_OK=no
 		REBIND_OK=no
 		say "RESTORE rebind=no (hv_netvsc did not rebind; open channel is the known hv_uio_remove gap)"
 		;;
@@ -1172,6 +1269,7 @@ say "PHASE1-BEFORE $(vmbus_maps || echo 'MAPS unavailable')"
 # ran. Count them and fail at the end, otherwise thirty consecutive bind_fail
 # still exits 0 and init scores the drill as passed.
 CYCLE_FAILS=0
+CYCLE_TOPOLOGY_FAILS=0
 
 for i in $(seq 1 "$CYCLES"); do
 	echo "$NIC" >"$DRIVER_DIR/hv_netvsc/unbind" 2>>"$LOG" ||
@@ -1199,11 +1297,22 @@ for i in $(seq 1 "$CYCLES"); do
 	echo "$CLS" >"$DRIVER_DIR/uio_hv_generic/remove_id" 2>>"$LOG" || true
 	echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG" ||
 		{ say "cycle$i rebind_fail"; CYCLE_FAILS=$((CYCLE_FAILS + 1)); }
+	if ! settle_vmbus_nic_channels "CYCLE_${i}_CHANNELS" \
+		"$NIC_SYSFS_DIR" "$NIC_CHANNELS_BASELINE" 2 3; then
+		CYCLE_TOPOLOGY_FAILS=$((CYCLE_TOPOLOGY_FAILS + 1))
+		CYCLE_FAILS=$((CYCLE_FAILS + 1))
+		say "cycle$i channel_topology_fail expected=$NIC_CHANNELS_BASELINE observed=${NIC_CHANNELS_SETTLED:-none}"
+	fi
 	if [ $((i % 10)) -eq 0 ]; then
-		say "cycle$i $(vmbus_maps || echo 'MAPS unavailable')"
+		say "cycle$i $(vmbus_maps || echo 'MAPS unavailable') channels=${NIC_CHANNELS_SETTLED:-unknown}"
 	fi
 done
-say "PHASE1 cycle_fails=$CYCLE_FAILS / $((CYCLES * 4)) steps"
+if ! settle_vmbus_nic_channels PHASE1_CHANNELS \
+	"$NIC_SYSFS_DIR" "$NIC_CHANNELS_BASELINE" 3 15; then
+	CYCLE_TOPOLOGY_FAILS=$((CYCLE_TOPOLOGY_FAILS + 1))
+	CYCLE_FAILS=$((CYCLE_FAILS + 1))
+fi
+say "PHASE1 cycle_fails=$CYCLE_FAILS topology_fails=$CYCLE_TOPOLOGY_FAILS / $((CYCLES * 4)) steps"
 
 say "PHASE1-AFTER $(vmbus_maps || echo 'MAPS unavailable')"
 
@@ -1562,7 +1671,7 @@ if [ -z "$BASE_TUPLE" ] || [ -z "$PRE_TUPLE" ]; then
 	CLEANUP_WHY="map accounting unavailable, release unprovable"
 	MAP_ACCOUNTING_VERDICT=PARTIAL
 	MAP_ACCOUNTING_WHY="a phase-2 verdict needs the boot tuple and the tuple phase 2 started from"
-	derive_restore_verdict "${REBIND_OK:-no}"
+	derive_restore_verdict "${REBIND_DRIVER_OK:-no}" "${REBIND_CHANNELS_OK:-no}"
 	say "  baseline='$BASE_MAPS'"
 	say "  pre_uio='${PRE_UIO_MAPS:-}'"
 	say "  final='$FINAL_MAPS'"
@@ -1584,7 +1693,7 @@ if [ -n "$PRE_N" ] && [ -n "$BASE_N" ]; then
 		CLEANUP_WHY="the unbind grew the accounting (baseline=$BASE_TUPLE pre_uio=$PRE_TUPLE); not a reachable end state"
 		MAP_ACCOUNTING_VERDICT=FAIL
 		MAP_ACCOUNTING_WHY="pre-UIO tuple exceeds the boot baseline"
-		derive_restore_verdict "${REBIND_OK:-no}"
+		derive_restore_verdict "${REBIND_DRIVER_OK:-no}" "${REBIND_CHANNELS_OK:-no}"
 		say "  baseline=$BASE_TUPLE"
 		say "  pre_uio=$PRE_TUPLE"
 		say "  the unbind grew the accounting; that is not a reachable end state"
@@ -1597,7 +1706,7 @@ if [ "${REBIND_OK:-no}" = yes ]; then
 	EXPECT_SRC="baseline (hv_netvsc rebound, run closed)"
 else
 	EXPECT_TUPLE="$PRE_TUPLE"
-	EXPECT_SRC="band pre_uio..pre_uio+${GAP_RING_BUDGET_N}maps/${GAP_RING_BUDGET_B}B/${GAP_RING_BUDGET_P}p capped at baseline (hv_netvsc did not rebound; ring maps the UIO probe re-establishes are retained by the hv_uio_remove gap)"
+	EXPECT_SRC="band pre_uio..pre_uio+${GAP_RING_BUDGET_N}maps/${GAP_RING_BUDGET_B}B/${GAP_RING_BUDGET_P}p capped at baseline (device or captured channel topology did not return; disclosed ring retention may remain across hv_uio_remove)"
 fi
 
 # Reclaim is asynchronous. vmbus_release_buffer() hands the buffer to
@@ -1780,12 +1889,12 @@ MAP_SYSFS_WHY="$MAP_SURFACE_WHY"
 derive_map_accounting_verdict "$SETTLE_TUPLE" "$PRE_TUPLE" "$BASE_TUPLE" 	"${REBIND_OK:-no}" "$UNKNOWN_SIZES"
 
 # --- RESTORE_VERDICT --------------------------------------------------------
-# One question only: did the selected NIC come back. Map accounting is the
-# verdict above. With rebind=no the device did not return, so this cannot be
-# a complete PASS: the hv_uio_remove() gap is pre-existing mainline, it is
-# disclosed, and a PARTIAL is the honest reading of a run that proved the
-# maps and not the device.
-derive_restore_verdict "${REBIND_OK:-no}"
+# The selected NIC and its captured channel topology must return. Map
+# accounting is the verdict above. With rebind=no the device did not return,
+# so this cannot be a complete PASS: the hv_uio_remove() gap is pre-existing
+# mainline and disclosed; PARTIAL is the honest reading of a run that proved
+# the maps and not the device.
+derive_restore_verdict "${REBIND_DRIVER_OK:-no}" "${REBIND_CHANNELS_OK:-no}"
 
 # --- aggregate --------------------------------------------------------------
 # PASS requires every verdict to be PASS. A skipped or partial surface makes
