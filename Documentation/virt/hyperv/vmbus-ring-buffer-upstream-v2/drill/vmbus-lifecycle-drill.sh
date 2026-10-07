@@ -847,6 +847,62 @@ st_band_refuses_growth_and_overfree() {
 	return 0
 }
 
+st_boot_baseline_requires_stable_maps() {
+	local sample_file sample expected='MAPS count=12 bytes=20279296 pages=4939'
+	sample_file="$(mktemp /tmp/vmbus-baseline-fixture.XXXXXX)"
+	printf '%s\n' \
+		'MAPS count=13 bytes=20316160 pages=4947' \
+		'MAPS count=12 bytes=20279296 pages=4939' \
+		'MAPS count=12 bytes=20279296 pages=4939' \
+		'MAPS count=12 bytes=20279296 pages=4939' >"$sample_file"
+	vmbus_maps() {
+		if [ -s "$sample_file" ]; then
+			IFS= read -r sample <"$sample_file" || sample=''
+			sed '1d' "$sample_file" >"$sample_file.next"
+			mv "$sample_file.next" "$sample_file"
+		else
+			sample='MAPS count=11 bytes=20275200 pages=4938'
+		fi
+		printf '%s\n' "$sample"
+	}
+	sleep() { :; }
+	if ! settle_vmbus_maps BASELINE 3 4; then
+		echo "  boot map baseline did not settle at the stable sample"
+		rm -f "$sample_file" "$sample_file.next"
+		return 1
+	fi
+	if [ "$MAPS_SETTLED" != "$expected" ]; then
+		echo "  unstable first sample became the baseline: '$MAPS_SETTLED'"
+		rm -f "$sample_file" "$sample_file.next"
+		return 1
+	fi
+	if ! tuple_within_end_band \
+		'12 20279296 4939' '7 307200 68' "$MAPS_SETTLED" yes; then
+		echo "  exact rebind accounting rejected the stable baseline"
+		rm -f "$sample_file" "$sample_file.next"
+		return 1
+	fi
+	if tuple_within_end_band \
+		'13 20316160 4947' '7 307200 68' "$MAPS_SETTLED" yes >/dev/null; then
+		echo "  exact rebind accounting accepted growth above the stable baseline"
+		rm -f "$sample_file" "$sample_file.next"
+		return 1
+	fi
+
+	printf '%s\n' \
+		'MAPS count=12 bytes=20279296 pages=4939' \
+		'MAPS count=13 bytes=20316160 pages=4947' \
+		'MAPS count=12 bytes=20279296 pages=4939' \
+		'MAPS count=13 bytes=20316160 pages=4947' >"$sample_file"
+	if settle_vmbus_maps BASELINE 3 3; then
+		echo "  changing map tuples were accepted as a stable baseline"
+		rm -f "$sample_file" "$sample_file.next"
+		return 1
+	fi
+	rm -f "$sample_file" "$sample_file.next"
+	return 0
+}
+
 run_self_test() {
 	echo "scope: synthetic validator fixtures, not reproduced kernel leaks."
 	for _f in \
@@ -864,7 +920,8 @@ run_self_test() {
 		st_death_before_release_is_fail \
 		st_touch_scrapers_separate_ready_from_after \
 		st_aggregate_is_an_explicit_conjunction \
-		st_band_refuses_growth_and_overfree; do
+		st_band_refuses_growth_and_overfree \
+		st_boot_baseline_requires_stable_maps; do
 		if "$_f"; then
 			st_ok "$_f"
 		else
