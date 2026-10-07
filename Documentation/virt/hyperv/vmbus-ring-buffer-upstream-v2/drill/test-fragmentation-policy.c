@@ -118,6 +118,9 @@ int main(void)
 	assert(frag_should_refine_order7(1, 384));
 	assert(!frag_should_refine_order7(1, 256));
 	assert(!frag_should_refine_order7(0, 384));
+	/* Keep the channel-open hole budget large enough for netvsc buffers. */
+	assert(FRAG_HOLE_CAP * FRAG_PAGE >= 96L * 1024 * 1024);
+	assert(FRAG_HOLE_CAP <= 32768L);
 	assert(!frag_release_requested("/nonexistent/vmbus-release-sentinel"));
 	assert(frag_release_requested("/dev/null"));
 	frag_stop_signal = SIGTERM;
