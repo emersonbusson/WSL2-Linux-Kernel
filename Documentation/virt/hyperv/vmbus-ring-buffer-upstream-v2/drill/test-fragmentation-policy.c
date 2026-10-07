@@ -47,6 +47,10 @@ int main(void)
 	static const char unrelated_owner[] =
 		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=11 channel_id=99 action=created size=0 pages=0 state=0\n";
 	struct owner_check_stats owner_stats;
+	const long hole_cap = FRAG_HOLE_CAP;
+	const long min_holes = FRAG_RUNTIME_MIN_HOLE_PAGES;
+	const long usable_kb = FRAG_RUNTIME_MIN_FREE_KB;
+	const long min_order2 = FRAG_RUNTIME_MIN_ORDER2_BLOCKS;
 	unsigned long *seen = calloc(1, sizeof(*seen));
 	size_t seen_words = 1;
 	const unsigned long distant_pfn = 64UL * 9000UL + 3UL;
@@ -119,21 +123,22 @@ int main(void)
 	assert(!frag_should_refine_order7(1, 256));
 	assert(!frag_should_refine_order7(0, 384));
 	/* Keep the channel-open hole budget large enough for netvsc buffers. */
-	assert(FRAG_HOLE_CAP * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES);
-	assert(FRAG_HOLE_CAP <= FRAG_HOLE_MAX_CAP);
-	assert(frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES,
-					       FRAG_RUNTIME_MIN_FREE_KB,
-					       FRAG_RUNTIME_MIN_ORDER2_BLOCKS));
-	assert(!frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES - 1,
-						FRAG_RUNTIME_MIN_FREE_KB,
-						FRAG_RUNTIME_MIN_ORDER2_BLOCKS));
-	assert(!frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES,
-						FRAG_RUNTIME_MIN_FREE_KB - 1,
-						FRAG_RUNTIME_MIN_ORDER2_BLOCKS));
-	assert(!frag_runtime_reserve_qualified(FRAG_RUNTIME_MIN_HOLE_PAGES,
-						FRAG_RUNTIME_MIN_FREE_KB,
-						FRAG_RUNTIME_MIN_ORDER2_BLOCKS - 1));
-	assert(!frag_runtime_reserve_qualified(-1, -1, -1));
+	assert(hole_cap * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES);
+	assert(hole_cap <= FRAG_HOLE_MAX_CAP);
+	assert(frag_runtime_reserve_qualified(hole_cap, min_holes, usable_kb,
+					      min_order2));
+	assert(!frag_runtime_reserve_qualified(min_holes, min_holes, usable_kb,
+					       min_order2));
+	assert(!frag_runtime_reserve_qualified(FRAG_HOLE_MAX_CAP + 1,
+					       min_holes, usable_kb,
+					       min_order2));
+	assert(!frag_runtime_reserve_qualified(hole_cap, min_holes - 1,
+					       usable_kb, min_order2));
+	assert(!frag_runtime_reserve_qualified(hole_cap, min_holes,
+					       usable_kb - 1, min_order2));
+	assert(!frag_runtime_reserve_qualified(hole_cap, min_holes, usable_kb,
+					       min_order2 - 1));
+	assert(!frag_runtime_reserve_qualified(-1, -1, -1, -1));
 	assert(!frag_release_requested("/nonexistent/vmbus-release-sentinel"));
 	assert(frag_release_requested("/dev/null"));
 	frag_stop_signal = SIGTERM;

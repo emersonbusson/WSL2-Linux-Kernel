@@ -1146,12 +1146,12 @@ static int frag_should_refine_order7(long blocks, long pages)
 	return blocks > 0 && pages > FRAG_BOUNDED_MAX_REMAINING_PAGES;
 }
 
-static int frag_runtime_reserve_qualified(long freed_pages,
+static int frag_runtime_reserve_qualified(long hole_cap, long freed_pages,
 					  long free_above_wmark_kb,
 					  long order2_blocks)
 {
-	return FRAG_HOLE_CAP * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES &&
-	       FRAG_HOLE_CAP <= FRAG_HOLE_MAX_CAP &&
+	return hole_cap >= 0 && FRAG_HOLE_MAX_CAP >= hole_cap &&
+	       hole_cap * FRAG_PAGE >= FRAG_HOLE_MIN_BYTES &&
 	       freed_pages >= FRAG_RUNTIME_MIN_HOLE_PAGES &&
 	       free_above_wmark_kb >= FRAG_RUNTIME_MIN_FREE_KB &&
 	       order2_blocks >= FRAG_RUNTIME_MIN_ORDER2_BLOCKS;
@@ -2312,17 +2312,17 @@ static int do_fragment_buddy(int argc, char **argv)
 	wmark_kb = live_min_watermark_kb();
 	if (free_kb >= 0 && wmark_kb >= 0 && free_kb >= wmark_kb)
 		free_above_wmark_kb = free_kb - wmark_kb;
-	if (!frag_runtime_reserve_qualified(freed_pages, free_above_wmark_kb,
-					    order2_buddy)) {
-		printf("FRAGMENT_BUDDY ready=0 reason=runtime-reserve-insufficient "
-		       "freed=%ld required_holes=%ld free_kb=%ld "
-		       "free_above_wmark_kb=%ld "
-		       "required_free_kb=%ld buddy_order2=%ld "
-		       "required_order2=%ld wmark_kb=%ld\n",
-		       freed_pages, FRAG_RUNTIME_MIN_HOLE_PAGES, free_kb,
-		       free_above_wmark_kb,
-		       FRAG_RUNTIME_MIN_FREE_KB, order2_buddy,
-		       FRAG_RUNTIME_MIN_ORDER2_BLOCKS, wmark_kb);
+	if (!frag_runtime_reserve_qualified(FRAG_HOLE_CAP, freed_pages,
+					    free_above_wmark_kb, order2_buddy)) {
+		printf("FRAGMENT_BUDDY ready=0 reason=runtime-reserve-insufficient\n");
+		printf("FRAGMENT_BUDDY reserve freed=%ld required_holes=%ld\n",
+		       freed_pages, FRAG_RUNTIME_MIN_HOLE_PAGES);
+		printf("FRAGMENT_BUDDY reserve free_kb=%ld above_wmark_kb=%ld\n",
+		       free_kb, free_above_wmark_kb);
+		printf("FRAGMENT_BUDDY reserve required_free_kb=%ld wmark_kb=%ld\n",
+		       FRAG_RUNTIME_MIN_FREE_KB, wmark_kb);
+		printf("FRAGMENT_BUDDY reserve order2=%ld required_order2=%ld\n",
+		       order2_buddy, FRAG_RUNTIME_MIN_ORDER2_BLOCKS);
 		fflush(stdout);
 		rc = 3;
 		goto cleanup;
