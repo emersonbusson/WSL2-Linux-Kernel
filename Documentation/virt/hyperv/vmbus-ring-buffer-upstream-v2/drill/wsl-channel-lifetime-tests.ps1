@@ -47,6 +47,23 @@ Accept {
         throw 'shutdown quiescence was not awaited and recorded'
     }
 }
+$script:shutdownRetries = 0
+$retryShutdown = { $script:shutdownRetries++ }
+$retryProbe = {
+    if ($script:shutdownRetries -gt 0) {
+        @{ running_distros = ''; vmmem_pids = @() }
+    } else {
+        @{ running_distros = ''; vmmem_pids = @(7184) }
+    }
+}
+Accept {
+    $state = Wait-WslShutdownQuiescence -Probe $retryProbe -Delay {} -RetryShutdown $retryShutdown `
+        -TimeoutSeconds 5 -RetryIntervalSeconds 0 -MaxRetries 1
+    if ($script:shutdownRetries -ne 1 -or $state.retry_count -ne 1 -or
+        $state.observations -ne 3) {
+        throw 'a lingering utility VM was not cleared by one bounded shutdown retry'
+    }
+}
 Accept {
     $timedOut = $false
     try {
@@ -56,6 +73,21 @@ Accept {
         $timedOut = $_.Exception.Message -match 'vmmem_pids=42'
     }
     if (-not $timedOut) { throw 'a persistent VmmemWSL process did not fail with evidence' }
+}
+$script:shutdownRetries = 0
+Accept {
+    $timedOut = $false
+    try {
+        Wait-WslShutdownQuiescence -Probe { @{ running_distros = ''; vmmem_pids = @(7184) } } `
+            -Delay { Start-Sleep -Milliseconds 10 } -RetryShutdown { $script:shutdownRetries++ } `
+            -TimeoutSeconds 1 -RetryIntervalSeconds 0 -MaxRetries 2 | Out-Null
+    } catch {
+        $timedOut = $_.Exception.Message -match 'retry_count=2' -and
+            $_.Exception.Message -match 'vmmem_pids=7184'
+    }
+    if (-not $timedOut -or $script:shutdownRetries -ne 2) {
+        throw 'shutdown retries were unbounded or timeout evidence omitted the final state'
+    }
 }
 Reject {
     Wait-WslShutdownQuiescence -Probe { @{ running_distros = '' } } -Delay {} -TimeoutSeconds 0
