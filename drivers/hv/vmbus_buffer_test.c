@@ -618,8 +618,44 @@ static void vmbus_buffer_cleanup_repeated_test(struct kunit *test)
 	__free_pages(page, 0);
 }
 
+/*
+ * Requestor arrays and bitmaps are guest-private metadata. Require vmalloc
+ * backing even for small allocations so channel open does not need contiguous
+ * pages when the buddy is fragmented.
+ */
+static void vmbus_requestor_vmalloc_backing_test(struct kunit *test)
+{
+	u32 small_size = 1024;
+	u32 bitmap_size = (PAGE_SIZE / sizeof(unsigned long)) * BITS_PER_LONG + 1;
+	u32 size = (KMALLOC_MAX_SIZE / sizeof(u64)) + 1;
+	struct vmbus_requestor rqstor = {};
+	u64 *req_arr;
+
+	KUNIT_EXPECT_PTR_EQ(test, request_arr_init(0), NULL);
+
+	req_arr = request_arr_init(small_size);
+	KUNIT_ASSERT_NOT_NULL(test, req_arr);
+	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
+	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
+	KUNIT_EXPECT_EQ(test, req_arr[small_size - 1], U64_MAX);
+	kvfree(req_arr);
+
+	req_arr = request_arr_init(size);
+	KUNIT_ASSERT_NOT_NULL(test, req_arr);
+	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
+	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
+	KUNIT_EXPECT_EQ(test, req_arr[size - 1], U64_MAX);
+	kvfree(req_arr);
+
+	KUNIT_ASSERT_EQ(test, vmbus_alloc_requestor(&rqstor, bitmap_size), 0);
+	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(rqstor.req_arr));
+	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(rqstor.req_bitmap));
+	vmbus_free_requestor(&rqstor);
+}
+
 static struct kunit_case vmbus_gpadl_lifetime_test_cases[] = {
 	KUNIT_CASE(vmbus_buffer_size_rounding_test),
+	KUNIT_CASE(vmbus_requestor_vmalloc_backing_test),
 	KUNIT_CASE(vmbus_shared_buffer_path_selection_test),
 	KUNIT_CASE(vmbus_gpadl_rescind_retains_state_test),
 	KUNIT_CASE(vmbus_host_rescind_teardown_ack_test),

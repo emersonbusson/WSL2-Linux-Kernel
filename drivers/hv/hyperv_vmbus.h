@@ -532,6 +532,9 @@ typedef int (*vmbus_gpadl_teardown_post_fn)(struct vmbus_connection *connection,
  * hv_vmbus object so the cases can reach them without exporting them.
  * They must never gain EXPORT_SYMBOL_GPL.
  */
+u64 *request_arr_init(u32 size);
+int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size);
+void vmbus_free_requestor(struct vmbus_requestor *rqstor);
 bool vmbus_uses_shared_page_chunks(bool encrypted, bool hv_isolated);
 int vmbus_buffer_size_pages(u32 requested_size, unsigned long *nr_pages,
 			    u32 *aligned_size);

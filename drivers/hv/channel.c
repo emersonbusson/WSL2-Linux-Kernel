@@ -1221,7 +1221,7 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
  * Computing implication and needs no set_memory_decrypted().
  * @size The size of the array
  */
-static u64 *request_arr_init(u32 size)
+u64 *request_arr_init(u32 size)
 {
 	int i;
 	u64 *req_arr;
@@ -1244,7 +1244,7 @@ static u64 *request_arr_init(u32 size)
  * Index 0 is the first free slot
  * @size: Size of the requestor array
  */
-static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
+int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
 {
 	u64 *rqst_arr;
 	unsigned long *bitmap;
@@ -1272,7 +1272,7 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  * vmbus_free_requestor - Frees memory allocated for @rqstor
  * @rqstor: Pointer to the requestor struct
  */
-static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
+void vmbus_free_requestor(struct vmbus_requestor *rqstor)
 {
 	kvfree(rqstor->req_arr);
 	bitmap_free(rqstor->req_bitmap);

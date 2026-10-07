@@ -111,6 +111,7 @@ jobs:
             vmbus-wsl-artifacts/config-kunit-requested
           for case_name in \
             vmbus_gpadl_rescind_retains_state_test \
+            vmbus_requestor_vmalloc_backing_test \
             vmbus_host_rescind_teardown_ack_test \
             vmbus_host_rescind_teardown_timeout_test \
             vmbus_host_rescind_teardown_wrong_handle_test \
@@ -142,7 +143,7 @@ jobs:
             --arch=x86_64 --kunitconfig="$RUNNER_TEMP/wsl-kunitconfig" \
             2>&1 | tee vmbus-wsl-artifacts/kunit.log
           cp wsl-kunit-out/.config vmbus-wsl-artifacts/config-kunit-resolved
-          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(20 subtests\)' \
+          grep -Eq 'hyperv-vmbus-gpadl-lifetime \(21 subtests\)' \
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-vmbus-gpadl-lifetime' \
             vmbus-wsl-artifacts/kunit.log
@@ -150,10 +151,11 @@ jobs:
             vmbus-wsl-artifacts/kunit.log
           grep -Eq '\[PASSED\] hyperv-uio-hv-generic-mmap' \
             vmbus-wsl-artifacts/kunit.log
-          grep -Eq 'Testing complete\. Ran 25 tests: passed: 25$' \
+          grep -Eq 'Testing complete\. Ran 26 tests: passed: 26$' \
             vmbus-wsl-artifacts/kunit.log
           for case_name in \
             vmbus_gpadl_rescind_retains_state_test \
+            vmbus_requestor_vmalloc_backing_test \
             vmbus_host_rescind_teardown_ack_test \
             vmbus_host_rescind_teardown_timeout_test \
             vmbus_host_rescind_teardown_wrong_handle_test \
