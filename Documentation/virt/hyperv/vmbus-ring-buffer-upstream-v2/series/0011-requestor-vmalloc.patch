@@ -24,6 +24,8 @@ and cleanup.
 Rollback trigger: revert if requestor metadata is exposed to the host, if
 request-ID allocation or teardown regresses on a healthy channel open, or
 if hyperv-vmbus-buffer KUnit fails.
+
+Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/channel.c           |  39 ++++++--
  drivers/hv/hyperv_vmbus.h      |  11 +++
@@ -316,4 +318,3 @@ index 5c8e70d861ad..d0102dabef73 100644
  
 -- 
 2.43.0
-

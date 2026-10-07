@@ -1,6 +1,6 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: requestor array and bitmap now use vmalloc backing; fresh mainline and drill workflows are pending. No mail sent.
+Status: run 37590726170 stopped x86_64 and arm64 at strict checkpatch because patch 0011 lacked Signed-off-by; this was not a compile or test result. The sign-off and mail hash are corrected. Test-only WSL run 37591286755 confirmed the zero-size requestor Oops; the candidate now includes zero-size rejection, vmalloc-safe RNDIS GPAs, and kvzalloc-backed NetVSC state. Final green validation remains pending. No mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
 Mainline reconstructed tip: f950d50cea3c3a9ce3a69bb81f58fb8bba4563eb
 Expected applied source tree: e6fe523ca92ce30ea7edb265b8a26bf20a867c47
@@ -35,7 +35,7 @@ b7726dc6be3cb5fd025ee630edfc7fb956dd2c34991936edd30c523c280089a7  0005-order-zer
 a25684af8c9b1bba67b649eacf89160cc0184182c2dcaf565c8ff884150d338f  0008-buffer-ownership.patch
 97e7ec6b6c406203a9b1871025a27e97d0c0ede8b42100a13b50afd68fab6e92  0009-alloc-buffer-prototype.patch
 f03fe47161aef80b33d1cf619efb170733d0076b3794498dbe48f7f329a36984  0010-uio-mmap-pin.patch
-d00887b49ccd8edf654328cd7cc9e6b5fe3320222fc66d4f60de20ed656512fc  0011-requestor-vmalloc.patch
+52affc5bdbadea770d41f0898917826250a25741def063cca1ad703a9a923bf5  0011-requestor-vmalloc.patch
 4a6b943d042c9ab94b1665c9301b6a7e402e69a446ebfc7827d2ccf7760c0f9f  0012-rndis-request-kvmalloc.patch
 5dcd739bfa3115f24b20ca6e200ba3c62484a95006bcd6449c496de81fea7478  0013-netvsc-empty-completion-null.patch
 27dac0e6c6a96df3eb2409a2c792de9c453f71f3fe3dc1407cb6606d78f06ac9  0014-netvsc-kvzalloc.patch
@@ -43,6 +43,10 @@ TDD RED runs retained as regression evidence, not qualification:
 37585672952 and 37588106938 exercised the new vmalloc-backing assertions
 before the allocator fix. Their KUnit failures were expected; the WSL
 backport, mainline builds, and CoCo checks passed in the completed legs.
+Test-only WSL run 37591286755 passed 25/26 and faulted at request_arr_init(0):
+the old path dereferenced ZERO_SIZE_PTR at req_arr[size - 1] (CR2 0x10).
+The fix rejects zero before allocation; this RED is a failure finding, not
+qualification.
 The final source tree changes both requestor allocations to vzalloc(); it
 requires a fresh complete green workflow before qualification.
 

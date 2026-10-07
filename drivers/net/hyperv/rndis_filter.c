@@ -16,6 +16,7 @@
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
+#include <linux/mm.h>
 #include <linux/nls.h>
 #include <linux/vmalloc.h>
 #include <linux/rtnetlink.h>
@@ -93,9 +94,10 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
 	 * back an order-2 compound page. That is a high-order allocation
 	 * on the subchannel open path and it fails under buddy
 	 * fragmentation -- the same failure this series removes from the
-	 * rings and the requestor array. The request is a control-path
-	 * object copied into the VMBus ring and never DMA-mapped from
-	 * this allocation, so vmalloc backing is fine. kvzalloc() keeps
+	 * rings and the requestor array. RNDIS messages are sent through
+	 * GPADL-direct page buffers, which NetVSC DMA-maps per range for
+	 * isolated guests. rndis_filter_send_request() describes each
+	 * backing page, so vmalloc backing is safe. kvzalloc() keeps
 	 * the zeroing kzalloc() provided and tries the kmalloc path with
 	 * __GFP_NORETRY|__GFP_NOWARN first, so it neither fails hard nor
 	 * reaches the OOM killer when no compound page is available. The
@@ -237,27 +239,83 @@ static void dump_rndis_message(struct net_device *netdev,
 	}
 }
 
+/*
+ * Build GPADL-direct page buffers without assuming physical contiguity.
+ * kvzalloc() may return vmalloc backing; split at Linux and Hyper-V page
+ * boundaries so NetVSC can map each range independently when required.
+ */
+static int rndis_build_page_buffers(const void *data, u32 len,
+				    struct hv_page_buffer *page_bufs,
+				    u32 *page_buf_cnt)
+{
+	const u8 *addr = data;
+	u32 count = 0;
+
+	if (!data || !len || !page_bufs || !page_buf_cnt)
+		return -EINVAL;
+
+	*page_buf_cnt = 0;
+
+	while (len) {
+		struct page *page;
+		phys_addr_t phys;
+		u32 offset, chunk;
+		unsigned long page_offset = offset_in_page(addr);
+
+		if (count == MAX_PAGE_BUFFER_COUNT)
+			return -E2BIG;
+
+		if (is_vmalloc_addr(addr))
+			page = vmalloc_to_page(addr);
+		else if (virt_addr_valid(addr))
+			page = virt_to_page(addr);
+		else
+			return -EFAULT;
+
+		if (!page)
+			return -EFAULT;
+
+		phys = page_to_phys(page) + page_offset;
+		offset = offset_in_hvpage(phys);
+		chunk = min_t(u32, len, PAGE_SIZE - page_offset);
+		chunk = min_t(u32, chunk, HV_HYP_PAGE_SIZE - offset);
+
+		page_bufs[count].pfn = phys >> HV_HYP_PAGE_SHIFT;
+		page_bufs[count].offset = offset;
+		page_bufs[count].len = chunk;
+
+		addr += chunk;
+		len -= chunk;
+		count++;
+	}
+
+	*page_buf_cnt = count;
+	return 0;
+}
+
 static int rndis_filter_send_request(struct rndis_device *dev,
 				  struct rndis_request *req)
 {
 	struct hv_netvsc_packet *packet;
-	struct hv_page_buffer pb;
+	struct hv_page_buffer page_bufs[MAX_PAGE_BUFFER_COUNT];
+	u32 page_buf_cnt;
 	int ret;
 
 	/* Setup the packet to send it */
 	packet = &req->pkt;
 
 	packet->total_data_buflen = req->request_msg.msg_len;
-	packet->page_buf_cnt = 1;
-
-	pb.pfn = virt_to_phys(&req->request_msg) >> HV_HYP_PAGE_SHIFT;
-	pb.len = req->request_msg.msg_len;
-	pb.offset = offset_in_hvpage(&req->request_msg);
+	ret = rndis_build_page_buffers(&req->request_msg,
+				       req->request_msg.msg_len,
+				       page_bufs, &page_buf_cnt);
+	if (ret)
+		return ret;
+	packet->page_buf_cnt = page_buf_cnt;
 
 	trace_rndis_send(dev->ndev, 0, &req->request_msg);
 
 	rcu_read_lock_bh();
-	ret = netvsc_send(dev->ndev, packet, NULL, &pb, NULL, false);
+	ret = netvsc_send(dev->ndev, packet, NULL, page_bufs, NULL, false);
 	rcu_read_unlock_bh();
 
 	return ret;

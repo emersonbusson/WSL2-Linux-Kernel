@@ -1212,21 +1212,25 @@ EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
  * slot points to the next one (as in a Linked List). The last slot
  * does not point to anything, so its value is U64_MAX by default.
  *
- * Allocated with kvcalloc() rather than kcalloc(). @size is derived from
- * the ring size (netvsc_rqstor_size()) and at the default ring_size of
- * 128 pages the array exceeds 256 KiB, so kcalloc() asks for an order-7
- * compound page and fails outright under buddy fragmentation. The array
- * is guest-private request bookkeeping -- the host never sees the slot
- * values -- so a vmalloc-backed mapping carries no Confidential
+ * Allocated with vzalloc() rather than kvcalloc(). kvcalloc() can use a
+ * higher-order kmalloc allocation for arrays up to KMALLOC_MAX_SIZE, so
+ * both small requestor arrays and the default 128-page ring array may need
+ * contiguous pages while opening a channel under buddy fragmentation. The
+ * array is guest-private request bookkeeping -- the host never sees the
+ * slot values -- so a vmalloc-backed mapping carries no Confidential
  * Computing implication and needs no set_memory_decrypted().
  * @size The size of the array
  */
 u64 *request_arr_init(u32 size)
 {
-	int i;
+	size_t bytes;
+	u32 i;
 	u64 *req_arr;
 
-	req_arr = kvcalloc(size, sizeof(u64), GFP_KERNEL);
+	if (!size || check_mul_overflow((size_t)size, sizeof(*req_arr), &bytes))
+		return NULL;
+
+	req_arr = vzalloc(bytes);
 	if (!req_arr)
 		return NULL;
 
@@ -1246,6 +1250,7 @@ u64 *request_arr_init(u32 size)
  */
 int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
 {
+	size_t bitmap_longs, bitmap_bytes;
 	u64 *rqst_arr;
 	unsigned long *bitmap;
 
@@ -1253,9 +1258,17 @@ int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
 	if (!rqst_arr)
 		return -ENOMEM;
 
-	bitmap = bitmap_zalloc(size, GFP_KERNEL);
+	bitmap_longs = size / BITS_PER_LONG;
+	if (size % BITS_PER_LONG)
+		bitmap_longs++;
+	if (check_mul_overflow(bitmap_longs, sizeof(*bitmap), &bitmap_bytes)) {
+		vfree(rqst_arr);
+		return -ENOMEM;
+	}
+
+	bitmap = vzalloc(bitmap_bytes);
 	if (!bitmap) {
-		kvfree(rqst_arr);
+		vfree(rqst_arr);
 		return -ENOMEM;
 	}
 
@@ -1274,8 +1287,8 @@ int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  */
 void vmbus_free_requestor(struct vmbus_requestor *rqstor)
 {
-	kvfree(rqstor->req_arr);
-	bitmap_free(rqstor->req_bitmap);
+	vfree(rqstor->req_arr);
+	vfree(rqstor->req_bitmap);
 }
 
 static int __vmbus_open(struct vmbus_channel *newchannel,

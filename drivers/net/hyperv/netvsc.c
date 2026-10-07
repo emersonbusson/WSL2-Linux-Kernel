@@ -130,7 +130,7 @@ static struct netvsc_device *alloc_net_device(void)
 {
 	struct netvsc_device *net_device;
 
-	net_device = kzalloc(sizeof(struct netvsc_device), GFP_KERNEL);
+	net_device = kvzalloc(sizeof(*net_device), GFP_KERNEL);
 	if (!net_device)
 		return NULL;
 
@@ -173,7 +173,7 @@ static void free_netvsc_device(struct rcu_head *head)
 		vfree(nvdev->chan_table[i].mrc.slots);
 	}
 
-	kfree(nvdev);
+	kvfree(nvdev);
 }
 
 static void free_netvsc_device_rcu(struct netvsc_device *nvdev)
