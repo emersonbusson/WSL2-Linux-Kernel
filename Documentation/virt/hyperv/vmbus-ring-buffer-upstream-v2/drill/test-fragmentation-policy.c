@@ -74,6 +74,9 @@ int main(void)
 	assert(!frag_should_preserve_order7(0, 128));
 	assert(!frag_should_preserve_order7(1, 257));
 	assert(!frag_should_preserve_order7(1, 0));
+	assert(frag_should_refine_order7(1, 384));
+	assert(!frag_should_refine_order7(1, 256));
+	assert(!frag_should_refine_order7(0, 384));
 	assert(!frag_release_requested("/nonexistent/vmbus-release-sentinel"));
 	assert(frag_release_requested("/dev/null"));
 	frag_stop_signal = SIGTERM;

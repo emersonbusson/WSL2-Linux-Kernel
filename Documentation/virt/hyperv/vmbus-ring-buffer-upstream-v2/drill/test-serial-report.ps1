@@ -95,6 +95,31 @@ if (-not $lossRecovered.Verified -or $lossRecovered.Text -cne $payload) {
 }
 Write-Output 'PASS serial_report_recovers_two_truncated_rows_and_one_lost_replica'
 
+# A burst can damage more than half of a row's copies. The unique top
+# candidate is acceptable only when the complete compressed SHA-256 matches.
+$majorityLoss = [Collections.Generic.List[string]]::new()
+foreach ($line in $fixture.Lines) { $majorityLoss.Add([string]$line) }
+$rowCopies = 0
+$alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+for ($lineIndex = 0; $lineIndex -lt $majorityLoss.Count; $lineIndex++) {
+  $line = $majorityLoss[$lineIndex]
+  if ($line -notmatch '^HYPERV_DRILL_REPORT_DATA index=0 ') { continue }
+  if ($rowCopies -ge 3) {
+    $dataOffset = $line.IndexOf('data=', [StringComparison]::Ordinal) + 5
+    $oldChar = [string]$line[$dataOffset]
+    $replacementIndex = ($alphabet.IndexOf($oldChar) + $rowCopies) % $alphabet.Length
+    $replacement = [string]$alphabet[$replacementIndex]
+    $majorityLoss[$lineIndex] = $line.Substring(0, $dataOffset) + $replacement +
+      $line.Substring($dataOffset + 1)
+  }
+  $rowCopies++
+}
+$majorityRecovered = Get-HypervDrillEvidenceReport -ConsoleText ($majorityLoss -join [Environment]::NewLine)
+if (-not $majorityRecovered.Verified -or $majorityRecovered.Text -cne $payload) {
+  throw "unique checksum-bound row recovery failed: $($majorityRecovered.Error)"
+}
+Write-Output 'PASS serial_report_recovers_unique_rows_below_copy_quorum_by_digest'
+
 $reportOutcome = Get-HypervDrillReportVerdict -ReportText $recovered.Text -RequireHostRescind
 if ($reportOutcome.Verdict -ne 'PASS') { throw "verified candidate report rejected: $($reportOutcome.Error)" }
 $passDecision = Get-HypervDrillDecision -Policy RequirePass -Verdict $reportOutcome.Verdict -ConsoleText $recovered.Text
@@ -139,24 +164,31 @@ $unexpectedWarning = Get-HypervDrillDecision -Policy ExpectedBaselineFailure -Ve
 if ($unexpectedWarning.ExitCode -eq 0) { throw 'unexpected warning was accepted in a negative control' }
 Write-Output 'PASS verified_report_accepts_only_planned_baseline_signature'
 
-# Two corrupt and two missing replicas leave a checksum-correct fragment below
-# the strict four-of-seven quorum; the parser must refuse to call it proof.
-$unrecoverable = [Collections.Generic.List[string]]::new()
-foreach ($line in $fixture.Lines) { $unrecoverable.Add([string]$line) }
-$dataLines = @($unrecoverable | Where-Object { $_ -match '^HYPERV_DRILL_REPORT_DATA index=0 ' })
-foreach ($line in $dataLines[0..1]) {
+# A corrupted variant can have more copies than the valid fragment; the
+# complete packed digest must still reject the assembled report.
+$wrongMajority = [Collections.Generic.List[string]]::new()
+foreach ($line in $fixture.Lines) { $wrongMajority.Add([string]$line) }
+$rowCopies = 0
+$badRowReplacement = ''
+for ($lineIndex = 0; $lineIndex -lt $wrongMajority.Count; $lineIndex++) {
+  $line = $wrongMajority[$lineIndex]
+  if ($line -notmatch '^HYPERV_DRILL_REPORT_DATA index=0 ') { continue }
   $dataOffset = $line.IndexOf('data=', [StringComparison]::Ordinal) + 5
-  $replacement = if ($line[$dataOffset] -eq 'A') { 'B' } else { 'A' }
-  $unrecoverable[$unrecoverable.IndexOf($line)] = $line.Substring(0, $dataOffset) +
-    $replacement + $line.Substring($dataOffset + 1)
+  if ($rowCopies -eq 0) {
+    $oldChar = [string]$line[$dataOffset]
+    $badRowReplacement = if ($oldChar -ceq 'A') { 'B' } else { 'A' }
+  }
+  if ($rowCopies -lt 4) {
+    $wrongMajority[$lineIndex] = $line.Substring(0, $dataOffset) +
+      $badRowReplacement + $line.Substring($dataOffset + 1)
+  }
+  $rowCopies++
 }
-$unrecoverable.Remove($dataLines[2]) | Out-Null
-$unrecoverable.Remove($dataLines[3]) | Out-Null
-$rejected = Get-HypervDrillEvidenceReport -ConsoleText ($unrecoverable -join "`n")
-if ($rejected.Verified -or $rejected.Error -ne 'report-row-quorum') {
-  throw "below-quorum row was not rejected: verified=$($rejected.Verified) error=$($rejected.Error)"
+$rejected = Get-HypervDrillEvidenceReport -ConsoleText ($wrongMajority -join [Environment]::NewLine)
+if ($rejected.Verified -or $rejected.Error -ne 'report-checksum-mismatch') {
+  throw "wrong checksum-bound majority was not rejected: verified=$($rejected.Verified) error=$($rejected.Error)"
 }
-Write-Output 'PASS serial_report_rejects_below_quorum_row'
+Write-Output 'PASS serial_report_rejects_wrong_row_majority_by_digest'
 
 $missing = Get-HypervDrillEvidenceReport -ConsoleText 'HYPERV_DRILL_DONE'
 if ($missing.Verified -or $missing.Error -ne 'report-frame-missing') {

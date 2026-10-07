@@ -730,6 +730,11 @@ static int frag_should_preserve_order7(long blocks, long pages)
 	       pages <= FRAG_BOUNDED_MAX_REMAINING_PAGES;
 }
 
+static int frag_should_refine_order7(long blocks, long pages)
+{
+	return blocks > 0 && pages > FRAG_BOUNDED_MAX_REMAINING_PAGES;
+}
+
 static void frag_wait_for_release(const char *release_file, long hold)
 {
 	long waited = 0;
@@ -1687,6 +1692,98 @@ static int do_fragment_buddy(int argc, char **argv)
 
 	high_after = buddy_blocks_at_or_above(7);
 	high_after_pages = buddy_pages_at_or_above(7);
+	/*
+	 * Releasing the bounded order-0 holes can expose buddy coalescing that
+	 * was not visible at the chase stop. If that leaves more than the
+	 * measured reserve, consume additional chunks while the same free,
+	 * watermark, and unsplit floors still permit it. The extra chunks stay
+	 * pinned through the channel-open measurement and are reclaimed only by
+	 * the normal cleanup path.
+	 */
+	if (frag_should_refine_order7(high_after, high_after_pages)) {
+		long refined = 0;
+
+		for (;;) {
+			char *m;
+			long high, high_pages, unsplit;
+
+			if (frag_release_requested(release_file)) {
+				rc = frag_stop_signal ? 128 + frag_stop_signal : 3;
+				goto cleanup;
+			}
+			high = buddy_blocks_at_or_above(7);
+			high_pages = buddy_pages_at_or_above(7);
+			if (high < 0 || high_pages < 0) {
+				printf("FRAGMENT_BUDDY ready=0 reason=refine-buddyinfo-unavailable\n");
+				fflush(stdout);
+				rc = 3;
+				goto cleanup;
+			}
+			high_after = high;
+			high_after_pages = high_pages;
+			if (high == 0) {
+				stop_reason = "order7-depleted";
+				break;
+			}
+
+			unsplit = unsplit_free_pages();
+			unsplit_at_stop = unsplit;
+			if (unsplit >= 0 && unsplit < FRAG_CHASE_UNSPLIT) {
+				stop_reason = "chase-unsplit-floor";
+				break;
+			}
+
+			free_kb = mem_free_kb();
+			wmark_kb = live_min_watermark_kb();
+			floor_kb = FRAG_CHASE_HARD_KB;
+			if (min_free_set > 0 &&
+			    min_free_set + FRAG_CHASE_WMARK_MARGIN > floor_kb)
+				floor_kb = min_free_set + FRAG_CHASE_WMARK_MARGIN;
+			chase_free_kb = free_kb;
+			chase_wmark_kb = wmark_kb;
+			chase_floor_kb = floor_kb;
+			if (frag_should_preserve_order7(high, high_pages)) {
+				stopped = 1;
+				stop_reason = "chase-order7-reserve";
+				break;
+			}
+			if (free_kb >= 0 && free_kb < floor_kb) {
+				stop_reason = "chase-memfree-margin";
+				break;
+			}
+			if (chase >= FRAG_CHASE_CAP) {
+				stop_reason = "chase-cap";
+				break;
+			}
+
+			m = mmap(NULL, FRAG_CHUNK, PROT_READ | PROT_WRITE,
+				 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+			if (m == MAP_FAILED) {
+				stop_reason = "chase-mmap-refused";
+				break;
+			}
+			for (off = 0; off < FRAG_CHUNK; off += FRAG_PAGE)
+				m[off] = 1;
+			if (mlock(m, FRAG_CHUNK) != 0) {
+				int saved_errno = errno;
+
+				munmap(m, FRAG_CHUNK);
+				printf("FRAGMENT_BUDDY ready=0 reason=refine-mlock-failed errno=%d\n",
+				       saved_errno);
+				fflush(stdout);
+				rc = 3;
+				goto cleanup;
+			}
+			chase_maps[chase++] = m;
+			chase_locked++;
+			refined++;
+		}
+		high_after = buddy_blocks_at_or_above(7);
+		high_after_pages = buddy_pages_at_or_above(7);
+		printf("FRAGMENT_BUDDY refine=%ld high_order_7plus=%ld high_order_7plus_pages=%ld stop=%s\n",
+		       refined, high_after, high_after_pages, stop_reason);
+		fflush(stdout);
+	}
 	printf("FRAGMENT_BUDDY chase=%ld locked=%ld holes=%ld pairs=%ld high_order_7plus=%ld->%ld high_order_7plus_pages=%ld->%ld\n",
 	       chase, chase_locked, chase_holes, chase_pairs, high_locked,
 	       high_after, high_locked_pages, high_after_pages);

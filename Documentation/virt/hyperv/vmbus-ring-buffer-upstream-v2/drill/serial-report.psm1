@@ -73,9 +73,6 @@ function Get-HypervDrillEvidenceReport {
       return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-conflict'; Sha256 = $expectedHash; Rows = $rowCount; Copies = [int]$rankedHeaders[0].Value; RecoveredRows = $recoveredRows }
     }
     $fragment = [string]$choices[0].Key
-    if ($choices[0].Value -lt $quorum) {
-      return [pscustomobject]@{ Verified = $false; Text = ''; Error = 'report-row-quorum'; Sha256 = $expectedHash; Rows = $rowCount; Copies = $observedCopies; RecoveredRows = $recoveredRows }
-    }
     $invalidLength = if ($index -lt ($rowCount - 1)) { $fragment.Length -ne $width } else { $fragment.Length -gt $width }
     if ($invalidLength -or $fragment.Length -lt 4 -or
         ($index -lt ($rowCount - 1) -and $fragment.Contains('='))) {

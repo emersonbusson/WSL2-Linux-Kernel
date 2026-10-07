@@ -45,6 +45,7 @@ FRAG_RESTORE_SOURCE=unknown
 FRAG_SAVED_MAX_MAP_COUNT=
 FRAG_SAVED_MIN_FREE_KB=
 FRAG_SAVED_BOOST_FACTOR=
+NIC=${NIC:-}
 
 release_fragment_helper() {
 	if [ -n "${HOGPID:-}" ]; then
@@ -127,7 +128,94 @@ buddy() {
 	fi
 }
 
-say "--- BUDDY BEFORE ---"
+discover_nic() {
+	for _dn_d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
+		[ -e "$_dn_d" ] || continue
+		_dn_n="${_dn_d##*/}"
+		case "$_dn_n" in
+		bind | unbind | uevent | module | new_id | remove_id) continue ;;
+		esac
+		[ -d "$_dn_d" ] || continue
+		NIC="$_dn_n"
+		return 0
+	done
+	return 1
+}
+
+count_vmbus_maps() {
+	MAP_COUNT=0
+	if [ -r /proc/vmallocinfo ]; then
+		while read -r _vline; do
+			case "$_vline" in
+			*vmbus_alloc_buffer*) MAP_COUNT=$((MAP_COUNT + 1)) ;;
+			esac
+		done < /proc/vmallocinfo
+	fi
+}
+
+restore_nic_binding() {
+	if [ -z "$NIC" ] || [ ! -d /sys/bus/vmbus ]; then
+		return 0
+	fi
+	if [ -d "/sys/bus/vmbus/drivers/hv_netvsc/$NIC" ]; then
+		return 0
+	fi
+	echo "$NIC" >/sys/bus/vmbus/drivers/hv_netvsc/bind 2>>"$LOG" || return 1
+	_bind_wait=0
+	while [ ! -d "/sys/bus/vmbus/drivers/hv_netvsc/$NIC" ] &&
+		[ "$_bind_wait" -lt 10 ]; do
+		sleep 1
+		_bind_wait=$((_bind_wait + 1))
+	done
+	[ -d "/sys/bus/vmbus/drivers/hv_netvsc/$NIC" ]
+}
+
+fragmentation_exit_cleanup() {
+	release_fragment_helper
+	if ! restore_nic_binding; then
+		printf '%s\n' 'FRAGMENT_NIC_RESTORE verified=no' >>"$LOG"
+	fi
+}
+trap fragmentation_exit_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+quiesce_nic_before_pressure() {
+	if [ -z "$NIC" ]; then
+		say "FAIL: no NIC identity available before pressure"
+		return 1
+	fi
+	_nic_path="/sys/bus/vmbus/drivers/hv_netvsc/$NIC"
+	count_vmbus_maps
+	PRE_PRESSURE_MAPS=$MAP_COUNT
+	if [ -d "$_nic_path" ]; then
+		echo "$NIC" >/sys/bus/vmbus/drivers/hv_netvsc/unbind 2>>"$LOG" || return 1
+	fi
+	_unbind_wait=0
+	while [ "$_unbind_wait" -lt 10 ]; do
+		count_vmbus_maps
+		if [ ! -d "$_nic_path" ] && [ "$MAP_COUNT" -eq 0 ]; then
+			say "NIC_QUIESCE verified=yes previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT"
+			return 0
+		fi
+		sleep 1
+		_unbind_wait=$((_unbind_wait + 1))
+	done
+	say "NIC_QUIESCE verified=no previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT"
+	return 1
+}
+
+if [ -z "$NIC" ] && ! discover_nic; then
+	say "FAIL: no synthetic NIC bound to hv_netvsc before pressure"
+	exit 1
+fi
+say "NIC=$NIC (captured before pressure unbind)"
+
+if ! quiesce_nic_before_pressure; then
+	exit 1
+fi
+say "--- BUDDY BEFORE PRESSURE ---"
 buddy
 
 # --- fragment: break high-order contiguity, leave order-0 available ---------
@@ -163,10 +251,6 @@ rm -f "$FRAG_RELEASE"
 rm -f "$FRAG_PID_FILE"
 "$HELPER" fragment-buddy "$HOGB" 180 "$FRAG_RELEASE" "$FRAG_PID_FILE" >>"$LOG" 2>&1 </dev/null &
 HOGPID=$!
-trap release_fragment_helper EXIT
-trap 'release_fragment_helper; exit 129' HUP
-trap 'release_fragment_helper; exit 130' INT
-trap 'release_fragment_helper; exit 143' TERM
 # Wait for ready=1 using shell builtins only -- no seq, no grep, no
 # sleep, no kill. Every fork needs a compound page from the buddy the
 # pattern is busy draining, and run 36927495556 w25 lost the shell to
@@ -358,61 +442,29 @@ HIGH_ORDER_PAGES_REREAD="$HIGH_ORDER_PAGES"
 # --- exercise channel open under fragmentation ------------------------------
 say "=== CHANNEL OPEN UNDER FRAGMENTATION ==="
 
-# The instance id is host-assigned and differs on every VM. Discover it from
-# the hv_netvsc binding. ${d##*/} replaces basename and the hit lands in NIC
-# instead of on stdout: $(discover_nic) is a subshell, and a subshell is a
-# fork -- the one thing this window cannot afford.
-discover_nic() {
-	for _dn_d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
-		[ -e "$_dn_d" ] || continue
-		_dn_n="${_dn_d##*/}"
-		case "$_dn_n" in
-		bind | unbind | uevent | module | new_id | remove_id) continue ;;
-		esac
-		[ -d "$_dn_d" ] || continue
-		NIC="$_dn_n"
-		return 0
-	done
-	return 1
-}
-
 if [ -z "${NIC:-}" ]; then
-	discover_nic || true
-fi
-if [ -z "${NIC:-}" ]; then
-	say "REFUSE: no synthetic NIC bound to hv_netvsc; cannot force ring realloc"
+	say "REFUSE: synthetic NIC identity was lost before channel reopen"
 	release_fragment_helper
 	exit 2
 fi
-say "NIC=$NIC (discovered from hv_netvsc binding)"
 DRIVER_DIR="/sys/bus/vmbus/drivers"
 
-# Count vmbus_alloc_buffer maps in /proc/vmallocinfo with a read loop.
-# grep -c forks; read is a builtin.
-count_vmbus_maps() {
-	MAP_COUNT=0
-	if [ -r /proc/vmallocinfo ]; then
-		while read -r _vline; do
-			case "$_vline" in
-			*vmbus_alloc_buffer*) MAP_COUNT=$((MAP_COUNT + 1)) ;;
-			esac
-		done < /proc/vmallocinfo
-	fi
-}
 count_vmbus_maps
-say "PRE-OPEN $MAP_COUNT maps"
+PRE_OPEN_MAP_COUNT=$MAP_COUNT
+say "PRE-OPEN $PRE_OPEN_MAP_COUNT maps"
+if [ "$PRE_OPEN_MAP_COUNT" -ne 0 ]; then
+	say "VERDICT=FAIL old ring mappings remained under the pressure pattern"
+	exit 1
+fi
 
-# force a fresh ring allocation by rebinding the synthetic NIC
-echo "$NIC" >"$DRIVER_DIR/hv_netvsc/unbind" 2>>"$LOG" || true
-# read -t as a delay, not sleep: sleep is a binary and a binary is a fork.
-# stdin is the console (see the tick source above) and nobody is typing, so
-# read -t blocks for the interval and then fails.
-read -t 1 _junk 2>/dev/null || true
+# The old ring was released before pressure. A single bind now forces fresh
+# allocations against the held fragmented pattern without freeing old rings.
 echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG" || say "rebind_fail"
 read -t 2 _junk 2>/dev/null || true
 
 count_vmbus_maps
-say "POST-OPEN $MAP_COUNT maps"
+POST_OPEN_MAP_COUNT=$MAP_COUNT
+say "POST-OPEN $POST_OPEN_MAP_COUNT maps"
 
 # Did the NIC come back under hv_netvsc? Test the driver directory with a
 # glob instead of readlink -f, which forks.
@@ -490,9 +542,9 @@ if [ "$FRAG_RESTORE_OK" != yes ] &&
 		FRAG_CURRENT_MAX_MAP_COUNT=unknown
 		FRAG_CURRENT_MIN_FREE_KB=unknown
 		FRAG_CURRENT_BOOST_FACTOR=unknown
-		read -r FRAG_CURRENT_MAX_MAP_COUNT </proc/sys/vm/max_map_count || true
-		read -r FRAG_CURRENT_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || true
-		read -r FRAG_CURRENT_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || true
+		FRAG_CURRENT_MAX_MAP_COUNT=$(cat /proc/sys/vm/max_map_count 2>/dev/null) || FRAG_CURRENT_MAX_MAP_COUNT=unknown
+		FRAG_CURRENT_MIN_FREE_KB=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null) || FRAG_CURRENT_MIN_FREE_KB=unknown
+		FRAG_CURRENT_BOOST_FACTOR=$(cat /proc/sys/vm/watermark_boost_factor 2>/dev/null) || FRAG_CURRENT_BOOST_FACTOR=unknown
 		if [ "$FRAG_CURRENT_MAX_MAP_COUNT" = "$FRAG_SAVED_MAX_MAP_COUNT" ] &&
 			[ "$FRAG_CURRENT_MIN_FREE_KB" = "$FRAG_SAVED_MIN_FREE_KB" ] &&
 			[ "$FRAG_CURRENT_BOOST_FACTOR" = "$FRAG_SAVED_BOOST_FACTOR" ]; then
@@ -560,6 +612,9 @@ elif [ -z "$FRAG_LINE" ]; then
 	RC=3
 elif [ "$REBOUND" != yes ]; then
 	say "VERDICT=FAIL channel did not rebind after fragmentation"
+	RC=1
+elif [ "$POST_OPEN_MAP_COUNT" -le "$PRE_OPEN_MAP_COUNT" ]; then
+	say "VERDICT=FAIL fresh channel open produced no VMBus ring mappings"
 	RC=1
 
 elif [ "${PAGEMAP:-0}" != 1 ]; then

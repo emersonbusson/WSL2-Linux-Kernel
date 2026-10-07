@@ -82,6 +82,13 @@ jobs:
             busybox-static cpio gzip python3
           command -v /bin/busybox
           /bin/busybox | head -1 || true
+          /bin/busybox ash -c '
+            set -eu
+            value=$(cat /proc/sys/vm/max_map_count)
+            case "$value" in ""|*[!0-9]*) exit 1 ;; esac
+            [ "$value" -gt 9 ]
+            printf "BusyBox proc-sysctl full-value fixture: PASS\n"
+          ' | tee drill-artifacts/proc-sysctl-snapshot-fixture.log
 
       - name: Fetch fixed mainline base
         env:

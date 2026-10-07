@@ -180,13 +180,12 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	FRAG_ORIG_MIN_FREE_KB=
 	FRAG_ORIG_BOOST_FACTOR=
 	FRAG_VM_STATE_VALID=yes
-	# BusyBox ash returns nonzero when read reaches EOF without a trailing
-	# newline, even though it has assigned the complete proc-sysctl value.
-	# Accept that case only when a nonempty value was read, then validate all
-	# three values as unsigned decimal before allowing the fallback restore.
-	read -r FRAG_ORIG_MAX_MAP_COUNT </proc/sys/vm/max_map_count || [ -n "$FRAG_ORIG_MAX_MAP_COUNT" ] || FRAG_VM_STATE_VALID=no
-	read -r FRAG_ORIG_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || [ -n "$FRAG_ORIG_MIN_FREE_KB" ] || FRAG_VM_STATE_VALID=no
-	read -r FRAG_ORIG_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || [ -n "$FRAG_ORIG_BOOST_FACTOR" ] || FRAG_VM_STATE_VALID=no
+	# BusyBox ash's read can return only the first byte from proc-sysctl files.
+	# Use cat to capture the complete value, then validate all three settings
+	# before allowing the fallback restore.
+	FRAG_ORIG_MAX_MAP_COUNT=$(cat /proc/sys/vm/max_map_count 2>/dev/null) || FRAG_VM_STATE_VALID=no
+	FRAG_ORIG_MIN_FREE_KB=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null) || FRAG_VM_STATE_VALID=no
+	FRAG_ORIG_BOOST_FACTOR=$(cat /proc/sys/vm/watermark_boost_factor 2>/dev/null) || FRAG_VM_STATE_VALID=no
 	case $FRAG_ORIG_MAX_MAP_COUNT in '' | *[!0-9]*) FRAG_VM_STATE_VALID=no ;; esac
 	case $FRAG_ORIG_MIN_FREE_KB in '' | *[!0-9]*) FRAG_VM_STATE_VALID=no ;; esac
 	case $FRAG_ORIG_BOOST_FACTOR in '' | *[!0-9]*) FRAG_VM_STATE_VALID=no ;; esac
@@ -205,7 +204,8 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	# PR_SET_PDEATHSIG cleanup signal; wait before allowing lifecycle work.
 	FRAG_HELPER_PID=
 	FRAG_HELPER_PID_FILE=/var/tmp/fragment.log.helper.pid
-	if read -r FRAG_HELPER_PID <"$FRAG_HELPER_PID_FILE" 2>/dev/null; then
+	if [ -r "$FRAG_HELPER_PID_FILE" ] &&
+		read -r FRAG_HELPER_PID 2>/dev/null <"$FRAG_HELPER_PID_FILE"; then
 		case "$FRAG_HELPER_PID" in
 		'' | *[!0-9]*) FRAG_HELPER_PID= ;;
 		esac
@@ -217,9 +217,9 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 	FRAG_CURRENT_MAX_MAP_COUNT=unknown
 	FRAG_CURRENT_MIN_FREE_KB=unknown
 	FRAG_CURRENT_BOOST_FACTOR=unknown
-	read -r FRAG_CURRENT_MAX_MAP_COUNT </proc/sys/vm/max_map_count || true
-	read -r FRAG_CURRENT_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || true
-	read -r FRAG_CURRENT_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || true
+	FRAG_CURRENT_MAX_MAP_COUNT=$(cat /proc/sys/vm/max_map_count 2>/dev/null) || FRAG_CURRENT_MAX_MAP_COUNT=unknown
+	FRAG_CURRENT_MIN_FREE_KB=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null) || FRAG_CURRENT_MIN_FREE_KB=unknown
+	FRAG_CURRENT_BOOST_FACTOR=$(cat /proc/sys/vm/watermark_boost_factor 2>/dev/null) || FRAG_CURRENT_BOOST_FACTOR=unknown
 	FRAG_GLOBAL_RESTORE_NEEDED=no
 	if [ "$FRAG_VM_STATE_VALID" = yes ]; then
 		if [ "$FRAG_CURRENT_MAX_MAP_COUNT" != "$FRAG_ORIG_MAX_MAP_COUNT" ]; then
@@ -234,9 +234,9 @@ if [ -n "$NIC" ] && [ -x "$HELPER" ]; then
 			FRAG_GLOBAL_RESTORE_NEEDED=yes
 			printf '%s\n' "$FRAG_ORIG_BOOST_FACTOR" >/proc/sys/vm/watermark_boost_factor 2>/dev/null || true
 		fi
-		read -r FRAG_CURRENT_MAX_MAP_COUNT </proc/sys/vm/max_map_count || true
-		read -r FRAG_CURRENT_MIN_FREE_KB </proc/sys/vm/min_free_kbytes || true
-		read -r FRAG_CURRENT_BOOST_FACTOR </proc/sys/vm/watermark_boost_factor || true
+		FRAG_CURRENT_MAX_MAP_COUNT=$(cat /proc/sys/vm/max_map_count 2>/dev/null) || FRAG_CURRENT_MAX_MAP_COUNT=unknown
+		FRAG_CURRENT_MIN_FREE_KB=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null) || FRAG_CURRENT_MIN_FREE_KB=unknown
+		FRAG_CURRENT_BOOST_FACTOR=$(cat /proc/sys/vm/watermark_boost_factor 2>/dev/null) || FRAG_CURRENT_BOOST_FACTOR=unknown
 		if [ "$FRAG_CURRENT_MAX_MAP_COUNT" = "$FRAG_ORIG_MAX_MAP_COUNT" ] &&
 			[ "$FRAG_CURRENT_MIN_FREE_KB" = "$FRAG_ORIG_MIN_FREE_KB" ] &&
 			[ "$FRAG_CURRENT_BOOST_FACTOR" = "$FRAG_ORIG_BOOST_FACTOR" ]; then
@@ -446,10 +446,10 @@ fi
 # The live serial console can lose individual characters while the guest is
 # busy. Preserve the decision-bearing report and both drill logs in one
 # checksummed payload, then send seven indexed copies in short rows, rotating
-# row order between copies to decorrelate burst loss. A strict majority is
-# required for every row, and the host verifies the SHA-256 over the compressed
-# bytes; the raw console remains useful for progress/debugging but is no longer
-# the authority for a runtime verdict.
+# row order between copies to decorrelate burst loss. The host selects each
+# row's unique most-frequent value and verifies the SHA-256 over the complete
+# compressed bytes; the raw console remains useful for progress/debugging but
+# is no longer the authority for a runtime verdict.
 HOST_TARGET_ABSENT=no
 if [ -z "$NIC" ] || [ ! -d "/sys/bus/vmbus/devices/$NIC" ]; then
 	HOST_TARGET_ABSENT=yes
