@@ -103,6 +103,49 @@ vmbus_maps() {
 	' /proc/vmallocinfo
 }
 
+# settle_vmbus_maps <label> <stable_samples> <retry_budget>
+# Keep the original exact map-count verdict, but take its baseline only after
+# the boot-time vmalloc state has stopped changing. An unreadable or moving
+# tuple is incomplete evidence, never a baseline to compare against.
+settle_vmbus_maps() {
+	local label="${1:-}" stable_required="${2:-}" retry_budget="${3:-}"
+	local tries=0 stable_run=0 previous='' current=''
+	MAPS_SETTLED=''
+	case "$label" in '' | *[!A-Za-z0-9_-]*) return 1 ;; esac
+	case "$stable_required" in '' | *[!0-9]*) return 1 ;; esac
+	case "$retry_budget" in '' | *[!0-9]*) return 1 ;; esac
+	if [ "$stable_required" -lt 2 ] || [ "$retry_budget" -lt 1 ]; then
+		return 1
+	fi
+	while [ "$tries" -le "$retry_budget" ]; do
+		current="$(vmbus_maps 2>/dev/null || true)"
+		if ! printf '%s\n' "$current" | awk '
+			$0 ~ /^MAPS count=[0-9]+ bytes=[0-9]+ pages=[0-9]+$/ { valid = 1 }
+			END { exit !valid }
+		'; then
+			stable_run=0
+			previous=''
+		elif [ "$current" = "$previous" ]; then
+			stable_run=$((stable_run + 1))
+		else
+			stable_run=1
+		fi
+		say "$label try=$tries run=$stable_run ${current:-MAPS unavailable}"
+		if [ "$stable_run" -ge "$stable_required" ]; then
+			MAPS_SETTLED="$current"
+			say "$label stable_samples=$stable_run $MAPS_SETTLED"
+			return 0
+		fi
+		previous="$current"
+		tries=$((tries + 1))
+		if [ "$tries" -le "$retry_budget" ]; then
+			sleep 1
+		fi
+	done
+	say "$label unstable retry_budget=$retry_budget stable_run=$stable_run last=${current:-unavailable}"
+	return 1
+}
+
 # Per-map sizes of live vmbus_alloc_buffer areas, one byte count per line.
 # Size is the owner attribution available here: /proc/vmallocinfo names the
 # allocating symbol for every one of these, so one kernel owner cannot be told
@@ -849,6 +892,7 @@ st_band_refuses_growth_and_overfree() {
 
 st_boot_baseline_requires_stable_maps() {
 	local sample_file sample expected='MAPS count=12 bytes=20279296 pages=4939'
+	local expected_tuple='12 20279296 4939'
 	sample_file="$(mktemp /tmp/vmbus-baseline-fixture.XXXXXX)"
 	printf '%s\n' \
 		'MAPS count=13 bytes=20316160 pages=4947' \
@@ -877,13 +921,13 @@ st_boot_baseline_requires_stable_maps() {
 		return 1
 	fi
 	if ! tuple_within_end_band \
-		'12 20279296 4939' '7 307200 68' "$MAPS_SETTLED" yes; then
+		"$expected_tuple" '7 307200 68' "$expected_tuple" yes; then
 		echo "  exact rebind accounting rejected the stable baseline"
 		rm -f "$sample_file" "$sample_file.next"
 		return 1
 	fi
 	if tuple_within_end_band \
-		'13 20316160 4947' '7 307200 68' "$MAPS_SETTLED" yes >/dev/null; then
+		'13 20316160 4947' '7 307200 68' "$expected_tuple" yes >/dev/null; then
 		echo "  exact rebind accounting accepted growth above the stable baseline"
 		rm -f "$sample_file" "$sample_file.next"
 		return 1
@@ -964,8 +1008,24 @@ say "symbols: $(grep -cE 'vmbus_(alloc|free|release)_buffer' /proc/kallsyms 2>/d
 
 say "--- BEFORE ---"
 say "devices=$(ls /sys/bus/vmbus/devices 2>/dev/null | wc -l)"
-BASE_MAPS="$(vmbus_maps || echo 'MAPS unavailable')"
-say "$BASE_MAPS"
+BASE_MAPS_INSTANT="$(vmbus_maps || echo 'MAPS unavailable')"
+say "BASELINE_INSTANT $BASE_MAPS_INSTANT"
+BASELINE_STABLE_SAMPLES=5
+BASELINE_RETRY_BUDGET_S=15
+if ! settle_vmbus_maps BASELINE_SETTLE \
+	"$BASELINE_STABLE_SAMPLES" "$BASELINE_RETRY_BUDGET_S"; then
+	CLEANUP_VERDICT=PARTIAL
+	CLEANUP_WHY="boot map baseline did not stabilize"
+	MAP_ACCOUNTING_VERDICT=PARTIAL
+	MAP_ACCOUNTING_WHY="exact rebind accounting needs a stable boot baseline"
+	RESTORE_VERDICT=SKIP
+	RESTORE_WHY="not reached (phase 1 did not start)"
+	LIFE=PARTIAL
+	LIFE_CODE=3
+	emit_verdicts_and_exit 3
+fi
+BASE_MAPS="$MAPS_SETTLED"
+say "BASELINE $BASE_MAPS"
 : >"$LOG.sizes-base"
 vmbus_map_sizes >>"$LOG.sizes-base" 2>/dev/null || true
 dmesg 2>/dev/null | tail -5 >>"$LOG"
