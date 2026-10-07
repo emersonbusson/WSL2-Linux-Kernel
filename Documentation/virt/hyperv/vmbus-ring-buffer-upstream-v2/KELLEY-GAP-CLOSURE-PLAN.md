@@ -24,6 +24,11 @@ The dry-run returns Result: OK for all fifteen messages, threads every patch
 under the cover, and uses /bin/false with stored SMTP credentials blanked.
 Its local log SHA-256 is
 047f712f0e12c65491695fd18123d358c5fbd03969e550c3135ea2a42faf6b76.
+The live submission on 2026-10-07 at 16:07 -03 was accepted by smtp.gmail.com
+with an SMTP 250 response for each message. The cover Message-ID is
+<20261007190752.336426-1-emersonbusson@gmail.com>; the live log SHA-256 is
+1399111a07263cf88ea1b5efe1e81b65f03cf2dedb9438d1c2c16a868a05fc06. This
+confirms relay acceptance, not recipient-side delivery or reading.
 
 The package is ready for maintainer review with these explicit limits:
 confidential hardware transitions, full saturation, and complete VMBus
@@ -31,7 +36,7 @@ module unload/retained-owner destruction remain unqualified. The exact
 mainline series remains uninstalled on the daily WSL host; only a separate
 backport was installed there. The baseline is a single fragmentation negative
 control, not a matched same-configuration diagnostic-count comparison for all
-fourteen patches. No e-mail has been sent.
+fourteen patches. No recipient-side delivery receipt is recorded.
 
 # Corrected VMBus validation plan
 
