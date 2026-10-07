@@ -90,6 +90,8 @@ int main(void)
 						       "chase-memfree-margin", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 256,
 						       "chase-memfree-margin", 1, 1));
+	assert(frag_bounded_pressure_qualified(500000, 512,
+						       "chase-memfree-margin", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 128,
 						       "order7-reserve", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 128,
@@ -103,6 +105,8 @@ int main(void)
 	assert(!frag_bounded_pressure_qualified(500000, 0,
 							"order7-depleted", 1, 1));
 	assert(!frag_bounded_pressure_qualified(500000, 257,
+							"chase-memfree-margin", 1, 1));
+	assert(!frag_bounded_pressure_qualified(500000, 513,
 							"chase-memfree-margin", 1, 1));
 	assert(!frag_bounded_pressure_qualified(25600, 257,
 							"chase-memfree-margin", 1, 1));
@@ -123,11 +127,13 @@ int main(void)
 
 	assert(frag_should_preserve_order7(1, 128));
 	assert(frag_should_preserve_order7(1, 256));
+	assert(frag_should_preserve_order7(1, 512));
 	assert(!frag_should_preserve_order7(0, 128));
-	assert(!frag_should_preserve_order7(1, 257));
+	assert(!frag_should_preserve_order7(1, 513));
 	assert(!frag_should_preserve_order7(1, 0));
 	assert(frag_should_refine_order7(1, 384));
-	assert(!frag_should_refine_order7(1, 256));
+	assert(!frag_should_refine_order7(1, 512));
+	assert(frag_should_refine_order7(1, 513));
 	assert(!frag_should_refine_order7(0, 384));
 	assert(frag_pcp_high_fraction_qualified(FRAG_PCP_HIGH_FRACTION,
 						FRAG_PCP_HIGH_FRACTION));
