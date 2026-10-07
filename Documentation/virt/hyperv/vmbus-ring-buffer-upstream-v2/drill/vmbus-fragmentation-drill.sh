@@ -46,6 +46,16 @@ FRAG_SAVED_MAX_MAP_COUNT=
 FRAG_SAVED_MIN_FREE_KB=
 FRAG_SAVED_BOOST_FACTOR=
 NIC=${NIC:-}
+TRACE_DIR=/sys/kernel/tracing
+OWNER_CHANNEL_IDS_FILE="${LOG}.channels.$$"
+OWNER_CHANNEL_COUNT=0
+OWNER_TRACE_FROZEN=no
+OWNER_TRACE_AVAILABLE=no
+OWNER_CHANNEL_CAPTURE_OK=no
+OWNER_QUIESCE_RESULT=
+OWNER_QUIESCE_STATS=
+OWNER_POST_OPEN_RESULT=
+OWNER_POST_OPEN_STATS=
 
 release_fragment_helper() {
 	if [ -n "${HOGPID:-}" ]; then
@@ -153,6 +163,36 @@ count_vmbus_maps() {
 	fi
 }
 
+capture_owner_channels() {
+	_channel_dir="/sys/bus/vmbus/devices/$NIC/channels"
+	OWNER_CHANNEL_COUNT=0
+	: >"$OWNER_CHANNEL_IDS_FILE" || return 1
+	if [ ! -d "$_channel_dir" ]; then
+		return 1
+	fi
+	for _channel_path in "$_channel_dir"/*; do
+		[ -d "$_channel_path" ] || continue
+		_channel_id="${_channel_path##*/}"
+		case "$_channel_id" in
+		'' | *[!0-9]*) return 1 ;;
+		esac
+		printf '%s\n' "$_channel_id" >>"$OWNER_CHANNEL_IDS_FILE" || return 1
+		OWNER_CHANNEL_COUNT=$((OWNER_CHANNEL_COUNT + 1))
+	done
+	[ "$OWNER_CHANNEL_COUNT" -gt 0 ]
+}
+
+owner_trace_stats_clean() {
+	OWNER_TRACE_STATS=$(awk '
+		$1 == "overrun:" { n += $2; cpus++ }
+		$1 == "commit" && $2 == "overrun:" { n += $3 }
+		$1 == "dropped" && $2 == "events:" { d += $3; dc++ }
+		END {
+			if (!cpus || cpus != dc || n || d) exit 1
+			printf "overruns=%d dropped=%d stats_cpus=%d", n, d, cpus
+		}' "$TRACE_DIR"/per_cpu/cpu*/stats 2>/dev/null) || return 1
+}
+
 restore_nic_binding() {
 	if [ -z "$NIC" ] || [ ! -d /sys/bus/vmbus ]; then
 		return 0
@@ -172,6 +212,7 @@ restore_nic_binding() {
 
 fragmentation_exit_cleanup() {
 	release_fragment_helper
+	rm -f "$OWNER_CHANNEL_IDS_FILE" 2>/dev/null || true
 	if ! restore_nic_binding; then
 		printf '%s\n' 'FRAGMENT_NIC_RESTORE verified=no' >>"$LOG"
 	fi
@@ -182,9 +223,32 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 quiesce_nic_before_pressure() {
+	_owner_event_enable=
+	_owner_trace_on=
 	if [ -z "$NIC" ]; then
 		say "FAIL: no NIC identity available before pressure"
 		return 1
+	fi
+	if [ ! -x "$HELPER" ] || [ ! -r "$TRACE_DIR/trace" ]; then
+		say "FAIL: trace buffer or static drill helper is unavailable"
+		return 1
+	fi
+	_owner_event_enable=$(cat "$TRACE_DIR/events/hyperv/vmbus_buffer_owner/enable" 2>/dev/null || true)
+	_owner_trace_on=$(cat "$TRACE_DIR/tracing_on" 2>/dev/null || true)
+	if [ "$_owner_event_enable" = 1 ] && [ "$_owner_trace_on" = 1 ]; then
+		if ! capture_owner_channels; then
+			say "FAIL: no channel IDs captured for NIC owner accounting"
+			return 1
+		fi
+		OWNER_TRACE_AVAILABLE=yes
+		OWNER_CHANNEL_CAPTURE_OK=yes
+		say "OWNER_CHANNELS target_capture=verified channels=$OWNER_CHANNEL_COUNT"
+	else
+		# The unpatched negative-control kernel has no owner tracepoint. Keep
+		# that limitation explicit; the candidate still must prove live owners
+		# after the open or its RequirePass policy rejects the run.
+		OWNER_TRACE_AVAILABLE=no
+		say "OWNER_TRACE_QUIESCE verified=no reason=event-unavailable"
 	fi
 	_nic_path="/sys/bus/vmbus/drivers/hv_netvsc/$NIC"
 	count_vmbus_maps
@@ -195,13 +259,42 @@ quiesce_nic_before_pressure() {
 	_unbind_wait=0
 	while [ "$_unbind_wait" -lt 10 ]; do
 		count_vmbus_maps
-		if [ ! -d "$_nic_path" ] && [ "$MAP_COUNT" -eq 0 ]; then
-			say "NIC_QUIESCE verified=yes previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT"
+		if [ ! -d "$_nic_path" ] && [ "$OWNER_TRACE_AVAILABLE" = no ]; then
+			say "NIC_QUIESCE verified=no reason=owner-trace-unavailable previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT"
 			return 0
+		fi
+		if [ ! -d "$_nic_path" ] &&
+			[ "$OWNER_TRACE_AVAILABLE" = yes ] &&
+			"$HELPER" owner-channel-check "$TRACE_DIR/trace" \
+				"$OWNER_CHANNEL_IDS_FILE" reclaimed >/dev/null 2>&1; then
+			printf '0\n' >"$TRACE_DIR/tracing_on" 2>>"$LOG" || return 1
+			if ! owner_trace_stats_clean; then
+				say "NIC_QUIESCE verified=no reason=owner-trace-loss"
+				return 1
+			fi
+			if OWNER_QUIESCE_RESULT=$("$HELPER" owner-channel-check \
+				"$TRACE_DIR/trace" "$OWNER_CHANNEL_IDS_FILE" reclaimed 2>&1); then
+				OWNER_QUIESCE_STATS=$OWNER_TRACE_STATS
+				OWNER_TRACE_FROZEN=yes
+				say "$OWNER_QUIESCE_RESULT"
+				say "OWNER_TRACE_QUIESCE verified=yes $OWNER_QUIESCE_STATS"
+				say "NIC_QUIESCE verified=yes previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT target_channels=$OWNER_CHANNEL_COUNT"
+				return 0
+			fi
+			say "$OWNER_QUIESCE_RESULT"
+			printf '1\n' >"$TRACE_DIR/tracing_on" 2>>"$LOG" || true
+			return 1
 		fi
 		sleep 1
 		_unbind_wait=$((_unbind_wait + 1))
 	done
+	if [ "$OWNER_TRACE_AVAILABLE" = no ]; then
+		say "NIC_QUIESCE verified=no reason=owner-trace-unavailable previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT"
+		return 1
+	fi
+	OWNER_QUIESCE_RESULT=$("$HELPER" owner-channel-check "$TRACE_DIR/trace" \
+		"$OWNER_CHANNEL_IDS_FILE" reclaimed 2>&1 || true)
+	say "$OWNER_QUIESCE_RESULT"
 	say "NIC_QUIESCE verified=no previous_maps=$PRE_PRESSURE_MAPS remaining_maps=$MAP_COUNT"
 	return 1
 }
@@ -451,14 +544,21 @@ DRIVER_DIR="/sys/bus/vmbus/drivers"
 
 count_vmbus_maps
 PRE_OPEN_MAP_COUNT=$MAP_COUNT
-say "PRE-OPEN $PRE_OPEN_MAP_COUNT maps"
-if [ "$PRE_OPEN_MAP_COUNT" -ne 0 ]; then
-	say "VERDICT=FAIL old ring mappings remained under the pressure pattern"
+# /proc/vmallocinfo is global: maps from unrelated VMBus channels remain
+# live. The target channel's frozen owner trace is the quiescence gate.
+say "PRE-OPEN global_vmbus_maps=$PRE_OPEN_MAP_COUNT target_owner_check=$OWNER_TRACE_FROZEN trace_available=$OWNER_TRACE_AVAILABLE"
+if [ "$OWNER_TRACE_AVAILABLE" = yes ] && [ "$OWNER_TRACE_FROZEN" != yes ]; then
+	say "VERDICT=FAIL target-channel owners were not proven reclaimed before pressure"
 	exit 1
 fi
 
 # The old ring was released before pressure. A single bind now forces fresh
 # allocations against the held fragmented pattern without freeing old rings.
+printf '1\n' >"$TRACE_DIR/tracing_on" 2>>"$LOG" || {
+	say "VERDICT=FAIL owner trace could not resume for channel open"
+	exit 1
+}
+OWNER_TRACE_FROZEN=no
 echo "$NIC" >"$DRIVER_DIR/hv_netvsc/bind" 2>>"$LOG" || say "rebind_fail"
 read -t 2 _junk 2>/dev/null || true
 
@@ -473,6 +573,11 @@ for _d in /sys/bus/vmbus/drivers/hv_netvsc/*; do
 	[ "${_d##*/}" = "$NIC" ] && REBOUND=yes
 done
 say "nic_rebound=$REBOUND"
+if [ "$REBOUND" = yes ] && [ "$OWNER_CHANNEL_CAPTURE_OK" = yes ]; then
+	say "OWNER_CHANNELS rebound_check=using_pre_unbind_capture channels=$OWNER_CHANNEL_COUNT"
+else
+	say "OWNER_CHANNELS rebound_check=unavailable"
+fi
 
 # --- verdict ----------------------------------------------------------------
 # What this drill can and cannot claim on an ordinary x86_64 Hyper-V guest:
@@ -556,6 +661,35 @@ if [ "$FRAG_RESTORE_OK" != yes ] &&
 	esac
 fi
 
+# The parser runs after the pressure helper has exited and restored memory.
+# Running it while the pattern is pinned would fork with little order-2
+# headroom. The trace records the channel open during the pressure window.
+OWNER_POST_OPEN_VERIFIED=no
+if printf '0\n' >"$TRACE_DIR/tracing_on" 2>>"$LOG"; then
+	OWNER_TRACE_FROZEN=yes
+else
+	OWNER_TRACE_FROZEN=no
+fi
+if [ "$REBOUND" = yes ] && [ "$OWNER_CHANNEL_CAPTURE_OK" = yes ] &&
+	[ "$OWNER_TRACE_FROZEN" = yes ]; then
+	if OWNER_POST_OPEN_RESULT=$("$HELPER" owner-channel-check "$TRACE_DIR/trace" \
+		"$OWNER_CHANNEL_IDS_FILE" active 2>&1) && owner_trace_stats_clean; then
+		OWNER_POST_OPEN_STATS=$OWNER_TRACE_STATS
+		OWNER_POST_OPEN_VERIFIED=yes
+		say "$OWNER_POST_OPEN_RESULT"
+		say "OWNER_TRACE_POST_OPEN verified=yes $OWNER_POST_OPEN_STATS"
+	else
+		say "${OWNER_POST_OPEN_RESULT:-OWNER_CHANNEL_CHECK verified=no reason=not-run}"
+		say "OWNER_TRACE_POST_OPEN verified=no reason=trace-or-owner-check"
+	fi
+elif [ "$REBOUND" != yes ]; then
+	say "OWNER_TRACE_POST_OPEN verified=no reason=NIC-not-rebound-or-channels-missing"
+elif [ "$OWNER_CHANNEL_CAPTURE_OK" != yes ]; then
+	say "OWNER_TRACE_POST_OPEN verified=no reason=owner-trace-unavailable"
+else
+	say "OWNER_TRACE_POST_OPEN verified=no reason=trace-not-frozen"
+fi
+
 # --- dmesg scan -------------------------------------------------------------
 # After the teardown the buddy is whole again and forks are safe. The scan
 # needs dmesg, tail and grep, all binaries. init's HYPERV_DRILL_SPLATS and
@@ -612,6 +746,9 @@ elif [ -z "$FRAG_LINE" ]; then
 	RC=3
 elif [ "$REBOUND" != yes ]; then
 	say "VERDICT=FAIL channel did not rebind after fragmentation"
+	RC=1
+elif [ "$OWNER_POST_OPEN_VERIFIED" != yes ]; then
+	say "VERDICT=FAIL target channel owner was not proven live after fragmented open"
 	RC=1
 elif [ "$POST_OPEN_MAP_COUNT" -le "$PRE_OPEN_MAP_COUNT" ]; then
 	say "VERDICT=FAIL fresh channel open produced no VMBus ring mappings"

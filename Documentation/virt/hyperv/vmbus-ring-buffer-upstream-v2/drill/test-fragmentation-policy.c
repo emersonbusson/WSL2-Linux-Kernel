@@ -4,8 +4,49 @@
 
 #include <assert.h>
 
+static int check_owner_fixture(const char *text, const uint64_t *channels,
+			       size_t channel_count, int require_active,
+			       struct owner_check_stats *stats)
+{
+	const char *reason = NULL;
+	FILE *trace = fmemopen((void *)text, strlen(text), "r");
+	int rc;
+
+	assert(trace);
+	rc = owner_check_stream(trace, channels, channel_count, require_active,
+				stats, &reason);
+	fclose(trace);
+	return rc;
+}
+
 int main(void)
 {
+	static const uint64_t target_channels[] = { 14, 15 };
+	static const char valid_reclaimed[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=1 channel_id=14 action=created size=0 pages=0 state=0\n"
+		"worker-1 [000] .... 1.001: vmbus_buffer_owner: owner_id=1 channel_id=14 action=released size=4096 pages=1 state=0\n"
+		"worker-1 [000] .... 1.002: vmbus_buffer_owner: owner_id=1 channel_id=14 action=retained size=4096 pages=1 state=1\n"
+		"worker-1 [000] .... 1.003: vmbus_buffer_owner: owner_id=1 channel_id=14 action=reclaimed size=4096 pages=1 state=0\n"
+		"worker-1 [000] .... 1.004: vmbus_buffer_owner: owner_id=2 channel_id=15 action=created size=0 pages=0 state=0\n"
+		"worker-1 [000] .... 1.005: vmbus_buffer_owner: owner_id=2 channel_id=15 action=discarded size=0 pages=0 state=0\n"
+		"worker-1 [000] .... 1.006: vmbus_buffer_owner: owner_id=3 channel_id=99 action=created size=0 pages=0 state=0\n";
+	static const char active_owner[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=8 channel_id=14 action=created size=0 pages=0 state=0\n";
+	static const char released_owner[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=12 channel_id=14 action=created size=0 pages=0 state=0\n"
+		"worker-1 [000] .... 1.001: vmbus_buffer_owner: owner_id=12 channel_id=14 action=released size=4096 pages=1 state=0\n";
+	static const char retained_owner[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=9 channel_id=14 action=created size=0 pages=0 state=0\n"
+		"worker-1 [000] .... 1.001: vmbus_buffer_owner: owner_id=9 channel_id=14 action=released size=4096 pages=1 state=1\n"
+		"worker-1 [000] .... 1.002: vmbus_buffer_owner: owner_id=9 channel_id=14 action=retained size=4096 pages=1 state=4\n";
+	static const char invalid_transition[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=10 channel_id=14 action=created size=0 pages=0 state=0\n"
+		"worker-1 [000] .... 1.001: vmbus_buffer_owner: owner_id=10 channel_id=14 action=reclaimed size=4096 pages=1 state=0\n";
+	static const char malformed_owner[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=bad channel_id=14 action=created size=0 pages=0 state=0\n";
+	static const char unrelated_owner[] =
+		"worker-1 [000] .... 1.000: vmbus_buffer_owner: owner_id=11 channel_id=99 action=created size=0 pages=0 state=0\n";
+	struct owner_check_stats owner_stats;
 	unsigned long *seen = calloc(1, sizeof(*seen));
 	size_t seen_words = 1;
 	const unsigned long distant_pfn = 64UL * 9000UL + 3UL;
@@ -82,6 +123,33 @@ int main(void)
 	frag_stop_signal = SIGTERM;
 	assert(frag_release_requested(NULL));
 	frag_stop_signal = 0;
+
+	/* Quiescence requires every target owner to reach a terminal state. */
+	assert(check_owner_fixture(valid_reclaimed, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   0, &owner_stats) == 0);
+	assert(owner_stats.created == 2 && owner_stats.active == 0);
+	assert(owner_stats.reclaimed == 1 && owner_stats.discarded == 1);
+	assert(owner_stats.retained == 0);
+	assert(check_owner_fixture(active_owner, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   1, &owner_stats) == 0);
+	assert(owner_stats.active == 1 && owner_stats.live == 1);
+	assert(check_owner_fixture(released_owner, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   1, &owner_stats) != 0);
+	assert(check_owner_fixture(retained_owner, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   1, &owner_stats) != 0);
+	assert(check_owner_fixture(invalid_transition, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   0, &owner_stats) != 0);
+	assert(check_owner_fixture(malformed_owner, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   0, &owner_stats) != 0);
+	assert(check_owner_fixture(unrelated_owner, target_channels,
+				   sizeof(target_channels) / sizeof(target_channels[0]),
+				   0, &owner_stats) != 0);
 
 	puts("fragmentation policy tests: PASS");
 	return 0;

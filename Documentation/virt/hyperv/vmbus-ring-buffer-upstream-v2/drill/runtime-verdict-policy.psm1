@@ -2,6 +2,11 @@ function Test-HypervExpectedBaselineFailure {
   param([string]$ConsoleText = '')
 
   $required = @(
+    'OWNER_TRACE_QUIESCE verified=no reason=event-unavailable',
+    'NIC_QUIESCE verified=no reason=owner-trace-unavailable',
+    'VERDICT=FAIL channel did not rebind after fragmentation',
+    'HYPERV_DRILL_FRAGMENT status=1',
+    'OWNER_TRACE_POST_OPEN verified=no reason=NIC-not-rebound-or-channels-missing',
     'HYPERV_DRILL_LIFECYCLE status=1',
     'CLEANUP_VERDICT=FAIL teardown released nothing',
     'MAP_ACCOUNTING_VERDICT=FAIL outside the expected band: tuple unreadable',
@@ -28,8 +33,14 @@ function Test-HypervExpectedBaselineFailure {
   }
 
   $summaryMatches = [regex]::Matches(
-    $ConsoleText, '(?m)^HYPERV_DRILL_RESULT lifecycle=1 fragment=0 splats=0 faults=0\s*$')
+    $ConsoleText, '(?m)^HYPERV_DRILL_RESULT lifecycle=1 fragment=1 splats=0 faults=0\s*$')
   if ($summaryMatches.Count -ne 1) {
+    return $false
+  }
+
+  $fragmentMatches = [regex]::Matches(
+    $ConsoleText, '(?m)^HYPERV_DRILL_FRAGMENT status=(\d+)\s*$')
+  if ($fragmentMatches.Count -ne 1 -or $fragmentMatches[0].Groups[1].Value -ne '1') {
     return $false
   }
 

@@ -87,6 +87,7 @@
  * Never prints addresses or PFNs. Evidence must not carry KASLR material.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -112,6 +113,398 @@ static long parse_long(const char *s, const char *what)
 		exit(2);
 	}
 	return v;
+}
+
+enum owner_action {
+	OWNER_CREATED,
+	OWNER_RELEASED,
+	OWNER_RETAINED,
+	OWNER_RECLAIMED,
+	OWNER_DISCARDED,
+};
+
+struct owner_event {
+	uint64_t owner_id;
+	uint64_t channel_id;
+	size_t sequence;
+	uint32_t size;
+	uint32_t pages;
+	uint8_t state;
+	enum owner_action action;
+};
+
+struct owner_check_stats {
+	size_t channels;
+	size_t events;
+	size_t created;
+	size_t released;
+	size_t retained;
+	size_t reclaimed;
+	size_t discarded;
+	size_t active;
+	size_t live;
+};
+
+#define OWNER_TRACE_MARKER "vmbus_buffer_owner: "
+
+static int owner_channel_is_target(uint64_t channel_id,
+				   const uint64_t *channels,
+				   size_t channel_count)
+{
+	size_t i;
+
+	for (i = 0; i < channel_count; i++) {
+		if (channels[i] == channel_id)
+			return 1;
+	}
+	return 0;
+}
+
+static int owner_parse_number(const char **cursor, const char *field,
+			      uint64_t *value)
+{
+	char *end;
+
+	if (strncmp(*cursor, field, strlen(field)))
+		return -1;
+	*cursor += strlen(field);
+	if (!isdigit((unsigned char)**cursor))
+		return -1;
+	errno = 0;
+	*value = strtoull(*cursor, &end, 10);
+	if (errno || end == *cursor || (*end && !isspace((unsigned char)*end)))
+		return -1;
+	*cursor = end;
+	while (isspace((unsigned char)**cursor))
+		(*cursor)++;
+	return 0;
+}
+
+static int owner_parse_action(const char **cursor, enum owner_action *action)
+{
+	static const struct {
+		const char *name;
+		enum owner_action action;
+	} actions[] = {
+		{ "created", OWNER_CREATED },
+		{ "released", OWNER_RELEASED },
+		{ "retained", OWNER_RETAINED },
+		{ "reclaimed", OWNER_RECLAIMED },
+		{ "discarded", OWNER_DISCARDED },
+	};
+	size_t i, len;
+
+	if (strncmp(*cursor, "action=", 7))
+		return -1;
+	*cursor += 7;
+	for (i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) {
+		len = strlen(actions[i].name);
+		if (!strncmp(*cursor, actions[i].name, len) &&
+		    ((*cursor)[len] == '\0' ||
+		     isspace((unsigned char)(*cursor)[len]))) {
+			*cursor += len;
+			while (isspace((unsigned char)**cursor))
+				(*cursor)++;
+			*action = actions[i].action;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static int owner_parse_trace_line(const char *line, struct owner_event *event)
+{
+	const char *cursor = strstr(line, OWNER_TRACE_MARKER);
+	uint64_t size, pages, state;
+
+	if (!cursor)
+		return 0;
+	cursor += strlen(OWNER_TRACE_MARKER);
+	if (owner_parse_number(&cursor, "owner_id=", &event->owner_id) ||
+	    owner_parse_number(&cursor, "channel_id=", &event->channel_id) ||
+	    owner_parse_action(&cursor, &event->action) ||
+	    owner_parse_number(&cursor, "size=", &size) || size > UINT32_MAX ||
+	    owner_parse_number(&cursor, "pages=", &pages) || pages > UINT32_MAX ||
+	    owner_parse_number(&cursor, "state=", &state) || state > 7)
+		return -1;
+	if (!event->owner_id || !event->channel_id)
+		return -1;
+	event->size = (uint32_t)size;
+	event->pages = (uint32_t)pages;
+	event->state = (uint8_t)state;
+	while (*cursor == '\n' || *cursor == '\r')
+		cursor++;
+	return *cursor ? -1 : 1;
+}
+
+static int owner_event_compare(const void *left, const void *right)
+{
+	const struct owner_event *a = left;
+	const struct owner_event *b = right;
+
+	if (a->owner_id < b->owner_id)
+		return -1;
+	if (a->owner_id > b->owner_id)
+		return 1;
+	if (a->sequence < b->sequence)
+		return -1;
+	if (a->sequence > b->sequence)
+		return 1;
+	return 0;
+}
+
+static int owner_transition_valid(enum owner_action previous,
+				  enum owner_action next)
+{
+	switch (previous) {
+	case OWNER_CREATED:
+		return next == OWNER_RELEASED || next == OWNER_DISCARDED;
+	case OWNER_RELEASED:
+		return next == OWNER_RETAINED || next == OWNER_RECLAIMED;
+	case OWNER_RETAINED:
+		return next == OWNER_RECLAIMED;
+	case OWNER_RECLAIMED:
+	case OWNER_DISCARDED:
+		return 0;
+	}
+	return 0;
+}
+
+static int owner_event_data_valid(const struct owner_event *event)
+{
+	switch (event->action) {
+	case OWNER_CREATED:
+		return !event->size && !event->pages && !event->state;
+	case OWNER_RELEASED:
+		return event->size && event->pages;
+	case OWNER_RETAINED:
+		return event->size && event->pages && event->state;
+	case OWNER_RECLAIMED:
+		return event->size && event->pages && !event->state;
+	case OWNER_DISCARDED:
+		return !event->size && !event->pages && !event->state;
+	}
+	return 0;
+}
+
+/* Validate every target-channel owner and fail closed on incomplete traces. */
+static int owner_check_stream(FILE *trace, const uint64_t *channels,
+			      size_t channel_count, int require_active,
+			      struct owner_check_stats *stats,
+			      const char **reason)
+{
+	struct owner_event *events = NULL;
+	size_t capacity = 0, event_count = 0, sequence = 0, i;
+	char line[1024];
+
+	memset(stats, 0, sizeof(*stats));
+	stats->channels = channel_count;
+	if (!channel_count) {
+		*reason = "no-target-channels";
+		return -1;
+	}
+	while (fgets(line, sizeof(line), trace)) {
+		struct owner_event event = { 0 };
+		int parsed = owner_parse_trace_line(line, &event);
+
+		if (parsed < 0) {
+			*reason = "malformed-owner-event";
+			goto fail;
+		}
+		if (!parsed)
+			continue;
+		sequence++;
+		if (!owner_channel_is_target(event.channel_id, channels,
+					     channel_count))
+			continue;
+		if (event_count == capacity) {
+			size_t next = capacity ? capacity * 2 : 64;
+			struct owner_event *grown;
+
+			if (next < capacity || next > SIZE_MAX / sizeof(*events)) {
+				*reason = "owner-event-overflow";
+				goto fail;
+			}
+			grown = realloc(events, next * sizeof(*events));
+			if (!grown) {
+				*reason = "owner-event-allocation-failed";
+				goto fail;
+			}
+			events = grown;
+			capacity = next;
+		}
+		event.sequence = sequence;
+		events[event_count++] = event;
+	}
+	if (ferror(trace)) {
+		*reason = "owner-trace-read-failed";
+		goto fail;
+	}
+	if (!event_count) {
+		*reason = "no-target-owner-events";
+		goto fail;
+	}
+	qsort(events, event_count, sizeof(*events), owner_event_compare);
+	stats->events = event_count;
+	for (i = 0; i < event_count;) {
+		size_t end = i + 1, j;
+		enum owner_action last;
+		uint64_t channel_id = events[i].channel_id;
+
+		if (events[i].action != OWNER_CREATED) {
+			*reason = "owner-created-event-missing";
+			goto fail;
+		}
+		if (!owner_event_data_valid(&events[i])) {
+			*reason = "invalid-owner-created-payload";
+			goto fail;
+		}
+		stats->created++;
+		last = OWNER_CREATED;
+		while (end < event_count &&
+		       events[end].owner_id == events[i].owner_id)
+			end++;
+		for (j = i + 1; j < end; j++) {
+			if (events[j].channel_id != channel_id ||
+			    !owner_transition_valid(last, events[j].action) ||
+			    !owner_event_data_valid(&events[j])) {
+				*reason = "invalid-owner-transition";
+				goto fail;
+			}
+			last = events[j].action;
+			switch (last) {
+			case OWNER_RELEASED:
+				stats->released++;
+				break;
+			case OWNER_RETAINED:
+				break;
+			case OWNER_RECLAIMED:
+				stats->reclaimed++;
+				break;
+			case OWNER_DISCARDED:
+				stats->discarded++;
+				break;
+			case OWNER_CREATED:
+				*reason = "duplicate-owner-created-event";
+				goto fail;
+			}
+		}
+		if (last != OWNER_RECLAIMED && last != OWNER_DISCARDED) {
+			stats->active++;
+			if (last == OWNER_CREATED)
+				stats->live++;
+			else if (last == OWNER_RETAINED)
+				stats->retained++;
+		}
+		i = end;
+	}
+	if ((require_active && (!stats->live || stats->active != stats->live ||
+				stats->retained)) ||
+	    (!require_active && stats->active)) {
+		*reason = require_active ? "no-open-target-owner" :
+						  "target-owner-not-reclaimed";
+		goto fail;
+	}
+	free(events);
+	return 0;
+
+fail:
+	free(events);
+	return -1;
+}
+
+static int owner_read_channel_ids(const char *path, uint64_t **channels_out,
+				  size_t *count_out)
+{
+	FILE *file;
+	uint64_t *channels = NULL;
+	size_t count = 0, capacity = 0;
+	char line[128];
+	int rc = -1;
+
+	file = fopen(path, "r");
+	if (!file)
+		return -1;
+	while (fgets(line, sizeof(line), file)) {
+		char *end;
+		unsigned long long value;
+		size_t i;
+
+		if (!isdigit((unsigned char)line[0]))
+			goto out;
+		errno = 0;
+		value = strtoull(line, &end, 10);
+		if (errno || end == line ||
+		    (*end != '\n' && *end != '\r' && *end != '\0'))
+			goto out;
+		for (i = 0; i < count; i++) {
+			if (channels[i] == (uint64_t)value)
+				goto out;
+		}
+		if (count == capacity) {
+			size_t next = capacity ? capacity * 2 : 8;
+			uint64_t *grown;
+
+			if (next < capacity || next > SIZE_MAX / sizeof(*channels))
+				goto out;
+			grown = realloc(channels, next * sizeof(*channels));
+			if (!grown)
+				goto out;
+			channels = grown;
+			capacity = next;
+		}
+		channels[count++] = (uint64_t)value;
+	}
+	if (!ferror(file) && count) {
+		*channels_out = channels;
+		*count_out = count;
+		channels = NULL;
+		rc = 0;
+	}
+out:
+	free(channels);
+	fclose(file);
+	return rc;
+}
+
+static int do_owner_channel_check(int argc, char **argv)
+{
+	struct owner_check_stats stats;
+	const char *reason = "invalid-arguments";
+	uint64_t *channels = NULL;
+	size_t channel_count = 0;
+	FILE *trace;
+	int require_active, rc;
+
+	if (argc != 4 || (strcmp(argv[3], "reclaimed") &&
+			   strcmp(argv[3], "active"))) {
+		fprintf(stderr, "usage: owner-channel-check <trace> <channel-ids> <reclaimed|active>\n");
+		return 2;
+	}
+	require_active = !strcmp(argv[3], "active");
+	if (owner_read_channel_ids(argv[2], &channels, &channel_count)) {
+		fprintf(stderr, "OWNER_CHANNEL_CHECK verified=no reason=invalid-channel-file\n");
+		return 1;
+	}
+	trace = fopen(argv[1], "r");
+	if (!trace) {
+		free(channels);
+		fprintf(stderr, "OWNER_CHANNEL_CHECK verified=no reason=trace-unavailable\n");
+		return 1;
+	}
+	rc = owner_check_stream(trace, channels, channel_count, require_active,
+				&stats, &reason);
+	fclose(trace);
+	free(channels);
+	if (rc) {
+		fprintf(stderr, "OWNER_CHANNEL_CHECK verified=no reason=%s\n", reason);
+		return 1;
+	}
+	printf("OWNER_CHANNEL_CHECK verified=yes mode=%s channels=%zu events=%zu created=%zu released=%zu reclaimed=%zu discarded=%zu retained=%zu active=%zu live=%zu\n",
+	       require_active ? "active" : "reclaimed", stats.channels,
+	       stats.events, stats.created, stats.released, stats.reclaimed,
+	       stats.discarded, stats.retained, stats.active, stats.live);
+	return 0;
 }
 
 static volatile sig_atomic_t frag_stop_signal;
@@ -2014,7 +2407,8 @@ static void usage(void)
 	fprintf(stderr,
 		"usage: vmbus_drill_helper mmap-hold <path> <bytes> <hold_seconds> [count] [release_file]\n"
 		"       vmbus_drill_helper mlock-hog <mib> <hold_seconds>\n"
-		"       vmbus_drill_helper fragment-buddy <mib> <hold_seconds> [release_file] [pid_file]\n");
+		"       vmbus_drill_helper fragment-buddy <mib> <hold_seconds> [release_file] [pid_file]\n"
+		"       vmbus_drill_helper owner-channel-check <trace> <channel-ids> <reclaimed|active>\n");
 }
 
 /*
@@ -2064,6 +2458,8 @@ int main(int argc, char **argv)
 		return do_mlock_hog(argc - 1, argv + 1);
 	if (strcmp(argv[1], "fragment-buddy") == 0)
 		return do_fragment_buddy(argc - 1, argv + 1);
+	if (strcmp(argv[1], "owner-channel-check") == 0)
+		return do_owner_channel_check(argc - 1, argv + 1);
 	usage();
 	return 2;
 }
