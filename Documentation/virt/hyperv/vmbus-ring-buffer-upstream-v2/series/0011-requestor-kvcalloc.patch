@@ -1,8 +1,7 @@
-From a10569af5a569bbaea6f28caa2a09726902cd2b5 Mon Sep 17 00:00:00 2001
+From 21f3d3b25e9bac9154c152ebcec43f51b9ffc8ff Mon Sep 17 00:00:00 2001
 From: Emerson Busson <emersonbusson@gmail.com>
 Date: Thu, 1 Oct 2026 17:22:23 -0300
-Subject: [PATCH v2 11/14] hv: vmbus: allocate the requestor array with
- kvcalloc()
+Subject: [PATCH] hv: vmbus: allocate the requestor array with kvcalloc()
 
 __vmbus_open() sizes the per-channel requestor array from the ring
 bytes. On netvsc that is netvsc_rqstor_size(), which at the default
@@ -64,8 +63,8 @@ Signed-off-by: Emerson Busson <emersonbusson@gmail.com>
 ---
  drivers/hv/channel.c           |  20 +++--
  drivers/hv/hyperv_vmbus.h      |  11 +++
- drivers/hv/vmbus_buffer_test.c | 151 +++++++++++++++++++++++++++++++++
- 3 files changed, 176 insertions(+), 6 deletions(-)
+ drivers/hv/vmbus_buffer_test.c | 153 +++++++++++++++++++++++++++++++++
+ 3 files changed, 178 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/hv/channel.c b/drivers/hv/channel.c
 index 2793ca1b7f32..bc5311427509 100644
@@ -147,7 +146,7 @@ index 2edeb7988bdc..cac6011949a0 100644
 +
  #endif /* _HYPERV_VMBUS_H */
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
-index 5c8e70d861ad..e505c7685676 100644
+index 5c8e70d861ad..be4e5f7cb433 100644
 --- a/drivers/hv/vmbus_buffer_test.c
 +++ b/drivers/hv/vmbus_buffer_test.c
 @@ -10,6 +10,7 @@
@@ -158,7 +157,7 @@ index 5c8e70d861ad..e505c7685676 100644
  #include <linux/slab.h>
  #include <linux/vmalloc.h>
  
-@@ -776,6 +777,151 @@ static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
+@@ -776,6 +777,153 @@ static void vmbus_buffer_order_zero_allocation_test(struct kunit *test)
  	KUNIT_EXPECT_EQ(test, context.attempts, (unsigned int)MAX_PAGE_ORDER + 1);
  }
  
@@ -167,10 +166,10 @@ index 5c8e70d861ad..e505c7685676 100644
 + *
 + * The requestor is guest-private bookkeeping: the host never sees the slot
 + * values, so a vmalloc-backed array is correct here and needs no
-+ * set_memory_decrypted(). What must hold is that the array still behaves
-+ * as a free list under the exported ID API, that a large size actually
-+ * takes the vmalloc path rather than an order-7 compound page, and that
-+ * alloc/free are paired.
++ * set_memory_decrypted(). kvcalloc() still prefers kmalloc for small arrays,
++ * though, which can require a higher-order compound page while opening a
++ * channel under fragmentation. Require vmalloc backing for both a typical
++ * 8 KiB array and a size beyond KMALLOC_MAX_SIZE, without memory pressure.
 + */
 +static void vmbus_requestor_alloc_free_test(struct kunit *test)
 +{
@@ -194,18 +193,20 @@ index 5c8e70d861ad..e505c7685676 100644
 +static void vmbus_requestor_vmalloc_backing_test(struct kunit *test)
 +{
 +	/*
-+	 * The production scale is the default ring size, where the array
-+	 * exceeds 256 KiB and kcalloc() asks for an order-7 compound
-+	 * page. That size alone does not prove vmalloc backing: kvcalloc()
-+	 * tries kmalloc first and a free buddy hands back a compound page
-+	 * instead. Size the array one entry past KMALLOC_MAX_SIZE so
-+	 * kmalloc cannot satisfy it at all. kcalloc() returns NULL there;
-+	 * kvcalloc() falls back to vmalloc. The assertion therefore fails
-+	 * on the unconverted allocator and passes on this one, without
-+	 * needing memory pressure.
++	 * The small array models channel-open requestors and exposes the
++	 * kmalloc-first path in kvcalloc(). The large allocation checks that
++	 * the fallback remains vmalloc-backed above KMALLOC_MAX_SIZE.
 +	 */
++	u32 small_size = 1024;
 +	u32 size = (KMALLOC_MAX_SIZE / sizeof(u64)) + 1;
 +	u64 *req_arr;
++
++	req_arr = request_arr_init(small_size);
++	KUNIT_ASSERT_NOT_NULL(test, req_arr);
++	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
++	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
++	KUNIT_EXPECT_EQ(test, req_arr[small_size - 1], U64_MAX);
++	kvfree(req_arr);
 +
 +	req_arr = request_arr_init(size);
 +	KUNIT_ASSERT_NOT_NULL(test, req_arr);
@@ -310,7 +311,7 @@ index 5c8e70d861ad..e505c7685676 100644
  static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_buffer_size_rounding_test),
  	KUNIT_CASE(vmbus_buffer_size_overflow_test),
-@@ -805,6 +951,11 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
+@@ -805,6 +953,11 @@ static struct kunit_case vmbus_buffer_test_cases[] = {
  	KUNIT_CASE(vmbus_gpadl_post_success_test),
  	KUNIT_CASE(vmbus_gpadl_response_state_test),
  	KUNIT_CASE(vmbus_gpadl_teardown_post_failure_test),
@@ -322,3 +323,6 @@ index 5c8e70d861ad..e505c7685676 100644
  	{}
  };
  
+-- 
+2.43.0
+

@@ -1856,10 +1856,10 @@ index 592a9601faaa..16b1c2910789 100644
  		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
 diff --git a/drivers/hv/vmbus_buffer_test.c b/drivers/hv/vmbus_buffer_test.c
 new file mode 100644
-index 000000000000..e505c7685676
+index 000000000000..be4e5f7cb433
 --- /dev/null
 +++ b/drivers/hv/vmbus_buffer_test.c
-@@ -0,0 +1,967 @@
+@@ -0,0 +1,969 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * KUnit tests for Hyper-V VMBus buffer allocation and GPADL lifetime.
@@ -2644,10 +2644,10 @@ index 000000000000..e505c7685676
 + *
 + * The requestor is guest-private bookkeeping: the host never sees the slot
 + * values, so a vmalloc-backed array is correct here and needs no
-+ * set_memory_decrypted(). What must hold is that the array still behaves
-+ * as a free list under the exported ID API, that a large size actually
-+ * takes the vmalloc path rather than an order-7 compound page, and that
-+ * alloc/free are paired.
++ * set_memory_decrypted(). kvcalloc() still prefers kmalloc for small arrays,
++ * though, which can require a higher-order compound page while opening a
++ * channel under fragmentation. Require vmalloc backing for both a typical
++ * 8 KiB array and a size beyond KMALLOC_MAX_SIZE, without memory pressure.
 + */
 +static void vmbus_requestor_alloc_free_test(struct kunit *test)
 +{
@@ -2671,18 +2671,20 @@ index 000000000000..e505c7685676
 +static void vmbus_requestor_vmalloc_backing_test(struct kunit *test)
 +{
 +	/*
-+	 * The production scale is the default ring size, where the array
-+	 * exceeds 256 KiB and kcalloc() asks for an order-7 compound
-+	 * page. That size alone does not prove vmalloc backing: kvcalloc()
-+	 * tries kmalloc first and a free buddy hands back a compound page
-+	 * instead. Size the array one entry past KMALLOC_MAX_SIZE so
-+	 * kmalloc cannot satisfy it at all. kcalloc() returns NULL there;
-+	 * kvcalloc() falls back to vmalloc. The assertion therefore fails
-+	 * on the unconverted allocator and passes on this one, without
-+	 * needing memory pressure.
++	 * The small array models channel-open requestors and exposes the
++	 * kmalloc-first path in kvcalloc(). The large allocation checks that
++	 * the fallback remains vmalloc-backed above KMALLOC_MAX_SIZE.
 +	 */
++	u32 small_size = 1024;
 +	u32 size = (KMALLOC_MAX_SIZE / sizeof(u64)) + 1;
 +	u64 *req_arr;
++
++	req_arr = request_arr_init(small_size);
++	KUNIT_ASSERT_NOT_NULL(test, req_arr);
++	KUNIT_EXPECT_TRUE(test, is_vmalloc_addr(req_arr));
++	KUNIT_EXPECT_EQ(test, req_arr[0], 1U);
++	KUNIT_EXPECT_EQ(test, req_arr[small_size - 1], U64_MAX);
++	kvfree(req_arr);
 +
 +	req_arr = request_arr_init(size);
 +	KUNIT_ASSERT_NOT_NULL(test, req_arr);
@@ -3130,10 +3132,10 @@ index 0db7ccaec4a4..b2d22855fd8a 100644
 +hv_netvsc-$(CONFIG_HYPERV_NET_KUNIT_TEST) += netvsc_completion_test.o
 +hv_netvsc-$(CONFIG_HYPERV_NET_KUNIT_TEST) += rndis_request_test.o
 diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-index 4841367fdab2..f43e96dcafae 100644
+index 4841367fdab2..be3a63a168cf 100644
 --- a/drivers/net/hyperv/hyperv_net.h
 +++ b/drivers/net/hyperv/hyperv_net.h
-@@ -210,14 +210,37 @@ struct rndis_device {
+@@ -210,14 +210,40 @@ struct rndis_device {
  	u8 rss_key[NETVSC_HASH_KEYLEN];
  };
  
@@ -3153,6 +3155,9 @@ index 4841367fdab2..f43e96dcafae 100644
 +struct rndis_request *get_rndis_request(struct rndis_device *dev,
 +					u32 msg_type, u32 msg_len);
 +void put_rndis_request(struct rndis_device *dev, struct rndis_request *req);
++int rndis_build_page_buffers(const void *data, u32 len,
++			     struct hv_page_buffer *page_bufs,
++			     u32 *page_buf_cnt);
 +
 +void netvsc_send_acct(struct net_device *ndev,
 +		      struct netvsc_device *net_device,
@@ -3172,7 +3177,7 @@ index 4841367fdab2..f43e96dcafae 100644
  extern u32 netvsc_ring_bytes;
  
  int netvsc_workqueue_init(void);
-@@ -1158,21 +1181,15 @@ struct netvsc_device {
+@@ -1158,21 +1184,15 @@ struct netvsc_device {
  	bool tx_disable; /* if true, do not wake up queue again */
  
  	/* Receive buffer allocated by us but manages by NetVSP */
@@ -3196,7 +3201,7 @@ index 4841367fdab2..f43e96dcafae 100644
  	u32 send_section_cnt;
  	u32 send_section_size;
  	unsigned long *send_section_map;
-@@ -1785,6 +1802,36 @@ struct rndis_message {
+@@ -1785,6 +1805,36 @@ struct rndis_message {
  	union rndis_message_container msg;
  };
  
@@ -3234,7 +3239,7 @@ index 4841367fdab2..f43e96dcafae 100644
  /* Handy macros */
  
 diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-index 5cd084e5696c..0d017f836b9e 100644
+index 5cd084e5696c..8ea7c993baac 100644
 --- a/drivers/net/hyperv/netvsc.c
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -134,10 +134,8 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
@@ -3250,6 +3255,24 @@ index 5cd084e5696c..0d017f836b9e 100644
  	bitmap_free(nvdev->send_section_map);
  
  	for (i = 0; i < VRSS_CHANNEL_MAX; i++) {
+@@ -146,7 +144,7 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
+ 		vfree(nvdev->chan_table[i].mrc.slots);
+ 	}
+ 
+-	kfree(nvdev);
++	kvfree(nvdev);
+ }
+ 
+ static void free_netvsc_device(struct work_struct *w)
+@@ -173,7 +171,7 @@ static struct netvsc_device *alloc_net_device(void)
+ {
+ 	struct netvsc_device *net_device;
+ 
+-	net_device = kzalloc_obj(struct netvsc_device);
++	net_device = kvzalloc_obj(struct netvsc_device);
+ 	if (!net_device)
+ 		return NULL;
+ 
 @@ -308,9 +306,9 @@ static void netvsc_teardown_recv_gpadl(struct hv_device *device,
  {
  	int ret;
@@ -3938,10 +3961,18 @@ index 000000000000..2614b1ece232
 +
 +kunit_test_suite(netvsc_completion_test_suite);
 diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
-index 9b6c44979b4e..09ff2d562c88 100644
+index 9b6c44979b4e..1ce40baa2d23 100644
 --- a/drivers/net/hyperv/rndis_filter.c
 +++ b/drivers/net/hyperv/rndis_filter.c
-@@ -27,31 +27,6 @@
+@@ -16,6 +16,7 @@
+ #include <linux/if_ether.h>
+ #include <linux/netdevice.h>
+ #include <linux/if_vlan.h>
++#include <linux/mm.h>
+ #include <linux/nls.h>
+ #include <linux/vmalloc.h>
+ #include <linux/rtnetlink.h>
+@@ -27,31 +28,6 @@
  
  static void rndis_set_multicast(struct work_struct *w);
  
@@ -3973,7 +4004,7 @@ index 9b6c44979b4e..09ff2d562c88 100644
  static const u8 netvsc_hash_key[NETVSC_HASH_KEYLEN] = {
  	0x6d, 0x5a, 0x56, 0xda, 0x25, 0x5b, 0x0e, 0xc2,
  	0x41, 0x67, 0x25, 0x3d, 0x43, 0xa3, 0x8f, 0xb0,
-@@ -78,16 +53,30 @@ static struct rndis_device *get_rndis_device(void)
+@@ -78,16 +54,27 @@ static struct rndis_device *get_rndis_device(void)
  	return device;
  }
  
@@ -3993,22 +4024,19 @@ index 9b6c44979b4e..09ff2d562c88 100644
 +	/*
 +	 * struct rndis_request embeds two RNDIS_EXT_LEN (4 KiB) protocol
 +	 * tails and is larger than KMALLOC_MAX_CACHE_SIZE, so
-+	 * kzalloc_obj() hands back an order-2 compound page. That is a
-+	 * high-order allocation on the subchannel open path and it fails
-+	 * under buddy fragmentation -- the same failure this series
-+	 * removes from the rings and the requestor array. The request is
-+	 * a control-path object copied into the VMBus ring and is never
-+	 * DMA-mapped from this allocation, so vmalloc backing is fine.
-+	 * kvzalloc_obj() keeps the zeroing kzalloc_obj() provided and
-+	 * tries the kmalloc path with __GFP_NORETRY|__GFP_NOWARN first,
-+	 * so it neither fails hard nor reaches the OOM killer when no
-+	 * compound page is available.
++	 * kzalloc_obj() needs an order-2 compound page. That high-order
++	 * allocation can fail under buddy fragmentation. kvzalloc_obj()
++	 * keeps the zeroing semantics while allowing vmalloc backing when
++	 * a suitable kmalloc allocation is unavailable. The request payload
++	 * is sent as GPADL-direct page buffers, so rndis_filter_send_request()
++	 * must describe each backing page instead of assuming virt_to_phys()
++	 * yields one contiguous physical range.
 +	 */
 +	request = kvzalloc_obj(struct rndis_request);
  	if (!request)
  		return NULL;
  
-@@ -115,8 +104,8 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
+@@ -115,8 +102,8 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
  	return request;
  }
  
@@ -4019,7 +4047,7 @@ index 9b6c44979b4e..09ff2d562c88 100644
  {
  	unsigned long flags;
  
-@@ -124,7 +113,8 @@ static void put_rndis_request(struct rndis_device *dev,
+@@ -124,7 +111,8 @@ static void put_rndis_request(struct rndis_device *dev,
  	list_del(&req->list_ent);
  	spin_unlock_irqrestore(&dev->request_lock, flags);
  
@@ -4029,12 +4057,98 @@ index 9b6c44979b4e..09ff2d562c88 100644
  }
  
  static void dump_rndis_message(struct net_device *netdev,
+@@ -221,27 +209,78 @@ static void dump_rndis_message(struct net_device *netdev,
+ 	}
+ }
+ 
++int rndis_build_page_buffers(const void *data, u32 len,
++			     struct hv_page_buffer *page_bufs,
++			     u32 *page_buf_cnt)
++{
++	const u8 *addr = data;
++	u32 count = 0;
++
++	if (!data || !len || !page_bufs || !page_buf_cnt)
++		return -EINVAL;
++
++	*page_buf_cnt = 0;
++
++	while (len) {
++		struct page *page;
++		phys_addr_t phys;
++		u32 offset, chunk;
++		unsigned long page_offset = offset_in_page(addr);
++
++		if (count == MAX_PAGE_BUFFER_COUNT)
++			return -E2BIG;
++
++		if (is_vmalloc_addr(addr))
++			page = vmalloc_to_page(addr);
++		else if (virt_addr_valid(addr))
++			page = virt_to_page(addr);
++		else
++			return -EFAULT;
++
++		if (!page)
++			return -EFAULT;
++
++		phys = page_to_phys(page) + page_offset;
++		offset = offset_in_hvpage(phys);
++		chunk = min_t(u32, len, PAGE_SIZE - page_offset);
++		chunk = min_t(u32, chunk, HV_HYP_PAGE_SIZE - offset);
++
++		page_bufs[count].pfn = phys >> HV_HYP_PAGE_SHIFT;
++		page_bufs[count].offset = offset;
++		page_bufs[count].len = chunk;
++
++		addr += chunk;
++		len -= chunk;
++		count++;
++	}
++
++	*page_buf_cnt = count;
++	return 0;
++}
++
+ static int rndis_filter_send_request(struct rndis_device *dev,
+ 				  struct rndis_request *req)
+ {
+ 	struct hv_netvsc_packet *packet;
+-	struct hv_page_buffer pb;
++	struct hv_page_buffer page_bufs[MAX_PAGE_BUFFER_COUNT];
++	u32 page_buf_cnt;
+ 	int ret;
+ 
+ 	/* Setup the packet to send it */
+ 	packet = &req->pkt;
+ 
+ 	packet->total_data_buflen = req->request_msg.msg_len;
+-	packet->page_buf_cnt = 1;
+-
+-	pb.pfn = virt_to_phys(&req->request_msg) >> HV_HYP_PAGE_SHIFT;
+-	pb.len = req->request_msg.msg_len;
+-	pb.offset = offset_in_hvpage(&req->request_msg);
++	ret = rndis_build_page_buffers(&req->request_msg,
++				       req->request_msg.msg_len,
++				       page_bufs, &page_buf_cnt);
++	if (ret)
++		return ret;
++	packet->page_buf_cnt = page_buf_cnt;
+ 
+ 	trace_rndis_send(dev->ndev, 0, &req->request_msg);
+ 
+ 	rcu_read_lock_bh();
+-	ret = netvsc_send(dev->ndev, packet, NULL, &pb, NULL, false);
++	ret = netvsc_send(dev->ndev, packet, NULL, page_bufs, NULL, false);
+ 	rcu_read_unlock_bh();
+ 
+ 	return ret;
 diff --git a/drivers/net/hyperv/rndis_request_test.c b/drivers/net/hyperv/rndis_request_test.c
 new file mode 100644
-index 000000000000..50565c79effe
+index 000000000000..6affa916e74e
 --- /dev/null
 +++ b/drivers/net/hyperv/rndis_request_test.c
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,216 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * KUnit tests for RNDIS request descriptor allocation.
@@ -4045,8 +4159,10 @@ index 000000000000..50565c79effe
 + */
 +#include <kunit/test.h>
 +#include <linux/hyperv.h>
++#include <linux/mm.h>
 +#include <linux/slab.h>
 +#include <linux/stddef.h>
++#include <linux/vmalloc.h>
 +
 +#include "hyperv_net.h"
 +
@@ -4178,11 +4294,68 @@ index 000000000000..50565c79effe
 +	}
 +}
 +
++/*
++ * kvzalloc_obj() may return a vmalloc address under fragmentation. RNDIS
++ * requests are GPA-direct packets, so each backing page must be represented
++ * explicitly instead of deriving a single PFN with virt_to_phys().
++ */
++static void rndis_request_vmalloc_page_buffers_test(struct kunit *test)
++{
++	struct hv_page_buffer page_bufs[MAX_PAGE_BUFFER_COUNT];
++	const u32 data_len = 16;
++	u8 *allocation = vzalloc(2 * PAGE_SIZE);
++	const u8 *cursor;
++	phys_addr_t phys;
++	u32 count = 0, remaining = data_len, i;
++	int ret;
++
++	if (!allocation) {
++		KUNIT_FAIL(test, "could not allocate vmalloc test buffer");
++		return;
++	}
++
++	cursor = allocation + PAGE_SIZE - 8;
++	ret = rndis_build_page_buffers(cursor, data_len, page_bufs, &count);
++	KUNIT_EXPECT_EQ(test, ret, 0);
++	if (ret)
++		goto out;
++
++	KUNIT_EXPECT_EQ(test, count, 2U);
++	for (i = 0; i < count; i++) {
++		struct page *page = vmalloc_to_page(cursor);
++		unsigned long page_offset = offset_in_page(cursor);
++		u32 offset, chunk;
++
++		if (!page) {
++			KUNIT_FAIL(test, "vmalloc test buffer has no backing page");
++			goto out;
++		}
++
++		phys = page_to_phys(page) + page_offset;
++		offset = offset_in_hvpage(phys);
++		chunk = min_t(u32, remaining, PAGE_SIZE - page_offset);
++		chunk = min_t(u32, chunk, HV_HYP_PAGE_SIZE - offset);
++
++		KUNIT_EXPECT_EQ(test, page_bufs[i].pfn,
++				(u64)(phys >> HV_HYP_PAGE_SHIFT));
++		KUNIT_EXPECT_EQ(test, page_bufs[i].offset, offset);
++		KUNIT_EXPECT_EQ(test, page_bufs[i].len, chunk);
++
++		cursor += chunk;
++		remaining -= chunk;
++	}
++	KUNIT_EXPECT_EQ(test, remaining, 0U);
++
++out:
++	vfree(allocation);
++}
++
 +static struct kunit_case rndis_request_test_cases[] = {
 +	KUNIT_CASE(rndis_request_size_premise_test),
 +	KUNIT_CASE(rndis_request_alloc_zeroed_test),
 +	KUNIT_CASE(rndis_request_id_lifecycle_test),
 +	KUNIT_CASE(rndis_request_put_cleanup_test),
++	KUNIT_CASE(rndis_request_vmalloc_page_buffers_test),
 +	{}
 +};
 +

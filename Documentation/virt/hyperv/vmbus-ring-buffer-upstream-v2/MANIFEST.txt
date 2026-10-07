@@ -1,9 +1,9 @@
 MANIFEST — corrected VMBus mainline validation snapshot
 =======================================================
-Status: the refreshed fourteen-patch bytes await exact build/runtime qualification; no mail sent.
+Status: intentional TDD RED for small requestor-array backing awaits KUnit CI; no mail sent.
 Mainline base: 93f51579e7df248780214094418f205253383cc5
-Mainline reconstructed tip: 324561babda3387f2abf55d6bcfddb56dd3e7945
-Expected applied source tree: a4d818bed9e5a356972f7afe491071721ef914e3
+Mainline reconstructed tip: d30101784dfcc6a7ca41ab6ea0fdf271f0fba708
+Expected applied source tree: e2c0e19b272eddb8e0ca89c7d560b69fe13afea2
 Shape: fourteen code mails plus one scoped review cover. Nothing sent.
 The WSL backport and its native/local results are distinct from mainline.
 The original withdrawn mail package is not modified by this CI snapshot.
@@ -35,7 +35,7 @@ f33e0e93b5c76ecb817957a8b7c567c2bb3f4f07ff1a3ed04a9badd6d90c2c73  0007-rescind-v
 7aa78344410ac0ddf533508a8b450f5264d33d06b7e681829186d17e78ede1b9  0008-buffer-ownership.patch
 33358104ecb6a34e4926f38273d46e2cd5c9badaa5dd397ae4af83af8e1c6806  0009-alloc-buffer-prototype.patch
 88e6c3920a567fa34e5f7b16495c06348a7a9c02ad39fb4ae01b2d3a23fc31b1  0010-uio-mmap-pin.patch
-44e21c18b74b7b5873448601dbe39420a9eb2a411e7ddc19e5e63649683be597  0011-requestor-kvcalloc.patch
+3468755bcc8da0e94234ef1da31e40b2c89ae3278c39eac0707f907df33303d7  0011-requestor-kvcalloc.patch
 e67c37f2c45f3f89e77b3a61a48eba2d007083dea6bdc404531ece0d266e2a03  0012-rndis-request-kvmalloc.patch
 a7137c5dd0d815e3ae591b4fc65e90c3e6554f4388676e13e32e3fe7e96cf88e  0013-netvsc-empty-completion-null.patch
 544aabd7cae323d70fded8ea53ddc516721e49edd4d8824ac61c157c4753e018  0014-netvsc-kvzalloc.patch
