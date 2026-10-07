@@ -33,6 +33,7 @@ $report = [ordered]@{
     phase = 'artifact-admission'
     complete_kernel_modules_pair = $false; confidential_transitions = $false
     harness_commit = $env:GITHUB_SHA
+    vm_shutdown_checks = @()
 }
 
 function Invoke-OwnedProcess([string]$Executable, [string[]]$Arguments, [int]$TimeoutSec = 30) {
@@ -83,6 +84,73 @@ function Invoke-OwnedProcess([string]$Executable, [string[]]$Arguments, [int]$Ti
 
 function Invoke-Wsl([string[]]$Arguments, [int]$TimeoutSec = 30) {
     Invoke-OwnedProcess 'wsl.exe' $Arguments $TimeoutSec
+}
+
+function Test-WslShutdownQuiescent([AllowEmptyString()][string]$RunningDistros, [int]$VmmemProcessCount) {
+    return [string]::IsNullOrWhiteSpace($RunningDistros) -and $VmmemProcessCount -eq 0
+}
+
+# A successful shutdown command can precede utility VM exit. Require stable host and distro
+# observations before reconfiguration.
+function Wait-WslShutdownQuiescence {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Probe,
+        [Parameter(Mandatory)][scriptblock]$Delay,
+        [Parameter(Mandatory)][ValidateRange(0, 3600)][int]$TimeoutSeconds
+    )
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $observations = 0
+    $clearSamples = 0
+    $running = ''
+    $vmmemPids = @()
+    while ($true) {
+        $state = & $Probe
+        if ($state -isnot [System.Collections.IDictionary] -or
+            -not $state.Contains('running_distros') -or -not $state.Contains('vmmem_pids')) {
+            throw 'WSL shutdown probe returned incomplete state'
+        }
+        if ($state.running_distros -isnot [string]) {
+            throw 'WSL shutdown probe returned invalid running distro state'
+        }
+        $observations++
+        $running = $state.running_distros.Trim()
+        $vmmemPids = @($state.vmmem_pids | ForEach-Object { [int]$_ })
+        if (Test-WslShutdownQuiescent $running $vmmemPids.Count) {
+            $clearSamples++
+            if ($clearSamples -ge 2) {
+                return [ordered]@{
+                    running_distros = $running; vmmem_pids = $vmmemPids
+                    observations = $observations; elapsed_ms = [int]$watch.ElapsedMilliseconds
+                }
+            }
+        } else { $clearSamples = 0 }
+        if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            $distroText = if ($running) { $running } else { 'none' }
+            $pidText = if ($vmmemPids.Count) { $vmmemPids -join ',' } else { 'none' }
+            throw "WSL utility VM did not quiesce within $TimeoutSeconds seconds (running_distros=$distroText; vmmem_pids=$pidText)"
+        }
+        & $Delay
+    }
+}
+
+function Invoke-WslShutdownVerified {
+    [void](Invoke-Wsl @('--shutdown'))
+    try {
+        $state = Wait-WslShutdownQuiescence -Probe {
+            $running = ([string](Invoke-Wsl @('--list', '--running', '--quiet') 10)).Trim()
+            $processes = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -ieq 'VmmemWSL' })
+            @{ running_distros = $running; vmmem_pids = @($processes | ForEach-Object { $_.Id }) }
+        } -Delay { Start-Sleep -Seconds 1 } -TimeoutSeconds 30
+        $script:report.vm_shutdown_checks += [ordered]@{
+            verdict = 'PASS'; observations = $state.observations
+            elapsed_ms = $state.elapsed_ms; vmmem_pids = $state.vmmem_pids
+        }
+    } catch {
+        $script:report.vm_shutdown_checks += [ordered]@{
+            verdict = 'FAIL'; error = $_.Exception.Message
+        }
+        throw
+    }
 }
 
 function ConvertTo-GuestShellCommand([string]$Command) {
@@ -232,7 +300,7 @@ try {
     $selectedConfig = @('[wsl2]', 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
     [IO.File]::WriteAllText($config, $selectedConfig)
     $configOwned = $true
-    [void](Invoke-Wsl @('--shutdown'))
+    Invoke-WslShutdownVerified
     $location = Join-Path $env:RUNNER_TEMP $distro
     $importAttempted = $true
     [void](Invoke-Wsl @('--import', $distro, $location, $rootfs, '--version', '2') 60)
@@ -240,7 +308,7 @@ try {
     $report.phase = 'bundled-boot'
     $report.bundled_kernel = (Read-Guest 'uname -r').Trim()
     [void](Invoke-Wsl @('--terminate', $distro))
-    [void](Invoke-Wsl @('--shutdown'))
+    Invoke-WslShutdownVerified
     # Use an owned system-drive path, and test the same override with stock bytes.
     $kernelScratch = Join-Path $env:USERPROFILE ('channel-kernel-' + [guid]::NewGuid())
     New-Item -ItemType Directory $kernelScratch | Out-Null
@@ -256,10 +324,11 @@ try {
         $stockConfigPath = $stockCopy.Replace('\', '/')
         $selectedConfig = @('[wsl2]', "kernel=$stockConfigPath", 'memory=2GB', 'processors=2', 'swap=0', '') -join [Environment]::NewLine
         [IO.File]::WriteAllText($config, $selectedConfig)
+        Invoke-WslShutdownVerified
         $report.copied_bundled_kernel = (Read-Guest 'uname -r').Trim()
         if ($report.copied_bundled_kernel -cne $report.bundled_kernel) { throw 'bundled control release differs' }
         [void](Invoke-Wsl @('--terminate', $distro))
-        [void](Invoke-Wsl @('--shutdown'))
+        Invoke-WslShutdownVerified
     } else { $report.copied_bundled_control = 'UNAVAILABLE' }
     $kernelCopy = Join-Path $kernelScratch 'candidate-kernel'
     Copy-Item $kernel $kernelCopy
@@ -281,6 +350,7 @@ try {
         $report.modules_vhdx_sha256 = $moduleDigest
     }
     [IO.File]::WriteAllText($config, $selectedConfig)
+    Invoke-WslShutdownVerified
     [void](Read-Guest 'uname -r; test -d /sys/bus/vmbus/devices; test -r /proc/vmallocinfo')
     [void](Read-Guest @'
 set -eu
@@ -385,7 +455,7 @@ echo 1 > "$t/tracing_on"
         }
         try { [void](Invoke-Wsl @('--terminate', $distro)) } catch { $report.cleanup_errors += $_.Exception.Message }
         try { [void](Invoke-Wsl @('--unregister', $distro)) } catch { $report.cleanup_errors += $_.Exception.Message }
-        try { [void](Invoke-Wsl @('--shutdown')) } catch { $report.cleanup_errors += $_.Exception.Message }
+        try { Invoke-WslShutdownVerified } catch { $report.cleanup_errors += $_.Exception.Message }
     }
     $configRestored = -not $configOwned
     if ($configOwned) {

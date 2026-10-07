@@ -32,6 +32,7 @@ Accept {
 $shutdownStates = [System.Collections.Queue]::new()
 $shutdownStates.Enqueue(@{ running_distros = 'Ubuntu-24.04'; vmmem_pids = @(42) })
 $shutdownStates.Enqueue(@{ running_distros = ''; vmmem_pids = @() })
+$shutdownStates.Enqueue(@{ running_distros = ''; vmmem_pids = @() })
 $script:shutdownProbeCalls = 0
 $script:shutdownDelayCalls = 0
 $shutdownProbe = {
@@ -41,7 +42,7 @@ $shutdownProbe = {
 $shutdownDelay = { $script:shutdownDelayCalls++ }
 Accept {
     $state = Wait-WslShutdownQuiescence -Probe $shutdownProbe -Delay $shutdownDelay -TimeoutSeconds 5
-    if ($script:shutdownProbeCalls -ne 2 -or $script:shutdownDelayCalls -ne 1 -or
+    if ($script:shutdownProbeCalls -ne 3 -or $script:shutdownDelayCalls -ne 2 -or
         $state.running_distros -or $state.vmmem_pids.Count -ne 0) {
         throw 'shutdown quiescence was not awaited and recorded'
     }
