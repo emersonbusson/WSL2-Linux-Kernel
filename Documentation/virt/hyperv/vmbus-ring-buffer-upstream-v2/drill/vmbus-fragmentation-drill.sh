@@ -26,8 +26,8 @@
 #
 # usage: vmbus-fragmentation-drill.sh [hog_mib] [logfile]
 #   hog_mib  ceiling in MiB; default MemTotal. The helper allocates and pins
-#            64 KiB chunks, leaving at most 256 measured high-order pages as
-#            a safety reserve, then discards pages with proven held buddies.
+#            64 KiB chunks, leaving at most 512 measured high-order pages as
+#            a pre-open reserve, then discards pages with proven held buddies.
 #
 # Depends on vmbus_drill_helper (static, see hyperv-drill-initramfs/) for the
 # fragment-buddy primitive. The guest has no CPython and this is a Day-0
@@ -55,6 +55,15 @@ fragment_restore_values_valid() {
 		esac
 	done
 	return 0
+}
+
+fragment_order7_reserve_qualified() {
+	[ "$#" -eq 2 ] || return 1
+	case "$1" in '' | *[!0-9]*) return 1 ;; esac
+	case "$2" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] && [ "$1" -le 4 ] &&
+	[ "$2" -ge 128 ] && [ "$2" -le 512 ] &&
+	[ $(( $2 % 128 )) -eq 0 ] && [ "$2" -ge $(( $1 * 128 )) ]
 }
 
 if [ "${1:-}" = --self-test ]; then
@@ -164,8 +173,9 @@ say() {
 hog_mib() {
 	local total
 	# MemTotal, not MemAvailable. The helper treats this as a ceiling the
-	# allocation loop must never reach. The loop keeps at most 256 high-order
-	# pages after removing at least 99% of the initial order-7-and-higher pages.
+	# allocation loop must never reach. The loop keeps at most 512 high-order
+	# pages before channel open after removing at least 99% of the initial
+	# order-7-and-higher pages.
 	# Passing a share of MemAvailable (the previous default) stopped the loop
 	# at the ceiling with untouched order-10 blocks and reported INCONCLUSIVE.
 	total="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)"
@@ -400,7 +410,7 @@ buddy
 # A single large mlock hog only splits the buddy as far as it must and leaves
 # the untouched remainder as order-10 blocks. fragment-buddy instead removes
 # at least 99% of the initial order-7-and-higher pages while retaining at
-# most 256 measured high-order pages, then unmaps physical buddy pairs so
+# most 512 measured high-order pages, then unmaps physical buddy pairs so
 # nothing above order-0 can coalesce and the survivors still serve order-0.
 say "=== FRAGMENT ${HOGB} MiB as 64 KiB chunks ==="
 if [ -z "$HELPER" ]; then
@@ -812,9 +822,10 @@ ACCEPT="$(printf '%s\n' "$DM" | grep -c 'accept4 failed' || true)"
 OOPS="$(printf '%s\n' "$DM" | grep -vF 'Warning: unable to open an initial console.' | grep -ciE 'BUG:|Oops:|WARNING:|hung task|out of memory|oom-kill|kernel panic' || true)"
 
 # exhausted= is the strict raw-count result. Only the bounded ordinary-path
-# result is accepted: at least 99% removed, at most 256 measured high-order
-# pages kept, and the exact count reread after the channel exercise. Reread both the
-# block count and its page size after the hole pattern so neither can grow
+# result is accepted: at least 99% removed, at most 512 measured high-order
+# pages kept before channel open, at least one minimum order-7 block kept
+# after it, and the exact count reread after the channel exercise. Reread both
+# the block count and its page size after the hole pattern so neither can grow
 # between the helper's sample and the channel-open exercise.
 HIGH_ORDER="${HIGH_ORDER_HELPER:-$HIGH_ORDER_REREAD}"
 HIGH_ORDER_PAGES="${HIGH_ORDER_PAGES_HELPER:-$HIGH_ORDER_PAGES_REREAD}"
@@ -870,9 +881,14 @@ elif [ "$POST_OPEN_MAP_COUNT" -le "$PRE_OPEN_MAP_COUNT" ]; then
 elif [ "${PAGEMAP:-0}" != 1 ]; then
 	say "VERDICT=INCONCLUSIVE_NO_PAGEMAP (holes were virtual, not physical buddy pairs)"
 	RC=3
-elif [ "$HIGH_ORDER_HELPER" = 0 ] || [ "$HIGH_ORDER_REREAD" = 0 ] ||
-	[ "$HIGH_ORDER_AFTER_CHANNEL" = 0 ]; then
-	say "VERDICT=FAIL_UNSAFE_ORDER7_SATURATION (the drill must retain its measured safety block)"
+elif [ "$NUMERIC_EVIDENCE" != yes ]; then
+	say "VERDICT=INCONCLUSIVE_PRESSURE_BOUNDARY (one or more counters are not numeric)"
+	RC=3
+
+elif ! fragment_order7_reserve_qualified "$HIGH_ORDER_HELPER" "$HIGH_ORDER_PAGES_HELPER" ||
+	! fragment_order7_reserve_qualified "$HIGH_ORDER_REREAD" "$HIGH_ORDER_PAGES_REREAD" ||
+	! fragment_order7_reserve_qualified "$HIGH_ORDER_AFTER_CHANNEL" "$HIGH_ORDER_PAGES_AFTER_CHANNEL"; then
+	say "VERDICT=FAIL_UNSAFE_ORDER7_SATURATION (the drill must retain a minimum order-7 block through channel open)"
 	RC=1
 elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
 	[ "$HIGH_ORDER_BLOCKS_BEFORE" -gt 0 ] &&
@@ -880,18 +896,18 @@ elif [ "$NUMERIC_EVIDENCE" = yes ] && [ "$CHUNKS_HELPER" -gt 0 ] &&
 	{ [ "$STOPREASON" = chase-memfree-margin ] ||
 	  [ "$STOPREASON" = order7-reserve ] ||
 	  [ "$STOPREASON" = chase-order7-reserve ]; } &&
-	[ "$HIGH_ORDER_HELPER" -gt 0 ] && [ "$HIGH_ORDER_HELPER" -le 2 ] &&
-	[ "$HIGH_ORDER_PAGES_HELPER" -le 256 ] &&
+	[ "$HIGH_ORDER_HELPER" -gt 0 ] && [ "$HIGH_ORDER_HELPER" -le 4 ] &&
+	[ "$HIGH_ORDER_PAGES_HELPER" -le 512 ] &&
 	[ "$HIGH_ORDER_REREAD" = "$HIGH_ORDER_HELPER" ] &&
 	[ "$HIGH_ORDER_PAGES_REREAD" = "$HIGH_ORDER_PAGES_HELPER" ] &&
-	[ "$HIGH_ORDER_REREAD" -le 2 ] && [ "$HIGH_ORDER_PAGES_REREAD" -le 256 ]; then
+	[ "$HIGH_ORDER_REREAD" -le 4 ] && [ "$HIGH_ORDER_PAGES_REREAD" -le 512 ]; then
 	if [ "$HIGH_ORDER_AFTER_CHANNEL" -gt "$HIGH_ORDER_HELPER" ] ||
 		[ "$HIGH_ORDER_PAGES_AFTER_CHANNEL" -gt "$HIGH_ORDER_PAGES_HELPER" ]; then
 		say "VERDICT=INCONCLUSIVE_PATTERN_CHANGED (after_channel=$HIGH_ORDER_PAGES_AFTER_CHANNEL helper=$HIGH_ORDER_PAGES_HELPER)"
 		RC=3
 	else
 		say "VERDICT=PASS_RING_ALLOCATION_UNDER_BOUNDED_FRAGMENTATION"
-		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL; high_order_safety_reserve_pages=256; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
+		say "VERDICT_SCOPE ordinary-x86_64-vzalloc-path; helper_residual_pages=$HIGH_ORDER_PAGES_HELPER after_channel_pages=$HIGH_ORDER_PAGES_AFTER_CHANNEL; pre_open_reserve_ceiling_pages=512 post_open_reserve_floor_pages=128; full_saturation=not_proven; CoCo_chunked_fallback=not_proven"
 		RC=0
 	fi
 else

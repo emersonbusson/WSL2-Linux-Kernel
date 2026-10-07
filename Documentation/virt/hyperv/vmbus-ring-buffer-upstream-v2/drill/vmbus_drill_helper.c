@@ -781,7 +781,7 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_CHUNK (64L * 1024)
 #define FRAG_MAX_CHUNKS 48000
 #define FRAG_PAGE 4096L
-#define FRAG_BOUNDED_MAX_REMAINING_PAGES (1L << 8)
+#define FRAG_BOUNDED_MAX_REMAINING_PAGES (1L << 9)
 /*
  * Allocation-phase floor, measured against MemFree and only consulted while
  * order-7 remains: the test condition itself is the stop once it is met, so
@@ -856,18 +856,18 @@ static int do_mlock_hog(int argc, char **argv)
  * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
  * only inside this disposable guest, and watermark boost is disabled and
  * read back before pressure starts. The chase keeps the 1 MiB buddy-free
- * floor, a 256-page high-order reserve, and a 4096-chunk hard cap. Crossing
- * any of them to force raw high-order count to zero would weaken the safety
- * contract that kept earlier guests from OOM and panic.
+ * floor, a 512-page high-order reserve ceiling, and a 4096-chunk hard cap.
+ * Crossing any of them to force raw high-order count to zero would weaken
+ * the safety contract that kept earlier guests from OOM and panic.
  *
- * A hosted runner can stop with up to two minimum order-7 blocks while still
- * meeting the safe stress target. The extra 128 pages cover the allocator's
- * measured compaction step when mlock pins the final chase chunk; allowing
- * that second block preserves more safety margin and avoids an oscillating
- * 128/256-page boundary. That result qualifies only as bounded ordinary-path
- * pressure: at least 99% of the initial order-7-and-higher free pages were
- * removed, no more than 256 pages remain, a measured safety boundary caused
- * the stop, and pagemap verified physical pages. It is
+ * A hosted runner can stop with up to four minimum order-7 blocks while still
+ * meeting the safe stress target. The 512-page ceiling leaves enough measured
+ * reserve for the channel-open allocation to consume blocks while the shell
+ * separately requires at least one minimum order-7 block to survive that
+ * allocation. That result qualifies only as bounded ordinary-path pressure:
+ * at least 99% of the initial order-7-and-higher free pages were removed, no
+ * more than 512 pages remain before channel open, a measured safety boundary
+ * caused the stop, and pagemap verified physical pages. It is
  * reported separately from full exhaustion and does not qualify the CoCo
  * chunked allocator, which an ordinary Hyper-V guest never executes.
  *

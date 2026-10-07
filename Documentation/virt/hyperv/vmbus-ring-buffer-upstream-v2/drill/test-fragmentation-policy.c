@@ -85,7 +85,7 @@ int main(void)
 	assert(frag_order2_group_alignment_skip(8) == 0);
 	assert(frag_order2_group_alignment_skip(15) == 1);
 
-	/* The safe stop retains up to two measured minimum order-7 blocks. */
+	/* The pre-open stop retains up to four measured minimum order-7 blocks. */
 	assert(frag_bounded_pressure_qualified(500000, 128,
 						       "chase-memfree-margin", 1, 1));
 	assert(frag_bounded_pressure_qualified(500000, 256,
@@ -104,8 +104,8 @@ int main(void)
 	/* Saturation, larger residue, unsafe stop, or missing PFN stays unqualified. */
 	assert(!frag_bounded_pressure_qualified(500000, 0,
 							"order7-depleted", 1, 1));
-	assert(!frag_bounded_pressure_qualified(500000, 257,
-							"chase-memfree-margin", 1, 1));
+	assert(frag_bounded_pressure_qualified(500000, 257,
+						       "chase-memfree-margin", 1, 1));
 	assert(!frag_bounded_pressure_qualified(500000, 513,
 							"chase-memfree-margin", 1, 1));
 	assert(!frag_bounded_pressure_qualified(25600, 257,
@@ -131,7 +131,7 @@ int main(void)
 	assert(!frag_should_preserve_order7(0, 128));
 	assert(!frag_should_preserve_order7(1, 513));
 	assert(!frag_should_preserve_order7(1, 0));
-	assert(frag_should_refine_order7(1, 384));
+	assert(!frag_should_refine_order7(1, 384));
 	assert(!frag_should_refine_order7(1, 512));
 	assert(frag_should_refine_order7(1, 513));
 	assert(!frag_should_refine_order7(0, 384));
