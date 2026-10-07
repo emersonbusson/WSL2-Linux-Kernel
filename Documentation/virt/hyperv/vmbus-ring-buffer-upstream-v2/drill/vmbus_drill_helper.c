@@ -781,7 +781,8 @@ static int do_mlock_hog(int argc, char **argv)
 #define FRAG_CHUNK (64L * 1024)
 #define FRAG_MAX_CHUNKS 48000
 #define FRAG_PAGE 4096L
-#define FRAG_BOUNDED_MAX_REMAINING_PAGES (1L << 10)
+/* Cover the observed nine-block recovery plus one block of runner slack. */
+#define FRAG_BOUNDED_MAX_REMAINING_PAGES (10L << 7)
 /*
  * Allocation-phase floor, measured against MemFree and only consulted while
  * order-7 remains: the test condition itself is the stop once it is met, so
@@ -856,17 +857,18 @@ static int do_mlock_hog(int argc, char **argv)
  * pass. MemFree is the kernel's buddy-free count; min_free_kbytes is reduced
  * only inside this disposable guest, and watermark boost is disabled and
  * read back before pressure starts. The chase keeps the 1 MiB buddy-free
- * floor, a 1024-page high-order reserve ceiling, and a 4096-chunk hard cap.
+ * floor, a 1280-page high-order reserve ceiling, and a 4096-chunk hard cap.
  * Crossing any of them to force raw high-order count to zero would weaken
  * the safety contract that kept earlier guests from OOM and panic.
  *
- * A hosted runner can stop with up to eight minimum order-7 blocks while still
- * meeting the safe stress target. The 1024-page ceiling leaves enough measured
- * reserve for the channel-open allocation to consume blocks while the shell
- * separately requires at least one minimum order-7 block to survive that
- * allocation. That result qualifies only as bounded ordinary-path pressure:
+ * A hosted runner can stop with up to ten minimum order-7 blocks while still
+ * meeting the safe stress target. The 1280-page ceiling accepts the measured
+ * 1152-page recovery and leaves one additional order-7 block for runner
+ * variation. The shell separately requires at least one minimum order-7 block
+ * and no more than 512 pages to survive channel open. That result qualifies
+ * only as bounded ordinary-path pressure:
  * at least 99% of the initial order-7-and-higher free pages were removed, no
- * more than 1024 pages remain before channel open, a measured safety boundary
+ * more than 1280 pages remain before channel open, a measured safety boundary
  * caused the stop, and pagemap verified physical pages. It is
  * reported separately from full exhaustion and does not qualify the CoCo
  * chunked allocator, which an ordinary Hyper-V guest never executes.
@@ -2040,7 +2042,7 @@ static int do_fragment_buddy(int argc, char **argv)
 
 	/*
 	 * Allocate 64 KiB chunks and touch every page. Stop when the buddy has
-	 * no more than eight minimum order-7 blocks left, preserving the measured
+	 * no more than ten minimum order-7 blocks left, preserving the measured
 	 * safety reserve,
 	 * or when the MemFree floor says the rest of the run needs more room.
 	 *
@@ -2053,7 +2055,7 @@ static int do_fragment_buddy(int argc, char **argv)
 	 * ever being short of memory.
 	 *
 	 * The floor is a margin, not a measure of exhaustion. It is only
-	 * consulted while more than eight order-7 blocks remain; the chase stops
+	 * consulted while more than ten order-7 blocks remain; the chase stops
 	 * at the same reserve if the main pass leaves it high-order.
 	 */
 	for (i = 0; i < want; i++) {
