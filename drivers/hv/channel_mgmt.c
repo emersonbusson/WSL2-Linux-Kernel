@@ -377,7 +377,14 @@ static struct vmbus_channel *alloc_channel(void)
 static void free_channel(struct vmbus_channel *channel)
 {
 	tasklet_kill(&channel->callback_event);
-	vmbus_remove_channel_attr_group(channel);
+
+	/*
+	 * The attribute group only exists if vmbus_add_channel_kobj()
+	 * completed successfully.  Removing it otherwise makes kernfs
+	 * complain about every attribute in the group.
+	 */
+	if (channel->kobj.state_in_sysfs)
+		vmbus_remove_channel_attr_group(channel);
 
 	kobject_put(&channel->kobj);
 }
@@ -569,6 +576,20 @@ err_deq_chan:
 	 */
 	newchannel->probe_done = true;
 
+	/*
+	 * If vmbus_onoffer_rescind() has claimed this channel it frees it once
+	 * it observes probe_done above, and if vmbus_disconnect_ring() has
+	 * claimed it, it tears it down itself; freeing it here would do it
+	 * twice, or leave the closer on freed memory.  Only a sub channel can
+	 * be handed over: for a primary channel the rescind handler has nothing
+	 * to remove it with.
+	 */
+	if (primary_channel != NULL &&
+	    (newchannel->rescind_ref || newchannel->closer_owns)) {
+		mutex_unlock(&vmbus_connection.channel_mutex);
+		return;
+	}
+
 	if (primary_channel == NULL)
 		list_del(&newchannel->listentry);
 	else
@@ -744,13 +765,14 @@ static void init_vp_index(struct vmbus_channel *channel)
 	u32 i, ncpu = num_online_cpus();
 	cpumask_var_t available_mask;
 	struct cpumask *allocated_mask;
+	const struct cpumask *node_mask;
 	const struct cpumask *hk_mask = housekeeping_cpumask(HK_TYPE_MANAGED_IRQ);
 	u32 target_cpu;
 	int numa_node;
 
 	if (!perf_chn ||
 	    !alloc_cpumask_var(&available_mask, GFP_KERNEL) ||
-	    cpumask_empty(hk_mask)) {
+	    !cpumask_intersects(hk_mask, cpu_online_mask)) {
 		/*
 		 * If the channel is not a performance critical
 		 * channel, bind it to VMBUS_CONNECT_CPU.
@@ -772,14 +794,19 @@ static void init_vp_index(struct vmbus_channel *channel)
 				next_numa_node_id = 0;
 				continue;
 			}
-			if (cpumask_empty(cpumask_of_node(numa_node)))
+			/*
+			 * Try next NUMA node if current NUMA node has no CPU
+			 * or doesn't contain any housekeeping CPU.
+			 */
+			node_mask = cpumask_of_node(numa_node);
+			if (!cpumask_intersects(node_mask, hk_mask))
 				continue;
 			break;
 		}
 		allocated_mask = &hv_context.hv_numa_map[numa_node];
 
 retry:
-		cpumask_xor(available_mask, allocated_mask, cpumask_of_node(numa_node));
+		cpumask_xor(available_mask, allocated_mask, node_mask);
 		cpumask_and(available_mask, available_mask, hk_mask);
 
 		if (cpumask_empty(available_mask)) {
@@ -844,14 +871,14 @@ static void vmbus_wait_for_unload(void)
 				= per_cpu_ptr(hv_context.cpu_context, cpu);
 
 			/*
-			 * In a CoCo VM the synic_message_page is not allocated
+			 * In a CoCo VM the hyp_synic_message_page is not allocated
 			 * in hv_synic_alloc(). Instead it is set/cleared in
 			 * hv_synic_enable_regs() and hv_synic_disable_regs()
 			 * such that it is set only when the CPU is online. If
 			 * not all present CPUs are online, the message page
 			 * might be NULL, so skip such CPUs.
 			 */
-			page_addr = hv_cpu->synic_message_page;
+			page_addr = hv_cpu->hyp_synic_message_page;
 			if (!page_addr)
 				continue;
 
@@ -892,7 +919,7 @@ completed:
 		struct hv_per_cpu_context *hv_cpu
 			= per_cpu_ptr(hv_context.cpu_context, cpu);
 
-		page_addr = hv_cpu->synic_message_page;
+		page_addr = hv_cpu->hyp_synic_message_page;
 		if (!page_addr)
 			continue;
 
@@ -1253,7 +1280,14 @@ static void vmbus_onoffer_rescind(struct vmbus_channel_message_header *hdr)
 		 * 2. Then close the primary channel.
 		 */
 		mutex_lock(&vmbus_connection.channel_mutex);
-		if (channel->state == CHANNEL_OPEN_STATE) {
+		if (channel->closer_owns) {
+			/*
+			 * The closer has claimed this channel and tears it
+			 * down itself; freeing it here would leave it on freed
+			 * memory.  Publish the completion instead.
+			 */
+			complete(&channel->rescind_event);
+		} else if (channel->state == CHANNEL_OPEN_STATE) {
 			/*
 			 * The channel is currently not open;
 			 * it is safe for us to cleanup the channel.

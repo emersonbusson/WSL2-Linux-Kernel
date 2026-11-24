@@ -1450,7 +1450,7 @@ skip_defrtr:
 					      BASE_REACHABLE_TIME, rtime);
 				NEIGH_VAR_SET(in6_dev->nd_parms,
 					      GC_STALETIME, 3 * rtime);
-				in6_dev->nd_parms->reachable_time = neigh_rand_reach_time(rtime);
+				neigh_set_reach_time(in6_dev->nd_parms);
 				in6_dev->tstamp = jiffies;
 				send_ifinfo_notify = true;
 			}
@@ -1706,6 +1706,8 @@ void ndisc_send_redirect(struct sk_buff *skb, const struct in6_addr *target)
 	}
 
 	peer = inet_getpeer_v6(net->ipv6.peers, &ipv6_hdr(skb)->saddr);
+	if (!peer)
+		goto release;
 	ret = inet_peer_xrlim_allow(peer, 1*HZ);
 
 	if (!ret)
@@ -1949,9 +1951,9 @@ int ndisc_ifinfo_sysctl_change(const struct ctl_table *ctl, int write, void *buf
 		ret = -1;
 
 	if (write && ret == 0 && dev && (idev = in6_dev_get(dev)) != NULL) {
-		if (ctl->data == &NEIGH_VAR(idev->nd_parms, BASE_REACHABLE_TIME))
-			idev->nd_parms->reachable_time =
-					neigh_rand_reach_time(NEIGH_VAR(idev->nd_parms, BASE_REACHABLE_TIME));
+		if (ctl->data == NEIGH_VAR_PTR(idev->nd_parms, BASE_REACHABLE_TIME))
+			neigh_set_reach_time(idev->nd_parms);
+
 		WRITE_ONCE(idev->tstamp, jiffies);
 		inet6_ifinfo_notify(RTM_NEWLINK, idev);
 		in6_dev_put(idev);

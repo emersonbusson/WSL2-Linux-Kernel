@@ -1467,6 +1467,31 @@ static bool gc_worker_can_early_drop(const struct nf_conn *ct)
 	return false;
 }
 
+static void nf_ct_help_gc(struct nf_conn *ct)
+{
+	struct nf_conn_help *help;
+
+	if (!refcount_inc_not_zero(&ct->ct_general.use))
+		return;
+
+	/* load ->status after refcount increase */
+	smp_acquire__after_ctrl_dep();
+
+	if (!nf_ct_is_confirmed(ct) || nf_ct_is_dying(ct)) {
+		nf_ct_put(ct);
+		return;
+	}
+
+	/* re-check helper due to SLAB_TYPESAFE_BY_RCU */
+	if (test_bit(IPS_HELPER_BIT, &ct->status)) {
+		help = nfct_help(ct);
+		if (help)
+			nf_ct_expectation_gc(help);
+	}
+
+	nf_ct_put(ct);
+}
+
 static void gc_worker(struct work_struct *work)
 {
 	unsigned int i, hashsz, nf_conntrack_max95 = 0;
@@ -1539,7 +1564,13 @@ static void gc_worker(struct work_struct *work)
 			expires = (expires - (long)next_run) / ++count;
 			next_run += expires;
 
-			if (nf_conntrack_max95 == 0 || gc_worker_skip_ct(tmp))
+			if (gc_worker_skip_ct(tmp))
+				continue;
+
+			if (test_bit(IPS_HELPER_BIT, &tmp->status))
+				nf_ct_help_gc(tmp);
+
+			if (nf_conntrack_max95 == 0)
 				continue;
 
 			net = nf_ct_net(tmp);
@@ -1690,15 +1721,17 @@ void nf_conntrack_free(struct nf_conn *ct)
 	 */
 	WARN_ON(refcount_read(&ct->ct_general.use) != 0);
 
+	rcu_read_lock();
 	if (ct->status & IPS_SRC_NAT_DONE) {
 		const struct nf_nat_hook *nat_hook;
 
-		rcu_read_lock();
 		nat_hook = rcu_dereference(nf_nat_hook);
 		if (nat_hook)
 			nat_hook->remove_nat_bysrc(ct);
-		rcu_read_unlock();
 	}
+
+	nf_ct_timeout_put(ct);
+	rcu_read_unlock();
 
 	kfree(ct->ext);
 	kmem_cache_free(nf_conntrack_cachep, ct);
@@ -1771,14 +1804,17 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 		spin_lock_bh(&nf_conntrack_expect_lock);
 		exp = nf_ct_find_expectation(net, zone, tuple, !tmpl || nf_ct_is_confirmed(tmpl));
 		if (exp) {
+			struct nf_conntrack_helper *assign_helper;
+
 			/* Welcome, Mr. Bond.  We've been expecting you... */
 			__set_bit(IPS_EXPECTED_BIT, &ct->status);
 			/* exp->master safe, refcnt bumped in nf_ct_find_expectation */
 			ct->master = exp->master;
-			if (exp->helper) {
+			assign_helper = rcu_dereference(exp->assign_helper);
+			if (assign_helper) {
 				help = nf_ct_helper_ext_add(ct, GFP_ATOMIC);
 				if (help)
-					rcu_assign_pointer(help->helper, exp->helper);
+					rcu_assign_pointer(help->helper, assign_helper);
 			}
 
 #ifdef CONFIG_NF_CONNTRACK_MARK

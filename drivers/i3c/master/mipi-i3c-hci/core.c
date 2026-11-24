@@ -21,6 +21,7 @@
 #include "ext_caps.h"
 #include "cmd.h"
 #include "dat.h"
+#include "ibi.h"
 
 
 /*
@@ -119,6 +120,7 @@ static inline struct i3c_hci *to_i3c_hci(struct i3c_master_controller *m)
 static int i3c_hci_bus_init(struct i3c_master_controller *m)
 {
 	struct i3c_hci *hci = to_i3c_hci(m);
+	struct device *dev = hci->master.dev.parent;
 	struct i3c_device_info info;
 	int ret;
 
@@ -139,6 +141,10 @@ static int i3c_hci_bus_init(struct i3c_master_controller *m)
 	if (ret)
 		return ret;
 
+	hci->ibi_devs = devm_kcalloc(dev, hci->DAT_entries, sizeof(*hci->ibi_devs), GFP_KERNEL);
+	if (!hci->ibi_devs)
+		return -ENOMEM;
+
 	ret = hci->io->init(hci);
 	if (ret)
 		return ret;
@@ -147,7 +153,10 @@ static int i3c_hci_bus_init(struct i3c_master_controller *m)
 	if (hci->quirks & HCI_QUIRK_RESP_BUF_THLD)
 		amd_set_resp_buf_thld(hci);
 
-	reg_set(HC_CONTROL, HC_CONTROL_BUS_ENABLE);
+	WRITE_ONCE(hci->irq_inactive, false);
+
+	/* Enable bus with Hot-Join disabled */
+	reg_set(HC_CONTROL, HC_CONTROL_BUS_ENABLE | HC_CONTROL_HOT_JOIN_CTRL);
 	dev_dbg(&hci->master.dev, "HC_CONTROL = %#x", reg_read(HC_CONTROL));
 
 	return 0;
@@ -474,12 +483,38 @@ static int i3c_hci_request_ibi(struct i3c_dev_desc *dev,
 	return hci->io->request_ibi(hci, dev, req);
 }
 
+static void __i3c_hci_disable_ibi(struct i3c_hci *hci, struct i3c_dev_desc *dev)
+{
+	struct i3c_hci_dev_data *dev_data = i3c_dev_get_master_data(dev);
+
+	mipi_i3c_hci_dat_v1.set_flags(hci, dev_data->dat_idx, DAT_0_SIR_REJECT, 0);
+	scoped_guard(spinlock_irqsave, &hci->lock)
+		hci->ibi_devs[dev_data->dat_idx] = NULL;
+}
+
 static void i3c_hci_free_ibi(struct i3c_dev_desc *dev)
 {
 	struct i3c_master_controller *m = i3c_dev_get_master(dev);
 	struct i3c_hci *hci = to_i3c_hci(m);
 
+	/* Must ensure the IBI has been disabled */
+	__i3c_hci_disable_ibi(hci, dev);
 	hci->io->free_ibi(hci, dev);
+}
+
+struct i3c_dev_desc *i3c_hci_addr_to_dev(struct i3c_hci *hci, unsigned int addr)
+{
+	int dat_idx;
+
+	lockdep_assert_held(&hci->lock);
+
+	for (dat_idx = 0; dat_idx < hci->DAT_entries; dat_idx++) {
+		struct i3c_dev_desc *dev = hci->ibi_devs[dat_idx];
+
+		if (dev && dev->info.dyn_addr == addr)
+			return dev;
+	}
+	return NULL;
 }
 
 static int i3c_hci_enable_ibi(struct i3c_dev_desc *dev)
@@ -489,6 +524,8 @@ static int i3c_hci_enable_ibi(struct i3c_dev_desc *dev)
 	struct i3c_hci_dev_data *dev_data = i3c_dev_get_master_data(dev);
 
 	mipi_i3c_hci_dat_v1.clear_flags(hci, dev_data->dat_idx, DAT_0_SIR_REJECT, 0);
+	scoped_guard(spinlock_irqsave, &hci->lock)
+		hci->ibi_devs[dev_data->dat_idx] = dev;
 	return i3c_master_enec_locked(m, dev->info.dyn_addr, I3C_CCC_EVENT_SIR);
 }
 
@@ -496,9 +533,8 @@ static int i3c_hci_disable_ibi(struct i3c_dev_desc *dev)
 {
 	struct i3c_master_controller *m = i3c_dev_get_master(dev);
 	struct i3c_hci *hci = to_i3c_hci(m);
-	struct i3c_hci_dev_data *dev_data = i3c_dev_get_master_data(dev);
 
-	mipi_i3c_hci_dat_v1.set_flags(hci, dev_data->dat_idx, DAT_0_SIR_REJECT, 0);
+	__i3c_hci_disable_ibi(hci, dev);
 	return i3c_master_disec_locked(m, dev->info.dyn_addr, I3C_CCC_EVENT_SIR);
 }
 
@@ -535,6 +571,15 @@ static irqreturn_t i3c_hci_irq_handler(int irq, void *dev_id)
 	struct i3c_hci *hci = dev_id;
 	irqreturn_t result = IRQ_NONE;
 	u32 val;
+
+	/*
+	 * The IRQ can be shared, so the handler may be called when the IRQ is
+	 * due to a different device. That could happen before the controller
+	 * has been initialized, so exit immediately if IRQs are not expected
+	 * for this device.
+	 */
+	if (READ_ONCE(hci->irq_inactive))
+		return IRQ_NONE;
 
 	val = reg_read(INTR_STATUS);
 	reg_write(INTR_STATUS, val);
@@ -774,6 +819,8 @@ static int i3c_hci_probe(struct platform_device *pdev)
 	ret = i3c_hci_init(hci);
 	if (ret)
 		return ret;
+
+	WRITE_ONCE(hci->irq_inactive, true);
 
 	irq = platform_get_irq(pdev, 0);
 	ret = devm_request_irq(&pdev->dev, irq, i3c_hci_irq_handler,
