@@ -777,11 +777,14 @@ struct vmbus_device {
 
 #define VMBUS_DEFAULT_MAX_PKT_SIZE 4096
 
-struct vmbus_gpadl {
-	u32 gpadl_handle;
+struct vmbus_buffer {
+	void *addr;
+	struct page **chunks;
+	struct page **pages;
 	u32 size;
-	void *buffer;
-	bool decrypted;
+	u32 chunk_cnt;
+	u32 gpadl_handle;
+	bool leak;
 };
 
 struct vmbus_channel {
@@ -810,10 +813,8 @@ struct vmbus_channel {
 	bool closer_owns;
 	struct completion rescind_event;
 
-	struct vmbus_gpadl ringbuffer_gpadlhandle;
-
-	/* Allocated memory for ring buffer */
-	struct page *ringbuffer_page;
+	/* Allocated memory and GPADL state for ring buffer */
+	struct vmbus_buffer ringbuffer;
 	u32 ringbuffer_pagecount;
 	u32 ringbuffer_send_offset;
 	struct hv_ring_buffer_info outbound;	/* send to parent */
@@ -1207,13 +1208,15 @@ extern int vmbus_sendpacket_mpb_desc(struct vmbus_channel *channel,
 				     u32 bufferlen,
 				     u64 requestid);
 
+extern int vmbus_alloc_buffer(struct vmbus_channel *channel, u32 size,
+			      bool confidential, struct vmbus_buffer *buffer);
+extern void vmbus_free_buffer(struct vmbus_buffer *buffer);
+
 extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
-				      void *kbuffer,
-				      u32 size,
-				      struct vmbus_gpadl *gpadl);
+				 struct vmbus_buffer *buffer);
 
 extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
-				     struct vmbus_gpadl *gpadl);
+				struct vmbus_buffer *buffer);
 
 void vmbus_reset_channel_cb(struct vmbus_channel *channel);
 

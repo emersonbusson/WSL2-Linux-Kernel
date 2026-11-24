@@ -12,6 +12,9 @@
 #include <linux/sched.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
+#include <linux/overflow.h>
+#include <linux/log2.h>
+#include <linux/vmalloc.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/hyperv.h>
@@ -152,15 +155,7 @@ void vmbus_free_ring(struct vmbus_channel *channel)
 {
 	hv_ringbuffer_cleanup(&channel->outbound);
 	hv_ringbuffer_cleanup(&channel->inbound);
-
-	if (channel->ringbuffer_page) {
-		/* In a CoCo VM leak the memory if it didn't get re-encrypted */
-		if (!channel->ringbuffer_gpadlhandle.decrypted)
-			__free_pages(channel->ringbuffer_page,
-			     get_order(channel->ringbuffer_pagecount
-				       << PAGE_SHIFT));
-		channel->ringbuffer_page = NULL;
-	}
+	vmbus_free_buffer(&channel->ringbuffer);
 }
 EXPORT_SYMBOL_GPL(vmbus_free_ring);
 
@@ -168,25 +163,33 @@ EXPORT_SYMBOL_GPL(vmbus_free_ring);
 int vmbus_alloc_ring(struct vmbus_channel *newchannel,
 		     u32 send_size, u32 recv_size)
 {
-	struct page *page;
-	int order;
+	struct vmbus_buffer *buffer = &newchannel->ringbuffer;
+	u32 size, page_cnt, i;
+	int ret;
 
-	if (send_size % PAGE_SIZE || recv_size % PAGE_SIZE)
+	if (!send_size || !recv_size ||
+	    send_size % PAGE_SIZE || recv_size % PAGE_SIZE ||
+	    check_add_overflow(send_size, recv_size, &size))
 		return -EINVAL;
 
-	/* Allocate the ring buffer */
-	order = get_order(send_size + recv_size);
-	page = alloc_pages_node(cpu_to_node(newchannel->target_cpu),
-				GFP_KERNEL|__GFP_ZERO, order);
+	ret = vmbus_alloc_buffer(newchannel, size, newchannel->co_ring_buffer,
+				 buffer);
+	if (ret)
+		return ret;
 
-	if (!page)
-		page = alloc_pages(GFP_KERNEL|__GFP_ZERO, order);
-
-	if (!page)
+	page_cnt = size >> PAGE_SHIFT;
+	buffer->pages = kvcalloc(page_cnt, sizeof(*buffer->pages), GFP_KERNEL);
+	if (!buffer->pages) {
+		vmbus_free_buffer(buffer);
 		return -ENOMEM;
+	}
 
-	newchannel->ringbuffer_page = page;
-	newchannel->ringbuffer_pagecount = (send_size + recv_size) >> PAGE_SHIFT;
+	for (i = 0; i < page_cnt; i++)
+		buffer->pages[i] =
+			vmalloc_to_page(buffer->addr +
+					((unsigned long)i << PAGE_SHIFT));
+
+	newchannel->ringbuffer_pagecount = page_cnt;
 	newchannel->ringbuffer_send_offset = send_size >> PAGE_SHIFT;
 
 	return 0;
@@ -422,9 +425,9 @@ static int create_gpadl_header(enum hv_gpadl_type type, void *kbuffer,
  * @gpadl_handle: some funky thing
  */
 static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
-				   enum hv_gpadl_type type, void *kbuffer,
-				   u32 size, u32 send_offset,
-				   struct vmbus_gpadl *gpadl)
+				   enum hv_gpadl_type type,
+				   struct vmbus_buffer *buffer,
+				   u32 send_offset)
 {
 	struct vmbus_channel_gpadl_header *gpadlmsg;
 	struct vmbus_channel_gpadl_body *gpadl_body;
@@ -433,32 +436,18 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
 	struct list_head *curr;
 	u32 next_gpadl_handle;
 	unsigned long flags;
+	bool posted = false;
 	int ret = 0;
+
+	buffer->leak = false;
 
 	next_gpadl_handle =
 		(atomic_inc_return(&vmbus_connection.next_gpadl_handle) - 1);
 
-	ret = create_gpadl_header(type, kbuffer, size, send_offset, &msginfo);
-	if (ret) {
-		gpadl->decrypted = false;
+	ret = create_gpadl_header(type, buffer->addr, buffer->size,
+				  send_offset, &msginfo);
+	if (ret)
 		return ret;
-	}
-
-	/*
-	 * Set the "decrypted" flag to true for the set_memory_decrypted()
-	 * success case. In the failure case, the encryption state of the
-	 * memory is unknown. Leave "decrypted" as true to ensure the
-	 * memory will be leaked instead of going back on the free list.
-	 */
-	gpadl->decrypted = true;
-	ret = set_memory_decrypted((unsigned long)kbuffer,
-				   PFN_UP(size));
-	if (ret) {
-		dev_warn(&channel->device_obj->device,
-			 "Failed to set host visibility for new GPADL %d.\n",
-			 ret);
-		return ret;
-	}
 
 	init_completion(&msginfo->waitevent);
 	msginfo->waiting_channel = channel;
@@ -468,11 +457,9 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
 	gpadlmsg->child_relid = channel->offermsg.child_relid;
 	gpadlmsg->gpadl = next_gpadl_handle;
 
-
 	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
 	list_add_tail(&msginfo->msglistentry,
 		      &vmbus_connection.chn_msg_list);
-
 	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
 
 	if (channel->rescind) {
@@ -480,6 +467,7 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
 		goto cleanup;
 	}
 
+	posted = true;
 	ret = vmbus_post_msg(gpadlmsg, msginfo->msgsize -
 			     sizeof(*msginfo), true);
 
@@ -505,11 +493,11 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
 
 		if (ret != 0)
 			goto cleanup;
-
 	}
 	wait_for_completion(&msginfo->waitevent);
 
 	if (msginfo->response.gpadl_created.creation_status != 0) {
+		posted = false;
 		pr_err("Failed to establish GPADL: err = 0x%x\n",
 		       msginfo->response.gpadl_created.creation_status);
 
@@ -518,15 +506,14 @@ static int __vmbus_establish_gpadl(struct vmbus_channel *channel,
 	}
 
 	if (channel->rescind) {
+		posted = false;
 		ret = -ENODEV;
 		goto cleanup;
 	}
 
 	/* At this point, we received the gpadl created msg */
-	gpadl->gpadl_handle = gpadlmsg->gpadl;
-	gpadl->buffer = kbuffer;
-	gpadl->size = size;
-
+	buffer->gpadl_handle = gpadlmsg->gpadl;
+	posted = false;
 
 cleanup:
 	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
@@ -539,34 +526,148 @@ cleanup:
 
 	kfree(msginfo);
 
-	if (ret) {
-		/*
-		 * If set_memory_encrypted() fails, the decrypted flag is
-		 * left as true so the memory is leaked instead of being
-		 * put back on the free list.
-		 */
-		if (!set_memory_encrypted((unsigned long)kbuffer, PFN_UP(size)))
-			gpadl->decrypted = false;
-	}
+	if (ret && posted)
+		buffer->leak = true;
 
 	return ret;
 }
 
-/*
- * vmbus_establish_gpadl - Establish a GPADL for the specified buffer
- *
- * @channel: a channel
- * @kbuffer: from kmalloc or vmalloc
- * @size: page-size multiple
- * @gpadl_handle: some funky thing
- */
-int vmbus_establish_gpadl(struct vmbus_channel *channel, void *kbuffer,
-			  u32 size, struct vmbus_gpadl *gpadl)
+int vmbus_establish_gpadl(struct vmbus_channel *channel,
+			  struct vmbus_buffer *buffer)
 {
-	return __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, kbuffer, size,
-				       0U, gpadl);
+	return __vmbus_establish_gpadl(channel, HV_GPADL_BUFFER, buffer, 0U);
 }
 EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
+
+void vmbus_free_buffer(struct vmbus_buffer *buffer)
+{
+	u32 i;
+
+	kvfree(buffer->pages);
+	if (buffer->leak || buffer->gpadl_handle) {
+		kvfree(buffer->chunks);
+		memset(buffer, 0, sizeof(*buffer));
+		return;
+	}
+
+	if (!buffer->chunks) {
+		vfree(buffer->addr);
+		memset(buffer, 0, sizeof(*buffer));
+		return;
+	}
+
+	vunmap(buffer->addr);
+
+	for (i = 0; i < buffer->chunk_cnt; i++) {
+		unsigned long vaddr =
+			(unsigned long)page_address(buffer->chunks[i]);
+		unsigned int order = folio_order(page_folio(buffer->chunks[i]));
+
+		if (set_memory_encrypted(vaddr, 1U << order))
+			continue;
+		__free_pages(buffer->chunks[i], order);
+	}
+
+	kvfree(buffer->chunks);
+	memset(buffer, 0, sizeof(*buffer));
+}
+EXPORT_SYMBOL_GPL(vmbus_free_buffer);
+
+int vmbus_alloc_buffer(struct vmbus_channel *channel, u32 size,
+		       bool confidential, struct vmbus_buffer *buffer)
+{
+	unsigned long nr_pages;
+	unsigned long remaining;
+	unsigned long page_idx = 0;
+	struct page **chunks = NULL;
+	struct page **pages = NULL;
+	u32 chunk_cnt = 0;
+	void *addr;
+	u32 i;
+	int ret;
+
+	memset(buffer, 0, sizeof(*buffer));
+
+	if (!size || size > U32_MAX - PAGE_SIZE + 1)
+		return -EINVAL;
+
+	nr_pages = PFN_UP(size);
+	remaining = nr_pages;
+
+	if (!hv_is_isolation_supported() || confidential) {
+		addr = vzalloc_node(nr_pages << PAGE_SHIFT,
+				    cpu_to_node(channel->target_cpu));
+		if (!addr)
+			return -ENOMEM;
+
+		buffer->addr = addr;
+		buffer->size = nr_pages << PAGE_SHIFT;
+		return 0;
+	}
+
+	chunks = kvcalloc(nr_pages, sizeof(*chunks), GFP_KERNEL);
+	if (!chunks)
+		return -ENOMEM;
+
+	pages = kvmalloc_array(nr_pages, sizeof(*pages), GFP_KERNEL);
+	if (!pages) {
+		kvfree(chunks);
+		return -ENOMEM;
+	}
+
+	while (remaining) {
+		struct page *page;
+		unsigned int order = min_t(unsigned int, MAX_PAGE_ORDER,
+					   ilog2(remaining));
+		unsigned long chunk_pages;
+
+		page = NULL;
+		while (!page) {
+			gfp_t gfp = GFP_KERNEL | __GFP_COMP;
+
+			if (order > 0)
+				gfp |= __GFP_NORETRY | __GFP_NOWARN;
+			page = alloc_pages_node(cpu_to_node(channel->target_cpu),
+						gfp, order);
+			if (!page && order == 0)
+				goto err;
+			if (!page)
+				order--;
+		}
+
+		chunk_pages = 1UL << order;
+		ret = set_memory_decrypted((unsigned long)page_address(page),
+					   chunk_pages);
+		if (ret)
+			goto err;
+
+		chunks[chunk_cnt++] = page;
+		for (i = 0; i < chunk_pages; i++)
+			pages[page_idx++] = page + i;
+		remaining -= chunk_pages;
+	}
+
+	addr = vmap(pages, nr_pages, VM_MAP, pgprot_decrypted(PAGE_KERNEL));
+	if (!addr)
+		goto err;
+
+	memset(addr, 0, nr_pages << PAGE_SHIFT);
+
+	kvfree(pages);
+	buffer->addr = addr;
+	buffer->chunks = chunks;
+	buffer->size = nr_pages << PAGE_SHIFT;
+	buffer->chunk_cnt = chunk_cnt;
+	return 0;
+
+err:
+	kvfree(pages);
+	buffer->chunks = chunks;
+	buffer->chunk_cnt = chunk_cnt;
+	vmbus_free_buffer(buffer);
+	return -ENOMEM;
+}
+EXPORT_SYMBOL_GPL(vmbus_alloc_buffer);
 
 /**
  * request_arr_init - Allocates memory for the requestor array. Each slot
@@ -577,10 +678,13 @@ EXPORT_SYMBOL_GPL(vmbus_establish_gpadl);
  */
 static u64 *request_arr_init(u32 size)
 {
-	int i;
+	u32 i;
 	u64 *req_arr;
 
-	req_arr = kcalloc(size, sizeof(u64), GFP_KERNEL);
+	if (!size)
+		return NULL;
+
+	req_arr = kvcalloc(size, sizeof(u64), GFP_KERNEL);
 	if (!req_arr)
 		return NULL;
 
@@ -607,9 +711,9 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
 	if (!rqst_arr)
 		return -ENOMEM;
 
-	bitmap = bitmap_zalloc(size, GFP_KERNEL);
+	bitmap = kvzalloc(bitmap_size(size), GFP_KERNEL);
 	if (!bitmap) {
-		kfree(rqst_arr);
+		kvfree(rqst_arr);
 		return -ENOMEM;
 	}
 
@@ -628,8 +732,10 @@ static int vmbus_alloc_requestor(struct vmbus_requestor *rqstor, u32 size)
  */
 static void vmbus_free_requestor(struct vmbus_requestor *rqstor)
 {
-	kfree(rqstor->req_arr);
-	bitmap_free(rqstor->req_bitmap);
+	kvfree(rqstor->req_arr);
+	kvfree(rqstor->req_bitmap);
+	rqstor->req_arr = NULL;
+	rqstor->req_bitmap = NULL;
 }
 
 static int __vmbus_open(struct vmbus_channel *newchannel,
@@ -638,12 +744,16 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 {
 	struct vmbus_channel_open_channel *open_msg;
 	struct vmbus_channel_msginfo *open_info = NULL;
-	struct page *page = newchannel->ringbuffer_page;
+	struct vmbus_buffer *buffer = &newchannel->ringbuffer;
 	u32 send_pages, recv_pages;
 	unsigned long flags;
 	int err;
 
 	if (userdatalen > MAX_USER_DEFINED_BYTES)
+		return -EINVAL;
+
+	if (!buffer->addr || !buffer->pages || buffer->leak ||
+	    buffer->gpadl_handle)
 		return -EINVAL;
 
 	send_pages = newchannel->ringbuffer_send_offset;
@@ -666,23 +776,23 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 		newchannel->max_pkt_size = VMBUS_DEFAULT_MAX_PKT_SIZE;
 
 	/* Establish the gpadl for the ring buffer */
-	newchannel->ringbuffer_gpadlhandle.gpadl_handle = 0;
+	buffer->gpadl_handle = 0;
 
-	err = __vmbus_establish_gpadl(newchannel, HV_GPADL_RING,
-				      page_address(newchannel->ringbuffer_page),
-				      (send_pages + recv_pages) << PAGE_SHIFT,
-				      newchannel->ringbuffer_send_offset << PAGE_SHIFT,
-				      &newchannel->ringbuffer_gpadlhandle);
+	err = __vmbus_establish_gpadl(newchannel, HV_GPADL_RING, buffer,
+				      newchannel->ringbuffer_send_offset << PAGE_SHIFT);
 	if (err)
 		goto error_clean_ring;
 
 	err = hv_ringbuffer_init(&newchannel->outbound,
-				 page, send_pages, 0);
+				 buffer->pages, send_pages, 0,
+				 newchannel->co_ring_buffer);
 	if (err)
 		goto error_free_gpadl;
 
-	err = hv_ringbuffer_init(&newchannel->inbound, &page[send_pages],
-				 recv_pages, newchannel->max_pkt_size);
+	err = hv_ringbuffer_init(&newchannel->inbound,
+				 buffer->pages + send_pages,
+				 recv_pages, newchannel->max_pkt_size,
+				 newchannel->co_ring_buffer);
 	if (err)
 		goto error_free_gpadl;
 
@@ -702,8 +812,7 @@ static int __vmbus_open(struct vmbus_channel *newchannel,
 	open_msg->header.msgtype = CHANNELMSG_OPENCHANNEL;
 	open_msg->openid = newchannel->offermsg.child_relid;
 	open_msg->child_relid = newchannel->offermsg.child_relid;
-	open_msg->ringbuffer_gpadlhandle
-		= newchannel->ringbuffer_gpadlhandle.gpadl_handle;
+	open_msg->ringbuffer_gpadlhandle = buffer->gpadl_handle;
 	/*
 	 * The unit of ->downstream_ringbuffer_pageoffset is HV_HYP_PAGE and
 	 * the unit of ->ringbuffer_send_offset (i.e. send_pages) is PAGE, so
@@ -761,7 +870,7 @@ error_clean_msglist:
 error_free_info:
 	kfree(open_info);
 error_free_gpadl:
-	vmbus_teardown_gpadl(newchannel, &newchannel->ringbuffer_gpadlhandle);
+	vmbus_teardown_gpadl(newchannel, buffer);
 error_clean_ring:
 	hv_ringbuffer_cleanup(&newchannel->outbound);
 	hv_ringbuffer_cleanup(&newchannel->inbound);
@@ -807,17 +916,23 @@ EXPORT_SYMBOL_GPL(vmbus_open);
 /*
  * vmbus_teardown_gpadl -Teardown the specified GPADL handle
  */
-int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpadl)
+int vmbus_teardown_gpadl(struct vmbus_channel *channel,
+			 struct vmbus_buffer *buffer)
 {
 	struct vmbus_channel_gpadl_teardown *msg;
 	struct vmbus_channel_msginfo *info;
 	unsigned long flags;
-	int ret;
+	int ret = 0;
+
+	if (!buffer->gpadl_handle)
+		return 0;
 
 	info = kzalloc(sizeof(*info) +
 		       sizeof(struct vmbus_channel_gpadl_teardown), GFP_KERNEL);
-	if (!info)
+	if (!info) {
+		buffer->leak = true;
 		return -ENOMEM;
+	}
 
 	init_completion(&info->waitevent);
 	info->waiting_channel = channel;
@@ -826,7 +941,7 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
 
 	msg->header.msgtype = CHANNELMSG_GPADL_TEARDOWN;
 	msg->child_relid = channel->offermsg.child_relid;
-	msg->gpadl = gpadl->gpadl_handle;
+	msg->gpadl = buffer->gpadl_handle;
 
 	spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
 	list_add_tail(&info->msglistentry,
@@ -846,14 +961,7 @@ int vmbus_teardown_gpadl(struct vmbus_channel *channel, struct vmbus_gpadl *gpad
 
 	wait_for_completion(&info->waitevent);
 
-	gpadl->gpadl_handle = 0;
-
 post_msg_err:
-	/*
-	 * If the channel has been rescinded;
-	 * we will be awakened by the rescind
-	 * handler; set the error code to zero so we don't leak memory.
-	 */
 	if (channel->rescind)
 		ret = 0;
 
@@ -863,12 +971,10 @@ post_msg_err:
 
 	kfree(info);
 
-	ret = set_memory_encrypted((unsigned long)gpadl->buffer,
-				   PFN_UP(gpadl->size));
-	if (ret)
-		pr_warn("Fail to set mem host visibility in GPADL teardown %d.\n", ret);
-
-	gpadl->decrypted = ret;
+	if (!ret)
+		buffer->gpadl_handle = 0;
+	else
+		buffer->leak = true;
 
 	return ret;
 }
@@ -936,6 +1042,7 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
 	trace_vmbus_close_internal(msg, ret);
 
 	if (ret) {
+		channel->ringbuffer.leak = true;
 		pr_err("Close failed: close post msg return is %d\n", ret);
 		/*
 		 * If we failed to post the close msg,
@@ -944,8 +1051,8 @@ static int vmbus_close_internal(struct vmbus_channel *channel)
 	}
 
 	/* Tear down the gpadl for the channel's ring buffer */
-	else if (channel->ringbuffer_gpadlhandle.gpadl_handle) {
-		ret = vmbus_teardown_gpadl(channel, &channel->ringbuffer_gpadlhandle);
+	else if (channel->ringbuffer.gpadl_handle) {
+		ret = vmbus_teardown_gpadl(channel, &channel->ringbuffer);
 		if (ret) {
 			pr_err("Close failed: teardown gpadl return %d\n", ret);
 			/*

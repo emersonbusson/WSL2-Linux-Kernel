@@ -1724,8 +1724,11 @@ int create_existing_sysmem(struct dxgdevice *device,
 			ret = -ENOMEM;
 			goto cleanup;
 		}
-		ret1 = vmbus_establish_gpadl(dxgglobal_get_vmbus(), kmem,
-					alloc_size, &dxgalloc->gpadl);
+		memset(&dxgalloc->gpadl, 0, sizeof(dxgalloc->gpadl));
+		dxgalloc->gpadl.addr = kmem;
+		dxgalloc->gpadl.size = alloc_size;
+		ret1 = vmbus_establish_gpadl(dxgglobal_get_vmbus(),
+					     &dxgalloc->gpadl);
 		if (ret1) {
 			DXG_ERR("establish_gpadl failed: %d", ret1);
 			ret = -ENOMEM;

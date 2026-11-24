@@ -175,7 +175,8 @@ void hv_ringbuffer_pre_init(struct vmbus_channel *channel)
 
 /* Initialize the ring buffer. */
 int hv_ringbuffer_init(struct hv_ring_buffer_info *ring_info,
-		       struct page *pages, u32 page_cnt, u32 max_pkt_size)
+		       struct page **pages, u32 page_cnt, u32 max_pkt_size,
+		       bool confidential)
 {
 	struct page **pages_wraparound;
 	int i;
@@ -186,22 +187,21 @@ int hv_ringbuffer_init(struct hv_ring_buffer_info *ring_info,
 	 * First page holds struct hv_ring_buffer, do wraparound mapping for
 	 * the rest.
 	 */
-	pages_wraparound = kcalloc(page_cnt * 2 - 1,
-				   sizeof(struct page *),
-				   GFP_KERNEL);
+	pages_wraparound = kvcalloc(page_cnt * 2 - 1, sizeof(*pages_wraparound),
+				    GFP_KERNEL);
 	if (!pages_wraparound)
 		return -ENOMEM;
 
-	pages_wraparound[0] = pages;
+	pages_wraparound[0] = pages[0];
 	for (i = 0; i < 2 * (page_cnt - 1); i++)
 		pages_wraparound[i + 1] =
-			&pages[i % (page_cnt - 1) + 1];
+			pages[i % (page_cnt - 1) + 1];
 
 	ring_info->ring_buffer = (struct hv_ring_buffer *)
 		vmap(pages_wraparound, page_cnt * 2 - 1, VM_MAP,
-			pgprot_decrypted(PAGE_KERNEL));
+			confidential ? PAGE_KERNEL : pgprot_decrypted(PAGE_KERNEL));
 
-	kfree(pages_wraparound);
+	kvfree(pages_wraparound);
 	if (!ring_info->ring_buffer)
 		return -ENOMEM;
 
@@ -226,7 +226,7 @@ int hv_ringbuffer_init(struct hv_ring_buffer_info *ring_info,
 
 	/* Initialize buffer that holds copies of incoming packets */
 	if (max_pkt_size) {
-		ring_info->pkt_buffer = kzalloc(max_pkt_size, GFP_KERNEL);
+		ring_info->pkt_buffer = kvzalloc(max_pkt_size, GFP_KERNEL);
 		if (!ring_info->pkt_buffer)
 			return -ENOMEM;
 		ring_info->pkt_buffer_size = max_pkt_size;
@@ -245,7 +245,7 @@ void hv_ringbuffer_cleanup(struct hv_ring_buffer_info *ring_info)
 	ring_info->ring_buffer = NULL;
 	mutex_unlock(&ring_info->ring_buffer_mutex);
 
-	kfree(ring_info->pkt_buffer);
+	kvfree(ring_info->pkt_buffer);
 	ring_info->pkt_buffer = NULL;
 	ring_info->pkt_buffer_size = 0;
 }
