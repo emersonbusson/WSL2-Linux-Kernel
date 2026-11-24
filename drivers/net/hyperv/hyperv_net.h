@@ -222,6 +222,8 @@ extern u32 netvsc_ring_bytes;
 
 struct netvsc_device *netvsc_device_add(struct hv_device *device,
 					const struct netvsc_device_info *info);
+int netvsc_workqueue_init(void);
+void netvsc_workqueue_destroy(void);
 int netvsc_alloc_recv_comp_ring(struct netvsc_device *net_device, u32 q_idx);
 void netvsc_device_remove(struct hv_device *device);
 int netvsc_send(struct net_device *net,
@@ -1213,7 +1215,7 @@ struct netvsc_device {
 
 	struct netvsc_channel chan_table[VRSS_CHANNEL_MAX];
 
-	struct rcu_head rcu;
+	struct rcu_work rwork;
 };
 
 /* NdisInitialize message */

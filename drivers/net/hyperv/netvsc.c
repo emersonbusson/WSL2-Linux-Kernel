@@ -31,6 +31,8 @@
 
 static struct workqueue_struct *netvsc_wq;
 
+static struct workqueue_struct *netvsc_wq;
+
 static int netvsc_wait_for_nvsp_response(struct hv_device *device,
 					 struct netvsc_device *net_device)
 {
@@ -160,32 +162,8 @@ static void netvsc_subchan_work(struct work_struct *w)
 	rtnl_unlock();
 }
 
-static struct netvsc_device *alloc_net_device(void)
+static void __free_netvsc_device(struct netvsc_device *nvdev)
 {
-	struct netvsc_device *net_device;
-
-	net_device = kzalloc(sizeof(struct netvsc_device), GFP_KERNEL);
-	if (!net_device)
-		return NULL;
-
-	init_waitqueue_head(&net_device->wait_drain);
-	net_device->destroy = false;
-	net_device->tx_disable = true;
-
-	net_device->max_pkt = RNDIS_MAX_PKT_DEFAULT;
-	net_device->pkt_align = RNDIS_PKT_ALIGN_DEFAULT;
-
-	init_completion(&net_device->channel_init_wait);
-	init_waitqueue_head(&net_device->subchan_open);
-	INIT_WORK(&net_device->subchan_work, netvsc_subchan_work);
-
-	return net_device;
-}
-
-static void free_netvsc_device(struct rcu_head *head)
-{
-	struct netvsc_device *nvdev
-		= container_of(head, struct netvsc_device, rcu);
 	int i;
 
 	kfree(nvdev->extension);
@@ -205,9 +183,52 @@ static void free_netvsc_device(struct rcu_head *head)
 	kfree(nvdev);
 }
 
+static void free_netvsc_device(struct work_struct *w)
+{
+	struct rcu_work *rwork = to_rcu_work(w);
+
+	__free_netvsc_device(container_of(rwork, struct netvsc_device, rwork));
+}
+
+int netvsc_workqueue_init(void)
+{
+	netvsc_wq = alloc_workqueue("hv_netvsc", WQ_UNBOUND, 0);
+
+	return netvsc_wq ? 0 : -ENOMEM;
+}
+
+void netvsc_workqueue_destroy(void)
+{
+	rcu_barrier();
+	destroy_workqueue(netvsc_wq);
+}
+
+static struct netvsc_device *alloc_net_device(void)
+{
+	struct netvsc_device *net_device;
+
+	net_device = kzalloc(sizeof(struct netvsc_device), GFP_KERNEL);
+	if (!net_device)
+		return NULL;
+
+	init_waitqueue_head(&net_device->wait_drain);
+	net_device->destroy = false;
+	net_device->tx_disable = true;
+
+	net_device->max_pkt = RNDIS_MAX_PKT_DEFAULT;
+	net_device->pkt_align = RNDIS_PKT_ALIGN_DEFAULT;
+
+	init_completion(&net_device->channel_init_wait);
+	init_waitqueue_head(&net_device->subchan_open);
+	INIT_WORK(&net_device->subchan_work, netvsc_subchan_work);
+	INIT_RCU_WORK(&net_device->rwork, free_netvsc_device);
+
+	return net_device;
+}
+
 static void free_netvsc_device_rcu(struct netvsc_device *nvdev)
 {
-	call_rcu(&nvdev->rcu, free_netvsc_device);
+	queue_rcu_work(netvsc_wq, &nvdev->rwork);
 }
 
 static void netvsc_revoke_recv_buf(struct hv_device *device,
@@ -1923,7 +1944,7 @@ cleanup:
 	netif_napi_del(&net_device->chan_table[0].napi);
 
 cleanup2:
-	free_netvsc_device(&net_device->rcu);
+	__free_netvsc_device(net_device);
 
 	return ERR_PTR(ret);
 }
