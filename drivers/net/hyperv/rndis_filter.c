@@ -8,6 +8,7 @@
  */
 #include <linux/ethtool.h>
 #include <linux/kernel.h>
+#include <linux/kref.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
 #include <linux/highmem.h>
@@ -16,6 +17,7 @@
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
+#include <linux/mm.h>
 #include <linux/nls.h>
 #include <linux/vmalloc.h>
 #include <linux/rtnetlink.h>
@@ -28,9 +30,14 @@
 static void rndis_set_multicast(struct work_struct *w);
 
 #define RNDIS_EXT_LEN HV_HYP_PAGE_SIZE
+#define RNDIS_MAX_MSG_LEN (sizeof(struct rndis_message) + RNDIS_EXT_LEN)
+#define RNDIS_MAX_PAGE_BUFFERS \
+	(DIV_ROUND_UP(RNDIS_MAX_MSG_LEN, HV_HYP_PAGE_SIZE) + 1)
 struct rndis_request {
 	struct list_head list_ent;
 	struct completion  wait_event;
+	struct kref refcount;
+	struct rndis_device *dev;
 
 	struct rndis_message response_msg;
 	/*
@@ -87,11 +94,13 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
 	struct rndis_set_request *set;
 	unsigned long flags;
 
-	request = kzalloc(sizeof(struct rndis_request), GFP_KERNEL);
+	request = kvzalloc_obj(struct rndis_request);
 	if (!request)
 		return NULL;
 
 	init_completion(&request->wait_event);
+	kref_init(&request->refcount);
+	request->dev = dev;
 
 	rndis_msg = &request->request_msg;
 	rndis_msg->ndis_msg_type = msg_type;
@@ -115,16 +124,30 @@ static struct rndis_request *get_rndis_request(struct rndis_device *dev,
 	return request;
 }
 
+static void rndis_request_release(struct kref *ref)
+{
+	struct rndis_request *req =
+		container_of(ref, struct rndis_request, refcount);
+
+	if (req->dev->ndev) {
+		struct net_device_context *ndev_ctx =
+			netdev_priv(req->dev->ndev);
+
+		netvsc_dma_unmap(ndev_ctx->device_ctx, &req->pkt);
+	}
+	kvfree(req);
+}
+
 static void put_rndis_request(struct rndis_device *dev,
-			    struct rndis_request *req)
+			      struct rndis_request *req)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->request_lock, flags);
-	list_del(&req->list_ent);
+	list_del_init(&req->list_ent);
 	spin_unlock_irqrestore(&dev->request_lock, flags);
 
-	kfree(req);
+	kref_put(&req->refcount, rndis_request_release);
 }
 
 /*
@@ -254,27 +277,83 @@ static void dump_rndis_message(struct net_device *netdev,
 	}
 }
 
-static int rndis_filter_send_request(struct rndis_device *dev,
-				  struct rndis_request *req)
+static int rndis_build_page_buffers(const void *data, u32 len,
+				    struct hv_page_buffer *page_bufs,
+				    u32 max_bufs, u32 *page_buf_cnt)
 {
+	const u8 *addr = data;
+	u32 count = 0;
+
+	if (!data || !len || !page_bufs || !max_bufs || !page_buf_cnt)
+		return -EINVAL;
+
+	*page_buf_cnt = 0;
+
+	while (len) {
+		struct page *page;
+		phys_addr_t phys;
+		u32 offset, chunk;
+		unsigned long page_offset = offset_in_page(addr);
+
+		if (count == max_bufs)
+			return -E2BIG;
+
+		if (is_vmalloc_addr(addr))
+			page = vmalloc_to_page(addr);
+		else if (virt_addr_valid(addr))
+			page = virt_to_page(addr);
+		else
+			return -EFAULT;
+
+		if (!page)
+			return -EFAULT;
+
+		phys = page_to_phys(page) + page_offset;
+		offset = offset_in_hvpage(phys);
+		chunk = min_t(u32, len, PAGE_SIZE - page_offset);
+		chunk = min_t(u32, chunk, HV_HYP_PAGE_SIZE - offset);
+
+		page_bufs[count].pfn = phys >> HV_HYP_PAGE_SHIFT;
+		page_bufs[count].offset = offset;
+		page_bufs[count].len = chunk;
+
+		addr += chunk;
+		len -= chunk;
+		count++;
+	}
+
+	*page_buf_cnt = count;
+	return 0;
+}
+
+static int rndis_filter_send_request(struct rndis_device *dev,
+				     struct rndis_request *req)
+{
+	struct hv_page_buffer page_bufs[RNDIS_MAX_PAGE_BUFFERS];
 	struct hv_netvsc_packet *packet;
-	struct hv_page_buffer pb;
+	u32 page_buf_cnt;
 	int ret;
+
+	BUILD_BUG_ON(RNDIS_MAX_PAGE_BUFFERS > MAX_PAGE_BUFFER_COUNT);
+	if (req->request_msg.msg_len > RNDIS_MAX_MSG_LEN)
+		return -EMSGSIZE;
 
 	/* Setup the packet to send it */
 	packet = &req->pkt;
 
 	packet->total_data_buflen = req->request_msg.msg_len;
-	packet->page_buf_cnt = 1;
-
-	pb.pfn = virt_to_phys(&req->request_msg) >> HV_HYP_PAGE_SHIFT;
-	pb.len = req->request_msg.msg_len;
-	pb.offset = offset_in_hvpage(&req->request_msg);
+	ret = rndis_build_page_buffers(&req->request_msg,
+				       req->request_msg.msg_len,
+				       page_bufs, ARRAY_SIZE(page_bufs),
+				       &page_buf_cnt);
+	if (ret)
+		return ret;
+	packet->page_buf_cnt = page_buf_cnt;
 
 	trace_rndis_send(dev->ndev, 0, &req->request_msg);
 
 	rcu_read_lock_bh();
-	ret = netvsc_send(dev->ndev, packet, NULL, &pb, NULL, false);
+	ret = netvsc_send(dev->ndev, packet, NULL, page_bufs, NULL, false);
 	rcu_read_unlock_bh();
 
 	return ret;
@@ -345,6 +424,8 @@ static void rndis_filter_receive_response(struct net_device *ndev,
 		 * field
 		 */
 		if (request->request_msg.msg.init_req.req_id == *req_id) {
+			list_del_init(&request->list_ent);
+			kref_get(&request->refcount);
 			found = true;
 			break;
 		}
@@ -382,9 +463,8 @@ static void rndis_filter_receive_response(struct net_device *ndev,
 			}
 		}
 
-		netvsc_dma_unmap(((struct net_device_context *)
-			netdev_priv(ndev))->device_ctx, &request->pkt);
 		complete(&request->wait_event);
+		kref_put(&request->refcount, rndis_request_release);
 	} else {
 		netdev_err(ndev,
 			"no rndis request found for this response "

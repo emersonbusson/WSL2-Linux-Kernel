@@ -980,17 +980,17 @@ struct netvsc_stats_rx {
 };
 
 struct netvsc_ethtool_stats {
-	unsigned long tx_scattered;
-	unsigned long tx_no_memory;
-	unsigned long tx_no_space;
-	unsigned long tx_too_big;
-	unsigned long tx_busy;
-	unsigned long tx_send_full;
-	unsigned long rx_comp_busy;
-	unsigned long rx_no_memory;
-	unsigned long stop_queue;
-	unsigned long wake_queue;
-	unsigned long vlan_error;
+	atomic_long_t tx_scattered;
+	atomic_long_t tx_no_memory;
+	atomic_long_t tx_no_space;
+	atomic_long_t tx_too_big;
+	atomic_long_t tx_busy;
+	atomic_long_t tx_send_full;
+	atomic_long_t rx_comp_busy;
+	atomic_long_t rx_no_memory;
+	atomic_long_t stop_queue;
+	atomic_long_t wake_queue;
+	atomic_long_t vlan_error;
 };
 
 struct netvsc_ethtool_pcpu_stats {

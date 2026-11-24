@@ -470,14 +470,14 @@ static int netvsc_xmit(struct sk_buff *skb, struct net_device *net, bool xdp_tx)
 	num_data_pgs = netvsc_get_slots(skb) + 2;
 
 	if (unlikely(num_data_pgs > MAX_PAGE_BUFFER_COUNT)) {
-		++net_device_ctx->eth_stats.tx_scattered;
+		atomic_long_inc(&net_device_ctx->eth_stats.tx_scattered);
 
 		if (skb_linearize(skb))
 			goto no_memory;
 
 		num_data_pgs = netvsc_get_slots(skb) + 2;
 		if (num_data_pgs > MAX_PAGE_BUFFER_COUNT) {
-			++net_device_ctx->eth_stats.tx_too_big;
+			atomic_long_inc(&net_device_ctx->eth_stats.tx_too_big);
 			goto drop;
 		}
 	}
@@ -536,7 +536,7 @@ static int netvsc_xmit(struct sk_buff *skb, struct net_device *net, bool xdp_tx)
 		skb_reset_mac_header(skb);
 		if (eth_type_vlan(eth_hdr(skb)->h_proto)) {
 			if (unlikely(__skb_vlan_pop(skb, &vlan_tci) != 0)) {
-				++net_device_ctx->eth_stats.vlan_error;
+				atomic_long_inc(&net_device_ctx->eth_stats.vlan_error);
 				goto drop;
 			}
 
@@ -633,12 +633,12 @@ static int netvsc_xmit(struct sk_buff *skb, struct net_device *net, bool xdp_tx)
 		return NETDEV_TX_OK;
 
 	if (ret == -EAGAIN) {
-		++net_device_ctx->eth_stats.tx_busy;
+		atomic_long_inc(&net_device_ctx->eth_stats.tx_busy);
 		return NETDEV_TX_BUSY;
 	}
 
 	if (ret == -ENOSPC)
-		++net_device_ctx->eth_stats.tx_no_space;
+		atomic_long_inc(&net_device_ctx->eth_stats.tx_no_space);
 
 drop:
 	dev_kfree_skb_any(skb);
@@ -647,7 +647,7 @@ drop:
 	return NETDEV_TX_OK;
 
 no_memory:
-	++net_device_ctx->eth_stats.tx_no_memory;
+	atomic_long_inc(&net_device_ctx->eth_stats.tx_no_memory);
 	goto drop;
 }
 
@@ -870,7 +870,7 @@ int netvsc_recv_callback(struct net_device *net,
 	skb = netvsc_alloc_recv_skb(net, nvchan, &xdp);
 
 	if (unlikely(!skb)) {
-		++net_device_ctx->eth_stats.rx_no_memory;
+		atomic_long_inc(&net_device_ctx->eth_stats.rx_no_memory);
 		return NVSP_STAT_FAIL;
 	}
 
@@ -1489,8 +1489,11 @@ static void netvsc_get_ethtool_stats(struct net_device *dev,
 	if (!nvdev)
 		return;
 
-	for (i = 0; i < NETVSC_GLOBAL_STATS_LEN; i++)
-		data[i] = *(unsigned long *)(nds + netvsc_stats[i].offset);
+	for (i = 0; i < NETVSC_GLOBAL_STATS_LEN; i++) {
+		const atomic_long_t *stat = nds + netvsc_stats[i].offset;
+
+		data[i] = (unsigned long)atomic_long_read(stat);
+	}
 
 	netvsc_get_vf_stats(dev, &sum);
 	for (j = 0; j < NETVSC_VF_STATS_LEN; j++)

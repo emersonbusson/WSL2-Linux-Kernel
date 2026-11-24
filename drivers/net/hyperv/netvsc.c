@@ -173,12 +173,13 @@ static void __free_netvsc_device(struct netvsc_device *nvdev)
 	bitmap_free(nvdev->send_section_map);
 
 	for (i = 0; i < VRSS_CHANNEL_MAX; i++) {
-		xdp_rxq_info_unreg(&nvdev->chan_table[i].xdp_rxq);
+		if (xdp_rxq_info_is_reg(&nvdev->chan_table[i].xdp_rxq))
+			xdp_rxq_info_unreg(&nvdev->chan_table[i].xdp_rxq);
 		kfree(nvdev->chan_table[i].recv_buf);
 		vfree(nvdev->chan_table[i].mrc.slots);
 	}
 
-	kfree(nvdev);
+	kvfree(nvdev);
 }
 
 static void free_netvsc_device(struct work_struct *w)
@@ -205,7 +206,7 @@ static struct netvsc_device *alloc_net_device(void)
 {
 	struct netvsc_device *net_device;
 
-	net_device = kzalloc(sizeof(struct netvsc_device), GFP_KERNEL);
+	net_device = kvzalloc_obj(struct netvsc_device);
 	if (!net_device)
 		return NULL;
 
@@ -837,15 +838,36 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
 {
 	struct net_device_context *ndev_ctx = netdev_priv(ndev);
 	struct sk_buff *skb;
+	unsigned long flags;
 	u16 q_idx = 0;
 	int queue_sends;
 	u64 cmd_rqst;
 
-	cmd_rqst = channel->request_addr_callback(channel, desc->trans_id);
-	if (cmd_rqst == VMBUS_RQST_ERROR) {
-		netdev_err(ndev, "Invalid transaction ID %llx\n", desc->trans_id);
+	if (!channel->rqstor_size) {
+		netdev_err(ndev, "Invalid transaction ID %llx\n",
+			   desc->trans_id);
 		return;
 	}
+
+	lock_requestor(channel, flags);
+	cmd_rqst = __vmbus_request_addr_match(channel, desc->trans_id,
+					      VMBUS_RQST_ERROR);
+	if (cmd_rqst == VMBUS_RQST_ERROR || cmd_rqst == VMBUS_NO_RQSTOR) {
+		unlock_requestor(channel, flags);
+		netdev_err(ndev, "Invalid transaction ID %llx\n",
+			   desc->trans_id);
+		return;
+	}
+	if (cmd_rqst == (unsigned long)&net_device->channel_init_pkt) {
+		unlock_requestor(channel, flags);
+		if (net_ratelimit())
+			netdev_err(ndev,
+				   "Unexpected TX completion for init packet %llx\n",
+				   desc->trans_id);
+		return;
+	}
+	__vmbus_request_addr_match(channel, desc->trans_id, cmd_rqst);
+	unlock_requestor(channel, flags);
 
 	skb = (struct sk_buff *)(unsigned long)cmd_rqst;
 
@@ -884,7 +906,7 @@ static void netvsc_send_tx_complete(struct net_device *ndev,
 		    (hv_get_avail_to_write_percent(&channel->outbound) >
 		     RING_AVAIL_PERCENT_HIWATER || queue_sends < 1)) {
 			netif_tx_wake_queue(txq);
-			ndev_ctx->eth_stats.wake_queue++;
+			atomic_long_inc(&ndev_ctx->eth_stats.wake_queue);
 		}
 	}
 }
@@ -903,10 +925,28 @@ static void netvsc_send_completion(struct net_device *ndev,
 
 	/* First check if this is a VMBUS completion without data payload */
 	if (!msglen) {
-		cmd_rqst = incoming_channel->request_addr_callback(incoming_channel,
-								   desc->trans_id);
-		if (cmd_rqst == VMBUS_RQST_ERROR) {
-			netdev_err(ndev, "Invalid transaction ID %llx\n", desc->trans_id);
+		unsigned long init_pkt =
+			(unsigned long)&net_device->channel_init_pkt;
+
+		if (!incoming_channel->rqstor_size) {
+			netdev_err(ndev, "Invalid transaction ID %llx\n",
+				   desc->trans_id);
+			return;
+		}
+
+		cmd_rqst = vmbus_request_addr_match(incoming_channel,
+						    desc->trans_id, init_pkt);
+		if (cmd_rqst == VMBUS_RQST_ERROR ||
+		    cmd_rqst == VMBUS_NO_RQSTOR) {
+			netdev_err(ndev, "Invalid transaction ID %llx\n",
+				   desc->trans_id);
+			return;
+		}
+		if (cmd_rqst != init_pkt) {
+			if (net_ratelimit())
+				netdev_err(ndev,
+					   "Unexpected empty completion for trans_id %llx\n",
+					   desc->trans_id);
 			return;
 		}
 
@@ -1079,6 +1119,7 @@ void netvsc_dma_unmap(struct hv_device *hv_dev,
 				 DMA_TO_DEVICE);
 
 	kfree(packet->dma_range);
+	packet->dma_range = NULL;
 }
 
 /* netvsc_dma_map - Map swiotlb bounce buffer with data page of
@@ -1124,7 +1165,13 @@ static int netvsc_dma_map(struct hv_device *hv_dev,
 		dma = dma_map_single(&hv_dev->device, src, len,
 				     DMA_TO_DEVICE);
 		if (dma_mapping_error(&hv_dev->device, dma)) {
+			while (i--)
+				dma_unmap_single(&hv_dev->device,
+						 packet->dma_range[i].dma,
+						 packet->dma_range[i].mapping_size,
+						 DMA_TO_DEVICE);
 			kfree(packet->dma_range);
+			packet->dma_range = NULL;
 			return -ENOMEM;
 		}
 
@@ -1250,11 +1297,11 @@ exit:
 
 		if (ring_avail < RING_AVAIL_PERCENT_LOWATER) {
 			netif_tx_stop_queue(txq);
-			ndev_ctx->eth_stats.stop_queue++;
+			atomic_long_inc(&ndev_ctx->eth_stats.stop_queue);
 		}
 	} else if (ret == -EAGAIN) {
 		netif_tx_stop_queue(txq);
-		ndev_ctx->eth_stats.stop_queue++;
+		atomic_long_inc(&ndev_ctx->eth_stats.stop_queue);
 	} else {
 		netdev_err(ndev,
 			   "Unable to send packet pages %u len %u, ret %d\n",
@@ -1266,7 +1313,7 @@ exit:
 	    atomic_read(&nvchan->queue_sends) < 1 &&
 	    !net_device->tx_disable) {
 		netif_tx_wake_queue(txq);
-		ndev_ctx->eth_stats.wake_queue++;
+		atomic_long_inc(&ndev_ctx->eth_stats.wake_queue);
 		if (ret == -EAGAIN)
 			ret = -ENOSPC;
 	}
@@ -1361,7 +1408,7 @@ int netvsc_send(struct net_device *ndev,
 		   net_device->send_section_size) {
 		section_index = netvsc_get_next_send_section(net_device);
 		if (unlikely(section_index == NETVSC_INVALID_INDEX)) {
-			++ndev_ctx->eth_stats.tx_send_full;
+			atomic_long_inc(&ndev_ctx->eth_stats.tx_send_full);
 		} else {
 			move_pkt_msd(&msd_send, &msd_skb, msdp);
 			msd_len = 0;
@@ -1458,7 +1505,7 @@ static int send_recv_completions(struct net_device *ndev,
 		if (unlikely(ret)) {
 			struct net_device_context *ndev_ctx = netdev_priv(ndev);
 
-			++ndev_ctx->eth_stats.rx_comp_busy;
+			atomic_long_inc(&ndev_ctx->eth_stats.rx_comp_busy);
 			return ret;
 		}
 
